@@ -232,7 +232,7 @@ class SettingsApiTests(Case):
         self.assertEqual((response.status_code, response.json()["mode"]), (200, "recent"))
         self.assertEqual(self.client.get("/api/live-ready").json()["mode"], "recent")
         with connect() as db:
-            self.assertEqual(db.execute("SELECT details_json FROM audit_log WHERE action='live_ready_updated'").fetchone()[0], json.dumps({"from": "all", "to": "recent"}, separators=(",", ":")))
+            self.assertEqual(json.loads(db.execute("SELECT details_json FROM audit_log WHERE action='live_ready_updated'").fetchone()[0]), {"from": "all", "to": "recent"})
         self.assertEqual(self.client.put("/api/live-ready", json={"mode": "sometimes"}).status_code, 422)
 
     def test_an_operator_cannot_read_or_change_it(self):
