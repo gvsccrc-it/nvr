@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -10,6 +9,7 @@ from pydantic import BaseModel, Field
 from app import backfill
 from app.principal import Administrator, CurrentUser
 from app.store import connect
+from app.audit import record as audit_record
 
 router = APIRouter()
 
@@ -44,9 +44,7 @@ async def put_backfill(camera_id: str, payload: BackfillSettings, user: Administ
                 # Switching it on again is how an administrator asks for a new look at a camera found unsupported; waiting jobs of that kind try again.
                 db.execute("UPDATE cameras SET backfill_support=NULL,backfill_support_message=NULL,backfill_checked_at=NULL WHERE id=?", (camera_id,))
                 db.execute("UPDATE backfill_jobs SET state='pending',message='',attempts=0,next_attempt_at=NULL WHERE camera_id=? AND state IN ('unsupported','failed')", (camera_id,))
-            db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-                       (int(user["id"]), "backfill_settings_changed", "camera", camera_id,
-                        json.dumps({"enabled": payload.enabled, "limit_kbps": payload.limit_kbps, "was_enabled": bool(before["backfill_enabled"]), "was_limit_kbps": before["backfill_limit_kbps"]})))
+            audit_record(db, int(user["id"]), "backfill_settings_changed", "camera", camera_id, enabled=payload.enabled, limit_kbps=payload.limit_kbps, was_enabled=bool(before["backfill_enabled"]), was_limit_kbps=before["backfill_limit_kbps"])
         return before
 
     before = await asyncio.to_thread(save)

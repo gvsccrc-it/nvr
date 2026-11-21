@@ -1,7 +1,6 @@
 """Retention purposes, the record of automatic deletions, and the generated camera notice and data-protection summary (#139). Administrators only."""
 from __future__ import annotations
 
-import json
 from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Query
@@ -11,6 +10,7 @@ from pydantic import BaseModel, Field
 from app import notices
 from app.principal import Administrator
 from app.store import connect
+from app.audit import record as audit_record
 
 router = APIRouter()
 
@@ -46,8 +46,7 @@ def put_settings(body: SettingsBody, user: Administrator) -> dict[str, object]:
         db.execute("BEGIN IMMEDIATE")
         try:
             notices.save_settings(db, body.model_dump(exclude_none=True))
-            db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-                       (int(user["id"]), "privacy_settings_updated", "privacy_settings", "1", json.dumps({"require_purpose": body.require_purpose}, separators=(",", ":"))))
+            audit_record(db, int(user["id"]), "privacy_settings_updated", "privacy_settings", "1", require_purpose=body.require_purpose)
         except notices.NoticeError as exc:
             db.execute("ROLLBACK")
             raise HTTPException(status_code=422, detail=str(exc)) from None

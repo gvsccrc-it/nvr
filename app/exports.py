@@ -26,6 +26,7 @@ from .retention import acquire_playback, release_playback, unlink_if_unleased
 from .storage import fetch_cold_sources, recording_file_path
 from .store import connect
 from app.clock import parse as clock_parse
+from .audit import record as audit_record
 
 POLL_SECONDS = 2
 # A job marked running that nothing here is rendering is failed once it has shown no sign of life (a claim, a progress step) for this long.
@@ -214,10 +215,7 @@ def recover_interrupted_exports() -> None:
                 "UPDATE exports SET status='failed',error=?,updated_at=?,completed_at=? WHERE id=? AND status='running'",
                 ("Export interrupted by application restart", now, now, row["id"]),
             )
-            db.execute(
-                "INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-                (row["requested_by"], "export_failed", "export", row["id"], json.dumps({"reason": "application_restart"})),
-            )
+            audit_record(db, row["requested_by"], "export_failed", "export", row["id"], reason="application_restart")
             output_root = recordings_path() / EXPORT_DIRECTORY
             (output_root / f"{row['id']}.zip").unlink(missing_ok=True)
             (output_root / f"{row['id']}.zip.partial").unlink(missing_ok=True)
@@ -968,8 +966,7 @@ def _record_completed(job: "_ExportJob", metadata: dict[str, Any], expires_at: s
                    (expires_at, json.dumps(metadata, separators=(",", ":")), f"{EXPORT_DIRECTORY}/{job_id}.zip", package_sha256, completed_at.isoformat(), completed_at.isoformat(), job_id))
         if updated.rowcount != 1:
             raise ExportCancelled()
-        db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-                   (requester, "export_completed", "export", job_id, json.dumps({"camera_count": len(metadata["cameras"]), "omitted_camera_count": len(metadata["omitted_cameras"]), "segment_count": total_segments})))
+        audit_record(db, requester, "export_completed", "export", job_id, camera_count=len(metadata["cameras"]), omitted_camera_count=len(metadata["omitted_cameras"]), segment_count=total_segments)
 
 
 def _record_cancelled(job: "_ExportJob") -> None:
@@ -982,7 +979,7 @@ def _record_cancelled(job: "_ExportJob") -> None:
     final_path.unlink(missing_ok=True)
     with connect() as db:
         db.execute("UPDATE exports SET status='cancelled',progress=0,cancel_requested=0,error=NULL,updated_at=?,completed_at=? WHERE id=? AND status='running'", (datetime.now(timezone.utc).isoformat(), datetime.now(timezone.utc).isoformat(), job_id))
-        db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)", (requester, "export_cancelled", "export", job_id, "{}"))
+        audit_record(db, requester, "export_cancelled", "export", job_id)
 
 
 def _record_failed(job: "_ExportJob", exc: Exception) -> None:
@@ -995,7 +992,7 @@ def _record_failed(job: "_ExportJob", exc: Exception) -> None:
     final_path.unlink(missing_ok=True)
     with connect() as db:
         db.execute("UPDATE exports SET status='failed',error=?,updated_at=?,completed_at=? WHERE id=? AND status='running'", (str(exc)[:500], datetime.now(timezone.utc).isoformat(), datetime.now(timezone.utc).isoformat(), job_id))
-        db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)", (requester, "export_failed", "export", job_id, json.dumps({"reason": str(exc)[:500]})))
+        audit_record(db, requester, "export_failed", "export", job_id, reason=str(exc)[:500])
 
 
 class ExportManager:
@@ -1065,7 +1062,7 @@ class ExportManager:
                             if row["id"] == self._running or not _silent_for(row["updated_at"], moment, ORPHAN_AFTER_SECONDS):
                                 continue  # A job that showed life a moment ago is not called abandoned on one look
                             db.execute("UPDATE exports SET status='failed',error=?,updated_at=?,completed_at=? WHERE id=? AND status='running'", ("Export was interrupted by an internal error; start it again", now, now, row["id"]))
-                            db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)", (row["requested_by"], "export_failed", "export", row["id"], '{"reason":"worker_error"}'))
+                            audit_record(db, row["requested_by"], "export_failed", "export", row["id"], reason="worker_error")
             except sqlite3.Error:
                 continue
             if (self._worker is None or self._worker.done()) and not self._stopping:
@@ -1120,7 +1117,7 @@ class ExportManager:
             now = datetime.now(timezone.utc).isoformat()
             for row in active:
                 db.execute("UPDATE exports SET status='failed',error=?,updated_at=?,completed_at=? WHERE id=?", ("Export interrupted by application shutdown", now, now, row["id"]))
-                db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)", (row["requested_by"], "export_failed", "export", row["id"], '{"reason":"application_shutdown"}'))
+                audit_record(db, row["requested_by"], "export_failed", "export", row["id"], reason="application_shutdown")
 
     def enqueue(self, job_id: str) -> None:
         if self._worker is None or self._worker.done():
@@ -1607,11 +1604,10 @@ def create_export_record(
             redaction.claim_for_export(db, redaction_review_id, requested_by, job_id, camera_ids, start, end, output_modes, retry_of)
             db.execute("UPDATE exports SET redaction_review_id=? WHERE id=?", (redaction_review_id, job_id))
         viewing_audit.record_events(db, requested_by, camera_ids, "export", job_id)
-        db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-                   (requested_by, "export_retried" if retry_of else "export_requested", "export", job_id, json.dumps({
+        audit_record(db, requested_by, "export_retried" if retry_of else "export_requested", "export", job_id, **{
                        "cameras": len(camera_ids), "start": start.isoformat(), "end": end.isoformat(), "output_modes": output_modes,
                        "include_audio": include_audio, "audio_camera_id": audio_camera_id, **({"retry_of": retry_of} if retry_of else {}),
-                   })))
+                   })
     return job_id
 
 
@@ -1648,14 +1644,14 @@ def request_cancel(job_id: str, actor_id: int, is_admin: bool = False) -> str:
                 latest = db.execute("SELECT status FROM exports WHERE id=?", (job_id,)).fetchone()
                 if latest and latest["status"] == "running":
                     db.execute("UPDATE exports SET cancel_requested=1,updated_at=? WHERE id=?", (datetime.now(timezone.utc).isoformat(), job_id))
-                    db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)", (actor_id, "export_cancel_requested", "export", job_id, "{}"))
+                    audit_record(db, actor_id, "export_cancel_requested", "export", job_id)
                     return "cancel_requested"
                 return str(latest["status"]) if latest else "missing"
-            db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)", (actor_id, "export_cancelled", "export", job_id, "{}"))
+            audit_record(db, actor_id, "export_cancelled", "export", job_id)
             return "cancelled"
         if row["status"] == "running":
             db.execute("UPDATE exports SET cancel_requested=1,updated_at=? WHERE id=?", (datetime.now(timezone.utc).isoformat(), job_id))
-            db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)", (actor_id, "export_cancel_requested", "export", job_id, "{}"))
+            audit_record(db, actor_id, "export_cancel_requested", "export", job_id)
             return "cancel_requested"
         return str(row["status"])
 

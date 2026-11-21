@@ -30,6 +30,7 @@ from .footage_chain import file_sha256
 from .storage import segment_available
 from .store import connect
 from app.clock import now as _now, parse as _parse
+from .audit import record as audit_record
 
 MAX_TITLE = 200
 MAX_TEXT = 5000
@@ -90,8 +91,7 @@ def is_manager(db: sqlite3.Connection, row: sqlite3.Row, user: Any) -> bool:
 
 def record_denied(db: sqlite3.Connection, case_id: str, user: Any) -> None:
     """A try at a case this person is not in, for the administrators' audit log (the case's own trail is for its members)."""
-    db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-               (int(user["id"]), "case_access_denied", "case", case_id, "{}"))
+    audit_record(db, int(user["id"]), "case_access_denied", "case", case_id)
 
 
 def record_opened(db: sqlite3.Connection, case_id: str, user: Any) -> None:

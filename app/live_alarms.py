@@ -6,11 +6,11 @@ it, and whether their Live follows it, is decided by the browser (each person op
 """
 from __future__ import annotations
 
-import json
 import sqlite3
 
 from .access import may_view_camera
 from .store import connect
+from .audit import record as audit_record
 
 MAX_NEIGHBOURS = 15  # With the alarm's own camera, a full 16-camera Live grid.
 MAX_POP_INS = 20
@@ -49,8 +49,7 @@ def set_neighbours(camera_id: str, camera_ids: list[str], actor_id: int) -> list
             db.execute("DELETE FROM camera_neighbours WHERE camera_id=?", (camera_id,))
             db.executemany("INSERT INTO camera_neighbours(camera_id,neighbour_id,position) VALUES(?,?,?)",
                            [(camera_id, neighbour, position) for position, neighbour in enumerate(camera_ids)])
-            db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-                       (actor_id, "camera_neighbours_updated", "camera", camera_id, json.dumps({"camera_ids": camera_ids}, separators=(",", ":"))))
+            audit_record(db, actor_id, "camera_neighbours_updated", "camera", camera_id, camera_ids=camera_ids)
         except BaseException:
             db.execute("ROLLBACK")
             raise

@@ -4,6 +4,7 @@ It did everything in one write transaction, with every file of the camera open a
 failed with all of them left open, and a camera with a month of footage held the write lock for most of an hour."""
 from __future__ import annotations
 
+import json
 import errno
 import os
 import resource
@@ -62,7 +63,7 @@ class BatchTests(FootageDeleteCase):
         self.assertLessEqual(open_files(), before + 2)
         with connect() as db:
             audit = db.execute("SELECT details_json FROM audit_log WHERE action='delete_camera_footage'").fetchone()[0]
-        self.assertIn('"segments_deleted":700', audit)
+        self.assertEqual(json.loads(audit), {"segments_deleted": 700})
 
     def test_the_write_lock_is_released_between_batches(self):
         self.many_segments(footage.FOOTAGE_DELETE_BATCH * 3 + 10)

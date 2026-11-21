@@ -15,6 +15,7 @@ from app.principal import Administrator
 from app.rules import Rule, replay
 from app.scheduling import validate_schedule
 from app.store import connect
+from app.audit import record as audit_record
 
 router = APIRouter()
 
@@ -253,8 +254,7 @@ def _save_actions(db, rule_id: str, definition: RuleDefinition) -> None:
 
 
 def _audit(db, actor: Administrator, action: str, rule_id: str, details: dict[str, object]) -> None:
-    db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-               (int(actor["id"]), action, "rule", rule_id, json.dumps(details, separators=(",", ":"))))
+    audit_record(db, int(actor["id"]), action, "rule", rule_id, **details)
 
 
 def _nudge(request: Request) -> None:

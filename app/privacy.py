@@ -26,6 +26,7 @@ from .credentials import decrypt
 from .processes import run_to_end
 from .store import connect
 from app.clock import now as _now, stamp
+from .audit import record as audit_record
 
 MAX_ZONES = 8
 GRANT_MINUTES = 15
@@ -127,8 +128,7 @@ def with_mask(video_filter: str, zones: list[dict[str, float]]) -> str:
 
 
 def _audit(db: sqlite3.Connection, actor_id: int, action: str, camera_id: str, details: dict[str, Any]) -> None:
-    db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-               (actor_id, action, "camera", camera_id, json.dumps(details)))
+    audit_record(db, actor_id, action, "camera", camera_id, **details)
 
 
 def grant_unmasked(user_id: int, camera_id: str, reason: str) -> dict[str, Any]:

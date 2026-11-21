@@ -15,6 +15,7 @@ from datetime import datetime, timedelta
 from .credentials import derived_key
 from .store import connect
 from app.clock import now as _now, stamp
+from .audit import record as audit_record
 
 SCOPES = ("read", "media", "export", "metrics", "admin")
 TOKEN_PREFIX = "nvrt"
@@ -157,10 +158,7 @@ def _digest(secret: str) -> str:
 
 
 def _audit(db: sqlite3.Connection, actor_id: int | None, action: str, token_id: str, details: dict[str, object]) -> None:
-    db.execute(
-        "INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-        (actor_id, action, "api_token", token_id, json.dumps(details, separators=(",", ":"))),
-    )
+    audit_record(db, actor_id, action, "api_token", token_id, **details)
 
 
 def _iso(value: datetime) -> str:

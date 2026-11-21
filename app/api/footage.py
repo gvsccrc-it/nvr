@@ -18,6 +18,7 @@ from app import track_privacy
 from app.health import recording_health
 from app.scheduling import effective_policy
 from app.preservation import delete_segment as delete_preserved_segment, get_segment_hold, preserve_segment, release_segment_hold
+from app.audit import record as audit_record
 
 router = APIRouter()
 
@@ -155,8 +156,7 @@ async def archive_camera(
                 "UPDATE cameras SET archived_at=?,enabled=0,recording_enabled=0,recording_status='archived',last_error=NULL,updated_at=? WHERE id=?",
                 (archived_at, archived_at, camera_id),
             )
-            db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-                       (int(user["id"]), "archive", "camera", camera_id, "{}"))
+            audit_record(db, int(user["id"]), "archive", "camera", camera_id)
         return False
 
     if await asyncio.to_thread(save):  # Off the event loop: the write can wait seconds for the lock (#354)
@@ -179,8 +179,7 @@ def restore_camera(
         if row["archived_at"] is None:
             raise HTTPException(status_code=409, detail="Camera is not archived")
         db.execute("UPDATE cameras SET archived_at=NULL,enabled=1,recording_status='stopped',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?", (camera_id,))
-        db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-                   (int(user["id"]), "restore", "camera", camera_id, "{}"))
+        audit_record(db, int(user["id"]), "restore", "camera", camera_id)
         updated = db.execute("SELECT c.*,g.name AS group_name FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id WHERE c.id=?", (camera_id,)).fetchone()
     return camera_view(updated)
 
@@ -262,9 +261,7 @@ def delete_archived_camera_footage(
         if len(tracks) < FOOTAGE_DELETE_BATCH:
             break
     with connect() as db:
-        db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-                   (int(user["id"]), "delete_camera_footage", "camera", camera_id,
-                    json.dumps({"segments_deleted": deleted}, separators=(",", ":"))))
+        audit_record(db, int(user["id"]), "delete_camera_footage", "camera", camera_id, segments_deleted=deleted)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

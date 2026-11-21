@@ -14,6 +14,7 @@ from app.api.rules import ActionDefinition
 from app.principal import Administrator, CurrentUser
 from app.store import connect
 from app.clock import now as _now
+from app.audit import record as audit_record
 
 router = APIRouter()
 
@@ -155,8 +156,7 @@ def _validated(db, body: ScheduleBody) -> tuple[dict[str, Any], dict[str, Any], 
 
 
 def _audit(db, actor, action: str, schedule_id: str, details: dict[str, object]) -> None:
-    db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-               (int(actor["id"]), action, "digest_schedule", schedule_id, json.dumps(details, separators=(",", ":"))))
+    audit_record(db, int(actor["id"]), action, "digest_schedule", schedule_id, **details)
 
 
 @router.post("/api/digests/schedules", status_code=201)
@@ -265,8 +265,7 @@ def put_settings(body: ModelBody, user: Administrator) -> dict[str, object]:
             digests.save_model_settings(db, enabled=body.enabled, url=body.url, model=body.model, allow_private=body.allow_private)
         except digests.DigestError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from None
-        db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-                   (int(user["id"]), "digest_model_updated", "digest_settings", "1", json.dumps({"enabled": body.enabled, "model": body.model.strip()})))
+        audit_record(db, int(user["id"]), "digest_model_updated", "digest_settings", "1", enabled=body.enabled, model=body.model.strip())
         return digests.model_settings(db)
 
 

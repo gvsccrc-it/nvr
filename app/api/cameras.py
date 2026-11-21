@@ -24,6 +24,7 @@ from app.onvif_stream import list_camera_stream_profiles, placeholder_stream_url
 from app import capabilities as camera_capabilities, diagnostics
 from app.retention import effective_retention
 from app.api.policies import effective_schedule_view
+from app.audit import record as audit_record
 
 router = APIRouter()
 
@@ -773,9 +774,7 @@ async def update_camera(
                 if payload.audio_enabled is not None:
                     assignments.append("audio_enabled=?"); values.append(int(audio_enabled))
                     if bool(row["audio_enabled"]) != audio_enabled:
-                        db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-                                   (int(user["id"]), "camera_audio_enabled" if audio_enabled else "camera_audio_disabled", "camera", camera_id,
-                                    json.dumps({"audio_supported": bool(row["audio_supported"])}, separators=(",", ":"))))
+                        audit_record(db, int(user["id"]), "camera_audio_enabled" if audio_enabled else "camera_audio_disabled", "camera", camera_id, audio_supported=bool(row["audio_supported"]))
                 if payload.motion_pre_roll_seconds is not None:
                     assignments.append("motion_pre_roll_seconds=?"); values.append(payload.motion_pre_roll_seconds)
                 if payload.motion_post_roll_seconds is not None:
@@ -851,8 +850,7 @@ async def probe_camera_audio(
             db.execute("UPDATE cameras SET audio_supported=?,audio_enabled=CASE WHEN ?=0 THEN 0 ELSE audio_enabled END,last_probe_at=?,updated_at=? WHERE id=?",
                        (int(supported), int(supported), datetime.now(timezone.utc).isoformat(), datetime.now(timezone.utc).isoformat(), camera_id))
             if not supported and camera["audio_enabled"]:
-                db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-                           (int(user["id"]), "camera_audio_disabled", "camera", camera_id, '{"reason":"audio_capability_lost"}'))
+                audit_record(db, int(user["id"]), "camera_audio_disabled", "camera", camera_id, reason="audio_capability_lost")
 
     await asyncio.to_thread(save)
     if not supported and camera["audio_enabled"]:

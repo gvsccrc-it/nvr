@@ -302,9 +302,10 @@ def sighting_picture(sighting_id: str, user: Administrator) -> Response:
             if not track_privacy.box_usable(box) or track_privacy.box_touches(box, masks):
                 raise HTTPException(status_code=404, detail="No picture for that sighting")
         # A list fetches each thumbnail again whenever it is redrawn: looking at a picture is recorded, once per person and match in a while, not once per fetch (#306).
-        recent = db.execute("SELECT 1 FROM audit_log WHERE actor_id=? AND action='face_sighting_picture_viewed' AND resource_id=? AND details_json=? AND created_at>?",
-                            (int(user["id"]), row["entry_id"], json.dumps({"sighting_id": sighting_id}, separators=(",", ":")),
-                             stamp(datetime.now(timezone.utc) - PICTURE_AUDIT_INTERVAL))).fetchone()
+        # Compared by value, not by the stored text, so how the details are written does not matter.
+        recent = db.execute("SELECT 1 FROM audit_log WHERE actor_id=? AND action='face_sighting_picture_viewed' AND resource_id=? "
+                            "AND json_extract(details_json,'$.sighting_id')=? AND created_at>?",
+                            (int(user["id"]), row["entry_id"], sighting_id, stamp(datetime.now(timezone.utc) - PICTURE_AUDIT_INTERVAL))).fetchone()
         if recent is None:
             faces.audit(db, int(user["id"]), "face_sighting_picture_viewed", row["entry_id"], {"sighting_id": sighting_id})
     return Response(bytes(row["picture"]), media_type="image/jpeg", headers={"Cache-Control": "no-store"})

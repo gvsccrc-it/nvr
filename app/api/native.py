@@ -1,7 +1,6 @@
 """The native mobile app (#140): device push registration, device sessions, and the administrator's FCM and APNs credentials."""
 from __future__ import annotations
 
-import json
 import sqlite3
 
 from fastapi import APIRouter, HTTPException, Response, status
@@ -11,6 +10,7 @@ from app import device_sessions, native_push
 from app.api.identity import start_session
 from app.principal import Administrator, CurrentUser, SignedInPerson
 from app.store import connect
+from app.audit import record as audit_record
 
 router = APIRouter()
 
@@ -109,8 +109,7 @@ def put_push_settings(payload: PushSettingsRequest, user: Administrator) -> dict
         db.execute("BEGIN IMMEDIATE")
         try:
             native_push.save_settings(db, payload.model_dump(exclude_none=True))
-            db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-                       (int(user["id"]), "native_push_updated", "native_push_settings", "1", json.dumps({"fcm": payload.fcm_service_account is not None, "apns": payload.apns_key is not None})))
+            audit_record(db, int(user["id"]), "native_push_updated", "native_push_settings", "1", fcm=payload.fcm_service_account is not None, apns=payload.apns_key is not None)
         except native_push.NativePushError as exc:
             db.execute("ROLLBACK")
             raise HTTPException(status_code=422, detail=str(exc)) from None
