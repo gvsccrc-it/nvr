@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import quote
 from app.clock import parse as _parse, stamp as _stamp
+from .audit import record as audit_record
 
 CLIP_BEFORE = timedelta(seconds=10)
 CLIP_AFTER = timedelta(seconds=20)
@@ -38,8 +39,7 @@ def _record(db: sqlite3.Connection, alarm_id: str, actor_id: int | None, action:
     stamp = _now()
     db.execute("INSERT INTO alarm_history(alarm_id,actor_id,action,details_json,occurred_at) VALUES(?,?,?,?,?)",
                (alarm_id, actor_id, action, json.dumps(details, separators=(",", ":"), sort_keys=True), stamp))
-    db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-               (actor_id, f"alarm_{action}", "alarm", alarm_id, json.dumps(details, separators=(",", ":"), sort_keys=True)))
+    audit_record(db, actor_id, f"alarm_{action}", "alarm", alarm_id, **details)
 
 
 def _notify(db: sqlite3.Connection, alarm_id: str, event_type: str, actor_id: int | None) -> None:
@@ -172,8 +172,7 @@ def resolve(alarm_id: str, actor_id: int, note: str | None) -> None:
 def delete(alarm_id: str, actor_id: int) -> None:
     def apply(db: sqlite3.Connection, alarm: sqlite3.Row) -> None:
         db.execute("DELETE FROM alarms WHERE id=?", (alarm_id,))
-        db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-                   (actor_id, "alarm_deleted", "alarm", alarm_id, json.dumps({"rule_name": alarm["rule_name"], "camera_id": alarm["camera_id"], "state": alarm["state"]})))
+        audit_record(db, actor_id, "alarm_deleted", "alarm", alarm_id, rule_name=alarm["rule_name"], camera_id=alarm["camera_id"], state=alarm["state"])
     _change(alarm_id, apply)
 
 
@@ -316,6 +315,5 @@ def prune_history(now: datetime | None = None) -> dict[str, int]:
             db.execute("COMMIT")
             done["removed_rule_events"] += len(ids)
         if done["removed_alarms"] or done["removed_rule_events"]:
-            db.execute("INSERT INTO audit_log(action,resource_type,resource_id,details_json) VALUES('alarm_history_pruned','alarm_settings','1',?)",
-                       (json.dumps({**done, "history_days": configured["history_days"]}, separators=(",", ":"), sort_keys=True),))
+            audit_record(db, None, "alarm_history_pruned", "alarm_settings", "1", **{**done, "history_days": configured["history_days"]})
     return done

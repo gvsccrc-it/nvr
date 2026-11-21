@@ -36,6 +36,7 @@ from .retention import acquire_playback, release_playback
 from .storage import fetch_cold_sources, recording_file_path
 from .store import connect, has_row
 from app.clock import now as _now
+from .audit import record as audit_record
 
 MODEL_DIR = Path(os.environ.get("NVR_AI_REDACTION_MODEL_DIR", "/opt/nvr/models/redaction"))
 try:
@@ -352,9 +353,7 @@ def create_review(requested_by: int, camera_ids: list[str], start: datetime, end
         db.execute("INSERT INTO redaction_reviews(id,requested_by,camera_ids_json,requested_start,requested_end,kinds_json,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
                    (review_id, requested_by, json.dumps(camera_ids), start.isoformat(), end.isoformat(), json.dumps(wanted), "queued", now, now))
         viewing_audit.record_events(db, requested_by, camera_ids, "export", review_id)
-        db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-                   (requested_by, "redaction_review_requested", "redaction_review", review_id,
-                    json.dumps({"cameras": len(camera_ids), "start": start.isoformat(), "end": end.isoformat(), "kinds": wanted})))
+        audit_record(db, requested_by, "redaction_review_requested", "redaction_review", review_id, cameras=len(camera_ids), start=start.isoformat(), end=end.isoformat(), kinds=wanted)
     return review_id
 
 
@@ -583,9 +582,7 @@ def update_review(row: sqlite3.Row, editor_id: int, keep: list[str] | None, manu
                              (json.dumps(regions, separators=(",", ":")), editor_id, now, now, row["id"]))
         if changed.rowcount != 1:
             raise PermissionError("Only a finished review that is not yet confirmed can be edited")
-        db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-                   (editor_id, "redaction_review_edited", "redaction_review", row["id"],
-                    json.dumps({"kept_tracks": sorted(track_id for track_id, track in tracks.items() if not track["blur"]), "manual_regions": len(regions["manual"])})))
+        audit_record(db, editor_id, "redaction_review_edited", "redaction_review", row["id"], kept_tracks=sorted(track_id for track_id, track in tracks.items() if not track["blur"]), manual_regions=len(regions["manual"]))
         updated = db.execute("SELECT * FROM redaction_reviews WHERE id=?", (row["id"],)).fetchone()
     return view(updated)
 
@@ -597,8 +594,7 @@ def confirm_review(row: sqlite3.Row, confirmer_id: int) -> dict[str, Any]:
         changed = db.execute("UPDATE redaction_reviews SET state='confirmed',confirmed_by=?,confirmed_at=?,updated_at=? WHERE id=? AND state='ready'", (confirmer_id, now, now, row["id"]))
         if changed.rowcount != 1:
             raise PermissionError("Only a finished review can be confirmed")
-        db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-                   (confirmer_id, "redaction_review_confirmed", "redaction_review", row["id"], "{}"))
+        audit_record(db, confirmer_id, "redaction_review_confirmed", "redaction_review", row["id"])
         updated = db.execute("SELECT * FROM redaction_reviews WHERE id=?", (row["id"],)).fetchone()
     return view(updated)
 

@@ -14,6 +14,7 @@ from app.principal import Administrator, CurrentUser
 from app.store import connect, has_row
 from app.detection import detector_availability, effective_camera_config, effective_vehicle_threshold, model_options, openvino_provider_options, validate_detector, MODEL_ID, MODEL_RUNTIME, MODEL_VERSION
 from app.api.cameras import MotionZoneRequest
+from app.audit import record as audit_record
 
 router = APIRouter()
 
@@ -121,9 +122,7 @@ async def update_ai_detection_config(
                 "UPDATE ai_camera_settings SET config_override=?,enabled=?,analysis_fps=?,confidence_threshold=?,vehicle_confidence_threshold=?,use_substream=?,zones_json=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE camera_id=?",
                 (int(not payload.inherit_group), int(payload.enabled), payload.analysis_fps, payload.confidence_threshold, payload.vehicle_confidence_threshold, int(payload.use_substream), json.dumps(zones, separators=(",", ":")), camera_id),
             )
-            db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-                       (int(user["id"]), "ai_detection_configured", "camera", camera_id,
-                        json.dumps({"enabled": payload.enabled, "inherit_group": payload.inherit_group, "analysis_fps": payload.analysis_fps, "model_id": active_model["model_id"], "model_version": active_model["model_version"], "provider": active_model["provider"]}, separators=(",", ":"))))
+            audit_record(db, int(user["id"]), "ai_detection_configured", "camera", camera_id, enabled=payload.enabled, inherit_group=payload.inherit_group, analysis_fps=payload.analysis_fps, model_id=active_model["model_id"], model_version=active_model["model_version"], provider=active_model["provider"])
 
     await asyncio.to_thread(save)
     await request.app.state.detectors.sync_camera(camera_id, force_restart=True)
@@ -180,9 +179,7 @@ async def update_group_ai_config(
                 (group_id, int(payload.enabled), payload.analysis_fps, payload.confidence_threshold, payload.vehicle_confidence_threshold, int(payload.use_substream), json.dumps(zones, separators=(",", ":"))),
             )
             camera_ids = [row[0] for row in db.execute("SELECT c.id FROM cameras c LEFT JOIN ai_camera_settings s ON s.camera_id=c.id WHERE c.group_id=? AND c.enabled=1 AND COALESCE(s.config_override,0)=0", (group_id,)).fetchall()]
-            db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-                       (int(user["id"]), "ai_group_configured", "camera_group", group_id,
-                        json.dumps({"enabled": payload.enabled, "inherited_camera_count": len(camera_ids), "analysis_fps": payload.analysis_fps, "model_id": active_model["model_id"], "model_version": active_model["model_version"], "provider": active_model["provider"]}, separators=(",", ":"))))
+            audit_record(db, int(user["id"]), "ai_group_configured", "camera_group", group_id, enabled=payload.enabled, inherited_camera_count=len(camera_ids), analysis_fps=payload.analysis_fps, model_id=active_model["model_id"], model_version=active_model["model_version"], provider=active_model["provider"])
         return camera_ids
 
     camera_ids = await asyncio.to_thread(save)
@@ -232,9 +229,7 @@ async def update_ai_runtime_settings(payload: AIRuntimeSettingsRequest, request:
         with connect() as db:
             db.execute("UPDATE ai_runtime_settings SET max_active_cameras=?,capacity_mode=?,provider=?,model_id=?,model_version=?,validated_at=COALESCE(?,validated_at),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE singleton_id=1",
                        (payload.max_active_cameras, mode, provider, model_id, model_version, validated_at))
-            db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-                       (int(user["id"]), "ai_runtime_configured", "ai_runtime", "local",
-                        json.dumps({"max_active_cameras": payload.max_active_cameras, "capacity_mode": mode, "provider": provider, "model_id": model_id, "model_version": model_version, "validated": validated_at is not None}, separators=(",", ":"))))
+            audit_record(db, int(user["id"]), "ai_runtime_configured", "ai_runtime", "local", max_active_cameras=payload.max_active_cameras, capacity_mode=mode, provider=provider, model_id=model_id, model_version=model_version, validated=validated_at is not None)
 
     await asyncio.to_thread(save)
     await request.app.state.detectors.reconcile()

@@ -22,6 +22,7 @@ from .onvif_ptz import Capabilities, PtzClient, PtzUnsupported
 from .scheduling import mode_at
 from .store import connect
 from app.clock import now as _now
+from .audit import record as audit_record
 
 LEASE_SECONDS = 60
 CAPABILITY_CACHE_SECONDS = 300
@@ -116,8 +117,7 @@ def acquire(camera_id: str, user_id: int, *, take_over: bool = False, purpose: s
                 if ended:
                     record(db, user_id, "ptz_tracking_interrupted", "camera", camera_id, by="manual control")
             if take_over and current is not None and int(current["user_id"]) != user_id and current["purpose"] != "tracking":
-                db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-                           (user_id, "ptz_lease_taken_over", "camera", camera_id, json.dumps({"from": current["username"]})))
+                audit_record(db, user_id, "ptz_lease_taken_over", "camera", camera_id, **{"from": current["username"]})
         except BaseException:
             db.execute("ROLLBACK")
             raise

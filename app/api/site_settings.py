@@ -19,6 +19,7 @@ from app.principal import Administrator, CurrentUser
 from app.store import connect
 from app.audit import record
 from app.display_settings import format_display_datetime, validate_display_settings
+from app.audit import record as audit_record
 
 router = APIRouter()
 
@@ -214,8 +215,7 @@ def save_branding_settings(payload: BrandingSaveRequest, user: Administrator) ->
                                    (key,requested.media_type,data,digest,now))
                 action="branding_saved"
                 details={"fields":["app_name","primary_color","accent_color"],"asset_keys":sorted(validated_assets)}
-            db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-                       (int(user["id"]),action,"site_branding","site",json.dumps(details,separators=(",",":"))))
+            audit_record(db, int(user["id"]), action, "site_branding", "site", **details)
             result=_branding_view(db)
             db.commit()
             return result

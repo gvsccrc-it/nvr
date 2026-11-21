@@ -44,6 +44,7 @@ from .incidents import sync_incident
 from .store import connect, database_path
 from .version import APP_VERSION
 from app.clock import parse as _parse
+from .audit import record as audit_record
 
 logger = logging.getLogger("nvr.backup")
 
@@ -345,10 +346,7 @@ def queue_backup(actor_id: int) -> dict[str, object]:
     run_id = str(uuid.uuid4())
     with connect() as db:
         db.execute("INSERT INTO backup_runs(id,kind,status,requested_by) VALUES(?,?,?,?)", (run_id, "manual", "queued", actor_id))
-        db.execute(
-            "INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-            (actor_id, "backup_requested", "backup", run_id, "{}"),
-        )
+        audit_record(db, actor_id, "backup_requested", "backup", run_id)
         return run_view(db.execute("SELECT * FROM backup_runs WHERE id=?", (run_id,)).fetchone())
 
 

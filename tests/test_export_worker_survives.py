@@ -109,7 +109,7 @@ class ExportWorkerTests(unittest.IsolatedAsyncioTestCase):
         await self.until(lambda: self.status("job-1")[0] == "failed")
         self.assertEqual(self.status("job-1")[1], "Export was interrupted by an internal error; start it again")
         with connect() as db:
-            self.assertEqual(db.execute("SELECT details_json FROM audit_log WHERE action='export_failed' AND resource_id='job-1'").fetchone()[0], '{"reason":"worker_error"}')
+            self.assertEqual(json.loads(db.execute("SELECT details_json FROM audit_log WHERE action='export_failed' AND resource_id='job-1'").fetchone()[0]), {"reason": "worker_error"})
 
     async def test_a_running_job_that_showed_life_a_moment_ago_is_not_called_abandoned(self):
         async def execute(job_id: str) -> None:

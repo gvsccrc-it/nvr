@@ -22,6 +22,7 @@ from . import face_models, jpeg, plates, privacy, track_privacy
 from .processes import run_to_end
 from .store import connect
 from app.clock import now as _now, parse as _parse
+from .audit import record as audit_record
 
 MARGIN = 0.3  # How much of the face's own size is kept around it in the entry's picture
 MIN_IOU = 0.3  # How well a clicked box must fit a detected face to pick it
@@ -241,5 +242,4 @@ def create_entry(db: sqlite3.Connection, name: str, reason: str, expires_at: str
 
 
 def audit(db: sqlite3.Connection, user_id: int, action: str, resource_id: str, details: dict[str, Any]) -> None:
-    db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-               (user_id, action, "face_watch", resource_id, json.dumps(details, separators=(",", ":"))))
+    audit_record(db, user_id, action, "face_watch", resource_id, **details)
