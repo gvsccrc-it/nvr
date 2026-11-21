@@ -26,6 +26,7 @@ from app import dewarp, footage_chain, viewing_audit
 from app import copies_budget
 from app.exports import create_export_record, export_output_path, get_export, list_exports, request_cancel, verify_evidence_file, _job_view, EXPORT_DIRECTORY, MAX_EXPORT_CAMERAS, MAX_EXPORT_WINDOW, MAX_VERIFY_PACKAGE_BYTES
 from app.recording import recordings_path
+from app.audit import record as audit_record
 
 router = APIRouter()
 
@@ -171,7 +172,7 @@ async def _submit(request: Request, user: dict, create: Callable[[], str]) -> di
         def failed() -> None:
             with connect() as db:
                 db.execute("UPDATE exports SET status='failed',error=?,completed_at=?,updated_at=? WHERE id=?", ("Export worker is unavailable", datetime.now(timezone.utc).isoformat(), datetime.now(timezone.utc).isoformat(), job_id))
-                db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)", (int(user["id"]), "export_failed", "export", job_id, '{"reason":"worker_unavailable"}'))
+                audit_record(db, int(user["id"]), "export_failed", "export", job_id, reason="worker_unavailable")
 
         await asyncio.to_thread(failed)
         raise HTTPException(status_code=503, detail="Export worker is unavailable") from exc
@@ -297,12 +298,7 @@ async def verify_export_evidence(job_id: str, request: Request, user: CurrentUse
     action = "evidence_verified" if valid else "evidence_verification_failed"
     def note():
         with connect() as db:
-            db.execute(
-                "INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-                (int(user["id"]), action, "export", job_id, json.dumps({"outcome": "valid" if valid else "invalid", "file_count": len(result["files"]),
-                                                                       "chain": None if result.get("chain") is None else ("valid" if result["chain"]["valid"] else "invalid"),
-                                                                       "issued_package": "not_recorded" if not issued else "matches" if result["matches_issued_package"] else "differs"})),
-            )
+            audit_record(db, int(user["id"]), action, "export", job_id, outcome="valid" if valid else "invalid", file_count=len(result["files"]), chain=None if result.get("chain") is None else ("valid" if result["chain"]["valid"] else "invalid"), issued_package="not_recorded" if not issued else "matches" if result["matches_issued_package"] else "differs")
 
     await asyncio.to_thread(note)
     origin = ("This is the package this NVR issued, byte for byte. " if result["matches_issued_package"] else

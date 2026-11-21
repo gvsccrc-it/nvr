@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import time
 from collections import deque
 from datetime import datetime
@@ -15,6 +14,7 @@ from app import external_events, home_assistant, network
 from app.external_events import EventRefused, SourceError
 from app.principal import Administrator, CurrentUser
 from app.store import connect
+from app.audit import record as audit_record
 
 router = APIRouter()
 RATE_PER_MINUTE = 600
@@ -49,8 +49,7 @@ class HomeAssistantBody(BaseModel):
 
 
 def _audit(db, actor, action: str, resource_id: str, details: dict[str, object]) -> None:
-    db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-               (int(actor["id"]), action, "event_source", resource_id, json.dumps(details, separators=(",", ":"))))
+    audit_record(db, int(actor["id"]), action, "event_source", resource_id, **details)
 
 
 UNVERIFIED_PER_MINUTE = 120  # Requests from one caller that fail the signature check before it is answered "too many" instead of "not accepted"

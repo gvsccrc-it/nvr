@@ -26,6 +26,7 @@ from . import base64url
 from .credentials import decrypt, encrypt
 from .store import connect
 from app.clock import now as _now
+from .audit import record as audit_record
 
 FCM_SCOPE = "https://www.googleapis.com/auth/firebase.messaging"
 FCM_TOKEN_URL = "https://oauth2.googleapis.com/token"
@@ -66,8 +67,7 @@ def register(user_id: int, platform: str, token: str, device_label: str) -> dict
             db.execute("INSERT INTO push_subscriptions(id,user_id,endpoint,p256dh,auth,device_label,kind) VALUES(?,?,?,'','',?,?) "
                        "ON CONFLICT(endpoint) DO UPDATE SET user_id=excluded.user_id,device_label=excluded.device_label",
                        (subscription_id, user_id, endpoint, device_label, kind))
-            db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-                       (user_id, "push_subscribed", "push_subscription", subscription_id, json.dumps({"device": device_label, "platform": platform})))
+            audit_record(db, user_id, "push_subscribed", "push_subscription", subscription_id, device=device_label, platform=platform)
         except BaseException:
             db.execute("ROLLBACK")
             raise

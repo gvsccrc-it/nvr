@@ -11,7 +11,6 @@ inside those two minutes wins that one race, and the phone then has to sign in a
 """
 from __future__ import annotations
 
-import json
 import uuid
 from datetime import timedelta
 from typing import Any
@@ -19,6 +18,7 @@ from typing import Any
 from .security import new_session_token, token_digest
 from .store import connect, has_row
 from app.clock import now as _now, parse, stamp
+from .audit import record as audit_record
 
 LIFETIME = timedelta(days=30)
 # An Entra account's device sign-in works this long after the person last signed in with Entra, however often it is used (#364). Entra is where
@@ -34,8 +34,7 @@ def _plausible(token: str) -> bool:
 
 
 def _audit(db, actor_id: int, action: str, session_id: str, **details: Any) -> None:
-    db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-               (actor_id, action, "device_session", session_id, json.dumps(details)))
+    audit_record(db, actor_id, action, "device_session", session_id, **details)
 
 
 def _remove(db, user_id: int, session_id: str, action: str) -> bool:

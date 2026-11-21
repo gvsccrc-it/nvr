@@ -1,7 +1,6 @@
 """Incidents, signed webhooks and the external heartbeat."""
 from __future__ import annotations
 
-import json
 
 from fastapi import APIRouter, HTTPException, Query, Response, status
 from pydantic import BaseModel, Field, field_validator
@@ -11,6 +10,7 @@ from app.store import connect
 from app.incidents import acknowledge_incident, incident_view, list_incidents
 from app.webhooks import EVENT_TYPES as WEBHOOK_EVENT_TYPES, create_endpoint as create_webhook_endpoint, delete_endpoint as delete_webhook_endpoint, enqueue_test as enqueue_webhook_test, list_deliveries as list_webhook_deliveries, list_endpoints as list_webhook_endpoints, rotate_secret as rotate_webhook_secret, update_endpoint as update_webhook_endpoint
 from app.heartbeat import configure_heartbeat, disable_heartbeat, heartbeat_status, queue_heartbeat_test, rotate_heartbeat_secret
+from app.audit import record as audit_record
 
 router = APIRouter()
 
@@ -96,8 +96,7 @@ def put_heartbeat_config(payload: HeartbeatConfigRequest, user: Administrator) -
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     with connect() as db:
-        db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-                   (int(user["id"]), "heartbeat_configured", "heartbeat", "1", json.dumps({"interval_seconds": payload.interval_seconds, "allow_private_receiver": payload.allow_private_receiver})))
+        audit_record(db, int(user["id"]), "heartbeat_configured", "heartbeat", "1", interval_seconds=payload.interval_seconds, allow_private_receiver=payload.allow_private_receiver)
     return {"heartbeat": result, "signing_secret": secret, "secret_notice": "A new signing secret is shown once. Store it at the external receiver." if secret else None}
 
 
@@ -106,8 +105,7 @@ def post_heartbeat_test(user: Administrator) -> dict[str, str]:
     if not queue_heartbeat_test():
         raise HTTPException(status_code=409, detail="Configure and enable an external heartbeat receiver first")
     with connect() as db:
-        db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-                   (int(user["id"]), "heartbeat_test_requested", "heartbeat", "1", "{}"))
+        audit_record(db, int(user["id"]), "heartbeat_test_requested", "heartbeat", "1")
     return {"status": "queued"}
 
 
@@ -117,8 +115,7 @@ def post_heartbeat_secret_rotation(user: Administrator) -> dict[str, str]:
     if secret is None:
         raise HTTPException(status_code=409, detail="Configure an enabled heartbeat receiver first")
     with connect() as db:
-        db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-                   (int(user["id"]), "heartbeat_secret_rotated", "heartbeat", "1", "{}"))
+        audit_record(db, int(user["id"]), "heartbeat_secret_rotated", "heartbeat", "1")
     return {"signing_secret": secret, "secret_notice": "This secret is shown once. Update the receiver before the next heartbeat."}
 
 
@@ -126,8 +123,7 @@ def post_heartbeat_secret_rotation(user: Administrator) -> dict[str, str]:
 def delete_heartbeat_config(user: Administrator) -> Response:
     disable_heartbeat()
     with connect() as db:
-        db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-                   (int(user["id"]), "heartbeat_disabled", "heartbeat", "1", "{}"))
+        audit_record(db, int(user["id"]), "heartbeat_disabled", "heartbeat", "1")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -143,8 +139,7 @@ def post_webhook(payload: WebhookCreateRequest, user: Administrator) -> dict[str
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     with connect() as db:
-        db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-                   (int(user["id"]), "webhook_created", "webhook", endpoint["id"], json.dumps({"name": endpoint["name"], "events": endpoint["events"], "allow_private_receiver": endpoint["allow_private_receiver"]})))
+        audit_record(db, int(user["id"]), "webhook_created", "webhook", endpoint["id"], name=endpoint["name"], events=endpoint["events"], allow_private_receiver=endpoint["allow_private_receiver"])
     return {"webhook": endpoint, "signing_secret": secret, "secret_notice": "This secret is shown once. Store it at the receiver to verify signed deliveries."}
 
 
@@ -158,8 +153,7 @@ def patch_webhook(webhook_id: str, payload: WebhookUpdateRequest, user: Administ
     if endpoint is None:
         raise HTTPException(status_code=404, detail="Webhook endpoint not found")
     with connect() as db:
-        db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-                   (int(user["id"]), "webhook_updated", "webhook", webhook_id, json.dumps({"fields": sorted(fields), "events": endpoint["events"], "enabled": endpoint["enabled"]})))
+        audit_record(db, int(user["id"]), "webhook_updated", "webhook", webhook_id, fields=sorted(fields), events=endpoint["events"], enabled=endpoint["enabled"])
     return {"webhook": endpoint}
 
 
@@ -169,8 +163,7 @@ def post_webhook_secret_rotation(webhook_id: str, user: Administrator) -> dict[s
     if secret is None:
         raise HTTPException(status_code=404, detail="Webhook endpoint not found")
     with connect() as db:
-        db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-                   (int(user["id"]), "webhook_secret_rotated", "webhook", webhook_id, "{}"))
+        audit_record(db, int(user["id"]), "webhook_secret_rotated", "webhook", webhook_id)
     return {"signing_secret": secret, "secret_notice": "This secret is shown once. Update the receiver before the next delivery."}
 
 
@@ -179,8 +172,7 @@ def remove_webhook(webhook_id: str, user: Administrator) -> Response:
     if not delete_webhook_endpoint(webhook_id):
         raise HTTPException(status_code=404, detail="Webhook endpoint not found")
     with connect() as db:
-        db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-                   (int(user["id"]), "webhook_deleted", "webhook", webhook_id, "{}"))
+        audit_record(db, int(user["id"]), "webhook_deleted", "webhook", webhook_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -190,8 +182,7 @@ def post_webhook_test(webhook_id: str, user: Administrator) -> dict[str, object]
     if event_id is None:
         raise HTTPException(status_code=404, detail="Enabled webhook endpoint not found")
     with connect() as db:
-        db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-                   (int(user["id"]), "webhook_test_requested", "webhook", webhook_id, json.dumps({"event_id": event_id})))
+        audit_record(db, int(user["id"]), "webhook_test_requested", "webhook", webhook_id, event_id=event_id)
     return {"event_id": event_id, "status": "queued"}
 
 

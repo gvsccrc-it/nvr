@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import json
 import uuid
 from datetime import datetime, timedelta, timezone
 
 from .storage import remove_segment_files, segment_available
 from .store import connect
+from .audit import record as audit_record
 
 
 def active_hold(db, segment_id: int, now: datetime | None = None):
@@ -27,8 +27,7 @@ def preserve_segment(camera_id: str, segment_id: int, actor_id: int, expires_in_
         if existing: raise FileExistsError("Recorded interval is already preserved (by a hold or a case)")
         if not segment_available(segment["relative_path"]): raise FileNotFoundError("Recorded interval is unavailable")
         db.execute("INSERT INTO recording_holds(id,segment_id,camera_id,created_by,expires_at) VALUES(?,?,?,?,?)",(hold_id,segment_id,camera_id,actor_id,expires))
-        db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-                   (actor_id,"preserve","recording_segment",str(segment_id),json.dumps({"camera_id":camera_id,"expires_at":expires},separators=(",",":"))))
+        audit_record(db, actor_id, "preserve", "recording_segment", str(segment_id), camera_id=camera_id, expires_at=expires)
     return {"id":hold_id,"segment_id":segment_id,"camera_id":camera_id,"created_by":actor_id,"expires_at":expires,"released_at":None}
 
 
@@ -41,8 +40,7 @@ def release_segment_hold(camera_id: str, segment_id: int, actor_id: int) -> None
         if hold is None and active_hold(db,segment_id) is not None: raise PermissionError("This footage is held for a case; remove the clip or close the case to release it")
         if hold is None or hold["camera_id"]!=camera_id: raise LookupError("No active preservation hold found")
         db.execute("UPDATE recording_holds SET released_by=?,released_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?",(actor_id,hold["id"]))
-        db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-                   (actor_id,"release_hold","recording_segment",str(segment_id),json.dumps({"camera_id":camera_id,"hold_id":hold["id"]},separators=(",",":"))))
+        audit_record(db, actor_id, "release_hold", "recording_segment", str(segment_id), camera_id=camera_id, hold_id=hold["id"])
 
 
 def delete_segment(camera_id: str, segment_id: int, actor_id: int) -> None:
@@ -56,8 +54,7 @@ def delete_segment(camera_id: str, segment_id: int, actor_id: int) -> None:
             raise PermissionError("This footage is in a queued or running export; delete it once the export has finished")
         if not remove_segment_files([segment]): raise BlockingIOError("Recorded interval is currently being played")
         db.execute("DELETE FROM recording_segments WHERE id=?",(segment_id,))
-        db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-                   (actor_id,"delete","recording_segment",str(segment_id),json.dumps({"camera_id":camera_id},separators=(",",":"))))
+        audit_record(db, actor_id, "delete", "recording_segment", str(segment_id), camera_id=camera_id)
     from .tiering import discard_objects
     discard_objects([segment])  # A copy in an object store goes once the row is gone
 

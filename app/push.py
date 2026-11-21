@@ -41,6 +41,7 @@ from .alarms import label_text
 from .credentials import decrypt, derived_key, encrypt
 from .store import connect, has_row
 from app.clock import now as _now
+from .audit import record as audit_record
 
 logger = logging.getLogger("nvr.push")
 
@@ -151,8 +152,7 @@ def subscribe(user_id: int, endpoint: str, p256dh: str, auth: str, device_label:
             db.execute("INSERT INTO push_subscriptions(id,user_id,endpoint,p256dh,auth,device_label) VALUES(?,?,?,?,?,?) "
                        "ON CONFLICT(endpoint) DO UPDATE SET user_id=excluded.user_id,p256dh=excluded.p256dh,auth=excluded.auth,device_label=excluded.device_label",
                        (subscription_id, user_id, endpoint, p256dh, auth, device_label))
-            db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-                       (user_id, "push_subscribed", "push_subscription", subscription_id, json.dumps({"device": device_label})))
+            audit_record(db, user_id, "push_subscribed", "push_subscription", subscription_id, device=device_label)
         except BaseException:
             db.execute("ROLLBACK")
             raise

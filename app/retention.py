@@ -12,6 +12,7 @@ from pathlib import Path
 from .alarms import protects_footage, resolved_kept_since
 from .recording import recordings_path
 from .store import connect
+from .audit import record as audit_record
 
 DEFAULT_RETENTION_DAYS = 30
 _lease_lock = threading.Lock()
@@ -330,7 +331,7 @@ def cleanup_expired_recordings(now: datetime | None = None) -> dict[str, int]:
         expired=db.execute("SELECT id,segment_id FROM recording_holds WHERE released_at IS NULL AND expires_at IS NOT NULL AND expires_at<=?",(now.astimezone(timezone.utc).isoformat(),)).fetchall()
         for hold in expired:
             db.execute("UPDATE recording_holds SET released_at=expires_at WHERE id=?",(hold["id"],))
-            db.execute("INSERT INTO audit_log(action,resource_type,resource_id,details_json) VALUES('expire_hold','recording_segment',?,'{}')",(str(hold["segment_id"] or "unknown"),))
+            audit_record(db, None, "expire_hold", "recording_segment", str(hold["segment_id"] or "unknown"))
         rows = _expired_candidates(db, now)
     for row in rows:
         try:

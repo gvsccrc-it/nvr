@@ -22,6 +22,7 @@ from app.principal import CurrentUser, requires_scope
 from app.processes import run_to_end
 from app.store import connect
 from app.retention import acquire_playback, release_playback
+from app.audit import record as audit_record
 
 router = APIRouter()
 
@@ -188,12 +189,7 @@ async def snapshot_segment(
         source_time = at.isoformat()
         def note():
             with connect() as db:
-                cursor = db.execute(
-                    "INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-                    (int(user["id"]), "snapshot_downloaded", "recording_segment", str(segment_id),
-                     json.dumps({"camera_id": camera_id, "source_time": source_time})),
-                )
-                audit_reference = f"audit-{cursor.lastrowid}"
+                audit_reference = f"audit-{audit_record(db, int(user['id']), 'snapshot_downloaded', 'recording_segment', str(segment_id), camera_id=camera_id, source_time=source_time)}"
                 viewing_audit.record_events(db, int(user["id"]), [camera_id], "snapshot", audit_reference)
             return audit_reference
 

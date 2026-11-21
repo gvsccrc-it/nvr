@@ -1,7 +1,6 @@
 """The alarm inbox: list, inspect and handle alarms raised by rules."""
 from __future__ import annotations
 
-import json
 import sqlite3
 from typing import Literal
 
@@ -13,6 +12,7 @@ from app import alarms
 from app.access import may_view_camera
 from app.principal import Administrator, CurrentUser, Principal
 from app.store import connect
+from app.audit import record as audit_record
 
 router = APIRouter()
 
@@ -144,9 +144,7 @@ def put_alarm_settings(payload: AlarmSettingsRequest, user: Administrator) -> di
             before = alarms.settings(db)
             db.execute(f"UPDATE alarm_settings SET {','.join(f'{key}=?' for key in changes)},updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE singleton_id=1",
                        tuple(changes.values()))
-            db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-                       (int(user["id"]), "alarm_settings_updated", "alarm_settings", "1",
-                        json.dumps({**changes, "before": {key: before[key] for key in changes}}, separators=(",", ":"))))
+            audit_record(db, int(user["id"]), "alarm_settings_updated", "alarm_settings", "1", **{**changes, "before": {key: before[key] for key in changes}})
             saved = alarms.settings(db)
         except BaseException:
             db.execute("ROLLBACK")

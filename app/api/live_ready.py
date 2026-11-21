@@ -1,7 +1,6 @@
 """Settings for keeping live video ready (#216; see app/live_ready.py)."""
 from __future__ import annotations
 
-import json
 from typing import Literal
 
 from fastapi import APIRouter, Request
@@ -10,6 +9,7 @@ from pydantic import BaseModel
 from app import live_ready
 from app.principal import Administrator
 from app.store import connect
+from app.audit import record as audit_record
 
 router = APIRouter()
 
@@ -50,8 +50,7 @@ def put_live_ready(payload: LiveReadyRequest, request: Request, user: Administra
         try:
             before = live_ready.get_mode(db)
             live_ready.set_mode(db, payload.mode)
-            db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-                       (int(user["id"]), "live_ready_updated", "live_ready", "1", json.dumps({"from": before, "to": payload.mode}, separators=(",", ":"))))
+            audit_record(db, int(user["id"]), "live_ready_updated", "live_ready", "1", **{"from": before, "to": payload.mode})
         except BaseException:
             db.execute("ROLLBACK")
             raise
