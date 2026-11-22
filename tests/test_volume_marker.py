@@ -5,6 +5,7 @@ volume with footage rows, no marker and none of the recorded files is "not mount
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import uuid
 from unittest.mock import patch
@@ -75,6 +76,31 @@ class FirstUseTests(MarkerCase):
         volume_marker.forget()
         self.assertEqual(self.state(), "pressure")  # The test disk is tiny; what matters is that it is not "disk_not_mounted"
         self.assertEqual(self.marker()["id"], first)
+
+
+class BusyDatabaseTests(MarkerCase):
+    def test_marking_a_volume_never_waits_on_a_database_someone_else_is_writing(self):
+        """Adding a clip to a case checks its footage's files while it holds the write lock on another connection: the check that then
+        wanted to write the volume's marker waited the full ten seconds for a lock its own request held, on every clip."""
+        import sqlite3
+        import time
+
+        self.segment("north", hours_ago=5)  # Footage with its file, and no marker yet: the next look wants to write one
+        holder = sqlite3.connect(os.environ["NVR_DB_PATH"], isolation_level=None)
+        holder.execute("BEGIN IMMEDIATE")
+        try:
+            started = time.monotonic()
+            self.assertEqual(volume_marker.state("default", self.root), volume_marker.PRESENT)
+            self.assertEqual(volume_marker.state("default", self.root), volume_marker.PRESENT)
+            waited = time.monotonic() - started
+        finally:
+            holder.execute("ROLLBACK")
+            holder.close()
+        self.assertLess(waited, 1.0)
+        self.assertIsNone(self.marker(), "not written while the database was busy")
+        volume_marker.forget()
+        self.assertEqual(volume_marker.state("default", self.root), volume_marker.PRESENT)
+        self.assertTrue(self.marker(), "and written at the next look")
 
 
 class DiskNotMountedTests(MarkerCase):
