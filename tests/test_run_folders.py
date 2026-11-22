@@ -120,6 +120,35 @@ class RunFolderTests(unittest.TestCase):
         self.assertEqual((result.unindexed_files, result.unindexed_bytes, result.removed_files), (1, 10, 1))
         self.assertTrue(tiny.exists())
 
+    def test_a_finished_segment_that_never_reached_the_list_is_kept_and_counted(self):
+        """FFmpeg closed the file and was killed before it wrote the list line: it has its index, so it is footage."""
+        camera_id = self.camera()
+        run = self.killed_run(camera_id, finished=1)
+        whole = run / "segment-20261122T125900Z.mp4"
+        box = lambda kind, body: (len(body) + 8).to_bytes(4, "big") + kind + body  # noqa: E731
+        whole.write_bytes(box(b"ftyp", b"isom" + bytes(12)) + box(b"moov", bytes(40)) + box(b"mdat", bytes(200)))
+        os.utime(whole, (OLD, OLD))
+        result, _ = self.pass_over(RecordingManager())
+        self.assertTrue(whole.exists())
+        self.assertEqual((result.removed_files, result.unindexed_files), (0, 1))
+
+    def test_what_makes_a_file_finished(self):
+        box = lambda kind, body: (len(body) + 8).to_bytes(4, "big") + kind + body  # noqa: E731
+        cases = {
+            "finished, index first": (box(b"ftyp", bytes(16)) + box(b"moov", bytes(40)) + box(b"mdat", bytes(100)), True),
+            "finished, index last": (box(b"ftyp", bytes(16)) + box(b"mdat", bytes(100)) + box(b"moov", bytes(40)), True),
+            "cut off in the video data": (box(b"ftyp", bytes(16)) + (5000).to_bytes(4, "big") + b"mdat" + bytes(100), False),
+            "video data of unknown length": (box(b"ftyp", bytes(16)) + (0).to_bytes(4, "big") + b"mdat" + bytes(100), False),
+            "no index at all": (box(b"ftyp", bytes(16)) + box(b"free", bytes(8)) + box(b"mdat", bytes(100)), False),
+            "empty": (b"", False),
+            "not video": (b"u" * 300, False),
+        }
+        for name, (content, finished) in cases.items():
+            path = self.root / "probe.mp4"
+            path.write_bytes(content)
+            self.assertEqual(run_folders.finished_video(path), finished, name)
+        self.assertTrue(run_folders.finished_video(self.root / "no-such-file.mp4"), "what cannot be read is kept")
+
     def test_a_run_left_with_nothing_but_its_list_is_removed(self):
         camera_id = self.camera()
         run = self.killed_run(camera_id, finished=0)

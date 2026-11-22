@@ -8,8 +8,9 @@ video per camera per kill stayed on the disk for ever, counted by nothing.
 Every few minutes the recorder goes over the run folders that no recording is using:
 
 * the segments its list says were finished are indexed (they are footage, and now play, expire and count like any other);
-* a segment file that is in no list and has no row is the one FFmpeg was writing when it died. It was never finished and cannot be played,
-  and it is removed once it is old enough that nothing can still be writing it;
+* a segment file that is in no list, has no row and has no index of its own (an MP4's ``moov`` box, written as a segment is finished) is the
+  one FFmpeg was writing when it died. It cannot be played, and it is removed once it is old enough that nothing can still be writing it.
+  A file that does have its index is footage and is kept, and counted;
 * what is still on disk without a row afterwards is counted, and the count is in ``/metrics``.
 
 Only a camera's own run folders are ever looked at (a folder named as the recorder names them, under the camera's folder on a volume that
@@ -112,6 +113,31 @@ def _listed(run: Path) -> set[str]:
     return {line.split(",", 1)[0] for line in lines if line.endswith(("\n", "\r"))}
 
 
+def finished_video(path: Path) -> bool:
+    """Whether an MP4 file has its index (a top-level ``moov`` box), which FFmpeg writes as it finishes a segment. A file without one cannot
+    be played; a file with one is footage, whatever the list says, and is never removed here."""
+    try:
+        with path.open("rb") as source:
+            size = path.stat().st_size
+            offset = 0
+            for _ in range(64):  # A segment has a handful of top-level boxes
+                source.seek(offset)
+                header = source.read(16)
+                if len(header) < 8:
+                    return False
+                length, kind = int.from_bytes(header[:4], "big"), header[4:8]
+                if kind == b"moov":
+                    return True
+                if length == 1 and len(header) == 16:
+                    length = int.from_bytes(header[8:16], "big")
+                if length < 8 or offset + length > size:
+                    return False  # A box that runs to the end of the file, or past it: the file was cut off
+                offset += length
+    except OSError:
+        return True  # Cannot be read now: not ours to judge, so it is kept
+    return False
+
+
 def _has_row(relative: str) -> bool:
     with connect() as db:
         return db.execute("SELECT 1 FROM recording_segments WHERE relative_path=?", (relative,)).fetchone() is not None
@@ -149,7 +175,7 @@ def reconcile(manager: "RecordingManager", camera_ids: list[str], active: set[Pa
                 continue  # Not under the recordings folder: never touched
             if _has_row(relative):
                 continue
-            if name not in listed and now - status.st_mtime >= SAFE_AGE_SECONDS:
+            if name not in listed and now - status.st_mtime >= SAFE_AGE_SECONDS and not finished_video(path):
                 # FFmpeg never finished it: no list line, no row, and nothing has written to it for minutes.
                 try:
                     path.unlink()
