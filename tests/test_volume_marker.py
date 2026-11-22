@@ -7,7 +7,6 @@ from __future__ import annotations
 import json
 import shutil
 import uuid
-from datetime import timedelta
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -19,7 +18,7 @@ from app.principal import Principal, administrator, current_user
 from app.retention import cleanup_expired_recordings
 from app.storage import camera_recordings_dir, storage_status
 from app.store import connect
-from tests.test_headroom import NOW, UNIT, HeadroomCase
+from tests.test_headroom import NOW, HeadroomCase
 
 
 class MarkerCase(HeadroomCase):
