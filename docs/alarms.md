@@ -51,6 +51,10 @@ How it works:
 
 The NVR must be able to reach the push services on the internet (for example `fcm.googleapis.com`, `updates.push.services.mozilla.com` and `web.push.apple.com`) for notifications to arrive. Push endpoints must use HTTPS and are checked like webhook receivers: DNS names are resolved and private, loopback and link-local destinations are rejected before each delivery.
 
+**Only the browsers' own push services are used.** A subscription's address comes from the browser, so the NVR accepts only Google (`fcm.googleapis.com`), Mozilla (`updates.push.services.mozilla.com`), Apple (hosts under `push.apple.com`) and Microsoft (hosts under `notify.windows.com`), when the subscription is made and again each time a notification is sent. For a browser whose service is not on that list, set `NVR_PUSH_EXTRA_HOSTS` to its host name (several separated by commas). On upgrade, a subscription to any other address is removed, and that person switches notifications on again in that browser.
+
+**Ten devices per person**, browsers and phones together: registering an eleventh takes the place of the one used longest ago. Each notification has 20 seconds to be accepted by the push service, whatever the service does, and its answer is never read beyond the status.
+
 ## Webhooks
 
 Alarm state changes are sent as signed webhooks, signed and retried exactly like the existing events. Choose them in each receiver's event filter:

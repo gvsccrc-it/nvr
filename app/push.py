@@ -21,6 +21,7 @@ import logging
 import os
 import sqlite3
 import struct
+import threading
 import time
 import uuid
 from datetime import datetime, timedelta
@@ -127,12 +128,62 @@ def encrypt_payload(payload: bytes, p256dh: str, auth: str, *, sender: ec.Ellipt
 
 # --- subscriptions and preferences --------------------------------------------------
 
+# The browsers' own push services. A subscription's address is whatever the browser sends, so without this any signed-in person could
+# have the NVR post to a server of their choosing every time an alarm fired (#523). NVR_PUSH_EXTRA_HOSTS (comma-separated host names)
+# adds the service of a browser that is not on the list.
+PUSH_SERVICE_HOSTS = ("fcm.googleapis.com", "updates.push.services.mozilla.com")
+PUSH_SERVICE_SUFFIXES = (".push.apple.com", ".notify.windows.com")
+MAX_DEVICES = 10  # Per person, browsers and phones together: an eleventh takes the place of the one used longest ago
+SEND_DEADLINE_SECONDS = 20.0  # One delivery, whatever the service does: every other device's notification waits behind it
+
+
+def push_service_host(host: str) -> bool:
+    host = host.lower().rstrip(".")
+    extra = {item.strip().lower() for item in os.environ.get("NVR_PUSH_EXTRA_HOSTS", "").split(",") if item.strip()}
+    return bool(host) and (host in PUSH_SERVICE_HOSTS or host in extra or host.endswith(PUSH_SERVICE_SUFFIXES))
+
+
+def make_room_for_device(db: sqlite3.Connection, user_id: int, endpoint: str) -> None:
+    """Before a person's new device is stored: at the limit, the device used longest ago goes. In the caller's transaction."""
+    if db.execute("SELECT 1 FROM push_subscriptions WHERE endpoint=?", (endpoint,)).fetchone():
+        return  # Known already: it is being updated, not added
+    held = db.execute("SELECT id,device_label FROM push_subscriptions WHERE user_id=? ORDER BY COALESCE(last_success_at,created_at) DESC, created_at DESC", (user_id,)).fetchall()
+    for stale in held[MAX_DEVICES - 1:]:
+        db.execute("DELETE FROM push_subscriptions WHERE id=?", (stale["id"],))
+        audit_record(db, user_id, "push_unsubscribed", "push_subscription", stale["id"], device=stale["device_label"], reason="device_limit")
+
+
+def _post_for_status(client: httpx.Client, endpoint: str, body: bytes, headers: dict[str, str]) -> int:
+    """Send one notification and return the service's status. The answer's body is never read, so its size is no concern, and the whole
+    attempt has a deadline: a service that answered a byte every few seconds never tripped the per-read time-out and held up everyone's
+    notifications, and one that answered with a body that expands enormously grew this process by its expanded size (#523)."""
+    outcome: dict[str, Any] = {}
+
+    def post() -> None:
+        try:
+            with client.stream("POST", endpoint, content=body, headers=headers) as response:
+                outcome["status"] = int(response.status_code)
+        except BaseException as exc:  # noqa: BLE001 - handed to the caller's thread
+            outcome["error"] = exc
+
+    sender = threading.Thread(target=post, name="push-send", daemon=True)
+    sender.start()
+    sender.join(SEND_DEADLINE_SECONDS)
+    if sender.is_alive():
+        raise httpx.ReadTimeout("The push service did not answer in time")
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["status"]
+
+
 def validate_endpoint(endpoint: str) -> str:
     """Push services are public HTTPS endpoints; anything else is refused, when stored and when used."""
     from .webhooks import validate_target_url
 
     if not endpoint.startswith("https://"):
         raise ValueError("Push subscriptions must use an HTTPS push service")
+    if not push_service_host(urlsplit(endpoint).hostname or ""):
+        raise ValueError("Push subscriptions must use a browser's own push service (Google, Mozilla, Apple or Microsoft)")
     try:
         return validate_target_url(endpoint, allow_private=False)
     except ValueError as exc:
@@ -146,6 +197,7 @@ def subscribe(user_id: int, endpoint: str, p256dh: str, auth: str, device_label:
     with connect() as db:
         db.execute("BEGIN IMMEDIATE")
         try:
+            make_room_for_device(db, user_id, endpoint)
             existing = db.execute("SELECT id FROM push_subscriptions WHERE endpoint=?", (endpoint,)).fetchone()
             subscription_id = existing["id"] if existing else str(uuid.uuid4())
             # A device that changes hands (another person signs in) moves to its new owner.
@@ -369,11 +421,11 @@ def deliver_due(client: httpx.Client | None = None, limit: int = 50) -> list[str
                     continue
                 validate_endpoint(delivery["endpoint"])
                 body = encrypt_payload(delivery["payload_json"].encode("utf-8"), delivery["p256dh"], delivery["auth"])
-                response = client.post(delivery["endpoint"], content=body, headers={
+                status_code = _post_for_status(client, delivery["endpoint"], body, {
                     "Authorization": vapid_header(delivery["endpoint"], private, public), "Content-Encoding": "aes128gcm",
                     "Content-Type": "application/octet-stream", "TTL": str(TTL_SECONDS), "Urgency": "high",
                 })
-                outcomes.append(_finish(delivery, response.status_code, None if response.is_success else f"HTTP {response.status_code}"))
+                outcomes.append(_finish(delivery, status_code, None if 200 <= status_code < 300 else f"HTTP {status_code}"))
             except (PushError, ValueError) as exc:
                 outcomes.append(_finish(delivery, None, f"invalid: {str(exc)[:180]}"))
             except httpx.HTTPError as exc:
@@ -441,7 +493,10 @@ def thumbnail(alarm_id: str) -> bytes | None:
 
 
 def recover_inflight() -> None:
+    """Deliveries that were being sent when the worker stopped are sent again, unless they have had their attempts: a delivery that kills
+    the worker was put back and sent again after every restart, without end (#523)."""
     with connect() as db:
+        db.execute("UPDATE push_deliveries SET status='failed',last_error='The worker stopped while sending this, more than once' WHERE status='sending' AND attempt_count>=?", (MAX_ATTEMPTS,))
         db.execute("UPDATE push_deliveries SET status='queued' WHERE status='sending'")
 
 
