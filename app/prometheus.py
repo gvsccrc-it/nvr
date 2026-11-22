@@ -198,6 +198,14 @@ def _database(out: _Output) -> None:
     out.sample("nvr_database_bytes", size)
     out.family("nvr_database_log_bytes", "gauge", "The size of the database's write-ahead log file.")
     out.sample("nvr_database_log_bytes", log_bytes())
+    from . import run_folders
+
+    unindexed = run_folders.last_result()
+    if unindexed is not None:
+        out.family("nvr_recordings_unindexed_bytes", "gauge", "Bytes of segment files in old run folders that have no row in the index.")
+        out.sample("nvr_recordings_unindexed_bytes", unindexed["unindexed_bytes"])
+        out.family("nvr_recordings_unindexed_files", "gauge", "Segment files in old run folders that have no row in the index.")
+        out.sample("nvr_recordings_unindexed_files", unindexed["unindexed_files"])
     out.family("nvr_database_log_limit_bytes", "gauge", "The size the write-ahead log file is brought back to once it can be reset.")
     out.sample("nvr_database_log_limit_bytes", log_limit_bytes())
 

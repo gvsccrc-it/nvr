@@ -339,9 +339,14 @@ class RecordingManager:
         self.storage_task: asyncio.Task[None] | None = None
         self.stopping = False
         self._database_warned = float("-inf")
+        self._run_folders_after = ""  # Where the pass over old run folders carries on
+        from . import run_folders
+
+        self._run_folders_round = run_folders.Result()
         self._newest_segment: dict[Path, tuple[str, float]] = {}  # Per run folder: the newest segment's path, and when the folder was last listed
         self._fresh_written: dict[str, float] = {}  # Per camera: when "video is arriving" was last written
         self._status_written: dict[str, tuple[tuple[object, ...], float]] = {}  # Per camera: the last state written, and when
+        self._active_runs: set[Path] = set()  # The run folders recordings are writing to now: never touched by the pass over old ones (#484)
         self._unindexed: list[tuple[str, Path, Path]] = []  # Runs that ended while the database could not be written: (camera, list, folder)
 
     async def start(self) -> None:
@@ -515,6 +520,7 @@ class RecordingManager:
             try:
                 await asyncio.to_thread(cleanup_expired_recordings)
                 await asyncio.to_thread(self._prune_viewing_audit)
+                await asyncio.to_thread(self._reconcile_run_folders)
                 if started:  # Not at startup: the disks are read from the second pass, five minutes in, so starting up runs no external command.
                     await asyncio.to_thread(self._watch_disks)
             except asyncio.CancelledError:
@@ -523,6 +529,24 @@ class RecordingManager:
                 pass
             started = True
             await asyncio.sleep(300)
+
+    def _reconcile_run_folders(self) -> None:
+        """Go over the run folders no recording is using: index what an earlier recorder finished and did not index, remove the segment it
+        was writing when it was killed, and count what is on disk without a row (#484). A bounded number of folders a pass."""
+        from . import run_folders
+
+        try:
+            with connect() as db:
+                camera_ids = [row[0] for row in db.execute("SELECT id FROM cameras")]
+            waiting = {output_dir for _, _, output_dir in self._unindexed}  # Theirs to index when the database allows (#483)
+            result, self._run_folders_after = run_folders.reconcile(self, camera_ids, set(self._active_runs) | waiting, after=self._run_folders_after)
+            for name in ("folders", "indexed", "removed_files", "removed_bytes", "unindexed_files", "unindexed_bytes"):
+                setattr(self._run_folders_round, name, getattr(self._run_folders_round, name) + getattr(result, name))
+            if not self._run_folders_after:  # Every folder has been seen: this round's count is the whole disk's
+                run_folders.record(self._run_folders_round)
+                self._run_folders_round = run_folders.Result()
+        except Exception:  # noqa: BLE001 - never stops the retention pass that shares this loop
+            logging.getLogger("nvr.recording").exception("The pass over old run folders failed")
 
     @staticmethod
     def _watch_disks() -> None:
@@ -1122,6 +1146,7 @@ class RecordingManager:
             try:
                 from .storage import camera_recordings_dir
                 output_dir = camera_recordings_dir(camera_id) / uuid.uuid4().hex
+                self._active_runs.add(output_dir)
                 output_dir.mkdir(parents=True, exist_ok=True)
             except OSError:
                 await self._status(camera_id, "unavailable", "Assigned recording volume is missing or not writable", fault="disk_unavailable")
@@ -1174,6 +1199,7 @@ class RecordingManager:
                 await self._end_ffmpeg(process)
                 if not indexed:
                     self._index_rest(camera_id, list_path, output_dir)
+                self._active_runs.discard(output_dir)
                 if progress_task:
                     progress_task.cancel()
                     await asyncio.gather(progress_task, return_exceptions=True)
