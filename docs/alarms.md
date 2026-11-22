@@ -13,6 +13,8 @@ Each alarm shows:
 - **Open in Playback**, which searches the five minutes either side of the alarm, selects the camera and waits paused at the alarm time;
 - comments, and the alarm's history: who acknowledged, assigned, commented and resolved, and when.
 
+An alarm labelled **"Too many alarms: further ones are being held back"** or **"N more alarms held back"** is a summary: its rule passed its ceiling on that camera (10 alarms a minute, 60 an hour) and the alarms after that were not raised. See [rules](rules.md), "Limits on what a rule can raise". An occupancy alarm's history also shows when the count dropped back, and each reminder if the rule asks for them.
+
 ## Handling an alarm
 
 | State | How it gets there |

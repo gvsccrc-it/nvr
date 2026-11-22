@@ -34,7 +34,7 @@ function summary(rule: Rule): string {
     : rule.condition.type === "face"
     ? (rule.condition.entry_ids.length ? `${rule.condition.entry_ids.length} watched face(s)` : "any watched face")
     : rule.classes.map(item => CLASS_LABEL[item].toLowerCase()).join(" and ");
-  return `${CONDITION_LABEL[rule.condition.type]} · ${subject}${rule.enabled ? "" : " · disabled"}`;
+  return `${CONDITION_LABEL[rule.condition.type]} · ${subject}${rule.enabled ? "" : " · disabled"}${rule.cooldown_seconds === 0 ? " · no quiet time" : ""}`;
 }
 
 /** Rules beside one rule editor; phones drill into the editor and come back. */
@@ -217,6 +217,10 @@ function RuleEditor({ rule, onSaved, onClose, onDeleted }: {
                   <input type="number" min={1} max={3600} value={Number.isNaN(condition.for_seconds) ? "" : condition.for_seconds}
                          onChange={event => setCondition({ ...condition, for_seconds: event.target.value === "" ? Number.NaN : Number(event.target.value) })} />
                 </label>
+                <label className="field"><span>Remind while it stays over (minutes, empty for never)</span>
+                  <input type="number" min={15} max={1440} placeholder="Never" value={condition.remind_minutes == null || Number.isNaN(condition.remind_minutes) ? "" : condition.remind_minutes}
+                         onChange={event => setCondition({ ...condition, remind_minutes: event.target.value === "" ? null : Number(event.target.value) })} />
+                </label>
               </>
             ) : null}
             {condition.type === "inactivity" ? (
@@ -301,7 +305,7 @@ function RuleEditor({ rule, onSaved, onClose, onDeleted }: {
                                 onChange={zones => zones[0] && setCondition({ ...condition, zone: zones[0] })} />
                   ) : null}
                   <p className="muted field-hint">{condition.type === "occupancy"
-                    ? "Fires when more than this many are in view for the whole time. While the count stays over the limit it can fire again at most once a minute."
+                    ? "Raises one alarm when more than this many have been in view for the whole time. However long the count then stays over the limit it is that one alarm, which records when the count dropped back. With a reminder interval (15 minutes or more) the alarm gets a note and a notification each time it passes; reminders are never new alarms."
                     : "Fires once when a person or vehicle has stayed within a small patch of the frame for the whole time. It can fire again only after the object has moved."}</p>
                 </>
               ) : (
@@ -336,11 +340,13 @@ function RuleEditor({ rule, onSaved, onClose, onDeleted }: {
                               onChange={next => tab.change({ schedule: { ...draft.schedule!, intervals: next.map(({ days, start, end }) => ({ days, start, end })) } })} />
             </>
           ) : <p className="muted field-hint">The rule is always active.</p>}
-          <label className="field"><span>Cooldown per camera (seconds)</span>
+          <label className="field"><span>Quiet time per camera (seconds)</span>
             <input type="number" min={0} max={86400} value={Number.isNaN(draft.cooldown_seconds) ? "" : draft.cooldown_seconds}
                    onChange={event => tab.change({ cooldown_seconds: event.target.value === "" ? Number.NaN : Number(event.target.value) })} />
           </label>
-          <p className="muted field-hint">Each object fires a rule at most once. A cooldown also waits this long after an event on a camera before the next.</p>
+          <p className="muted field-hint">Each object fires a rule at most once. The quiet time also waits this long after an event on a camera before the next; new rules start with a minute.
+            Whatever it is set to, a rule raises at most 10 alarms a minute and 60 an hour on one camera: past that its events are still recorded, and one alarm says further ones are being held back.</p>
+          {draft.cooldown_seconds === 0 ? <p className="notice" data-tone="warn">With no quiet time, every object that meets the rule raises its own alarm at once. A minute is the usual choice.</p> : null}
           <label className="check"><input type="checkbox" checked={draft.pop_into_live} onChange={event => tab.change({ pop_into_live: event.target.checked })} /> Pop alarms into Live</label>
           <p className="muted field-hint">Brings the alarm's camera and its neighbors into Live for people who turned alarm pop-in on, and onto video walls.</p>
         </fieldset>

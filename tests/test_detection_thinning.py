@@ -136,8 +136,9 @@ class SceneCase(SearchCase):
 # What the scene comes to on the code as it was before thinning.
 REPLAYED = [("Crossed", "walker", 16), ("Crowded", "everyone", 158), ("Entered", "guest one", 100), ("Entered", "guest two", 100), ("Entered", "walker", 16),
             ("Loitering", "guest one", 220), ("Loitering", "guest two", 220), ("Loitering", "walker", 136), ("Parked", "car", 180)]
-# Live, a crowd that stays is reported again each minute (each pass looks at the last minute and the rule's shortest cooldown is a minute).
-LIVE = sorted(REPLAYED + [("Crowded", "everyone", second) for second in (218, 278, 338, 398)])
+# Live is the same as test mode. (When this scene was first pinned, live reported the crowd again every minute while it stayed: 218, 278,
+# 338 and 398 s as well. That was #513, fixed since: one alarm for one over-limit stretch.)
+LIVE = sorted(REPLAYED)
 COUNTS = {"walker": 316, "guest one": 151, "guest two": 151, "car": 351}
 # Box corners (x, y) at moments of playback. A standing object's box is within a fiftieth of the picture of where it is drawn (MOVED).
 DRAWN = {

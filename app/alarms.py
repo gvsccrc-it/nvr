@@ -58,6 +58,7 @@ def _notify(db: sqlite3.Connection, alarm_id: str, event_type: str, actor_id: in
 
 
 PLATE_LABEL_PREFIX = "plate:"  # A licence plate alarm's label is this and the plate
+SUPPRESSED_LABEL_PREFIX = "suppressed:"  # A summary alarm's label is this and how many alarms were held back
 LABEL_TEXT = {"person": "Person", "vehicle": "Vehicle", "covered": "Camera covered", "moved": "Camera moved", "defocused": "Camera defocused", "fall": "Person fell", "occupancy": "Over the occupancy limit", "face": "Watched face seen"}
 
 
@@ -65,17 +66,91 @@ def label_text(label: object) -> str:
     """How an alarm's label reads in a notification: an object class, what happened to the camera, or a licence plate ("plate:AB12CDE")."""
     if str(label).startswith(PLATE_LABEL_PREFIX):
         return f"Plate {str(label)[len(PLATE_LABEL_PREFIX):]}"
+    if str(label).startswith(SUPPRESSED_LABEL_PREFIX):
+        count = str(label)[len(SUPPRESSED_LABEL_PREFIX):]
+        return "Too many alarms: further ones are being held back" if count == "0" else f"{count} more alarm{'' if count == '1' else 's'} held back"
     return LABEL_TEXT.get(str(label), str(label or "object").capitalize())
 
 
-def create_alarm(db: sqlite3.Connection, rule_event_id: str) -> str:
-    """Raise the alarm for a rule event, inside the caller's transaction.
+# A ceiling for every rule (#514). Nothing capped a noisy rule but the email limits: each alarm is a row, a history row, an audit row,
+# webhook rows, a look at every push device and a delivery for each of the rule's actions, all inside the rules worker's one write
+# transaction. Past the ceiling a rule's events are still recorded, but no alarm is raised and nothing is sent; one summary alarm says so
+# at once and again every SUMMARY_EVERY while it lasts. A fall is never held back.
+CEILING_A_MINUTE = 10  # Alarms of one rule on one camera
+CEILING_AN_HOUR = 60
+SUMMARY_EVERY = timedelta(minutes=10)
+NEVER_HELD_BACK = {"fall"}
 
-    During a maintenance window for the camera (#234) the alarm is kept and marked with the window, but nothing goes out: no pop-in, webhook, push or rule action."""
+
+def _over_ceiling(db: sqlite3.Connection, event: sqlite3.Row, occurred: datetime) -> bool:
+    def raised(since: timedelta, limit: int) -> bool:
+        return db.execute("SELECT COUNT(*) FROM (SELECT 1 FROM alarms WHERE rule_id=? AND camera_id=? AND occurred_at>? AND occurred_at<=? AND label NOT LIKE 'suppressed:%' LIMIT ?)",
+                          (event["rule_id"], event["camera_id"], (occurred - since).isoformat(), occurred.isoformat(), limit)).fetchone()[0] >= limit
+    return raised(timedelta(minutes=1), CEILING_A_MINUTE) or raised(timedelta(hours=1), CEILING_AN_HOUR)
+
+
+def _summary_alarm(db: sqlite3.Connection, event: sqlite3.Row, occurred: datetime, held_back: int) -> str:
+    """The one alarm that says a rule's alarms are being held back on a camera: in the inbox, to push devices and to webhooks. It runs
+    none of the rule's actions (a relay is not pulsed, a message is not posted, to say that alarms were not sent)."""
+    from .push import queue_for_alarm
+
+    event_id, alarm_id, stamp = str(uuid.uuid4()), str(uuid.uuid4()), _now()
+    label = f"{SUPPRESSED_LABEL_PREFIX}{held_back}"
+    db.execute("INSERT INTO rule_events(id,rule_id,rule_name,camera_id,track_id,detection_id,label,condition_type,occurred_at,box_json) VALUES(?,?,?,?,?,?,?,?,?,?)",
+               (event_id, event["rule_id"], event["rule_name"], event["camera_id"], f"suppressed-{event_id}", None, label, event["condition_type"], occurred.isoformat(),
+                '{"x":0,"y":0,"width":1,"height":1}'))
+    db.execute(
+        "INSERT INTO alarms(id,rule_event_id,rule_id,rule_name,camera_id,track_id,label,condition_type,occurred_at,box_json,clip_starts_at,clip_ends_at,created_at,updated_at) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (alarm_id, event_id, event["rule_id"], event["rule_name"], event["camera_id"], None, label, event["condition_type"], occurred.isoformat(),
+         '{"x":0,"y":0,"width":1,"height":1}', (occurred - CLIP_BEFORE).isoformat(), (occurred + CLIP_AFTER).isoformat(), stamp, stamp))
+    _record(db, alarm_id, None, "created", {"rule_name": event["rule_name"], "camera_id": event["camera_id"], "held_back": held_back})
+    _notify(db, alarm_id, "alarm.created", None)
+    queue_for_alarm(db, alarm_id)
+    return alarm_id
+
+
+def _hold_back(db: sqlite3.Connection, event: sqlite3.Row, occurred: datetime) -> None:
+    """Count an event whose alarm is not raised, and raise the summary alarm when one is due."""
+    state = db.execute("SELECT held_back,last_summary_at FROM alarm_suppressions WHERE rule_id=? AND camera_id=?", (event["rule_id"], event["camera_id"])).fetchone()
+    if state is None:
+        db.execute("INSERT INTO alarm_suppressions(rule_id,camera_id,started_at,held_back,last_summary_at) VALUES(?,?,?,1,?)",
+                   (event["rule_id"], event["camera_id"], occurred.isoformat(), occurred.isoformat()))
+        _summary_alarm(db, event, occurred, 0)  # Said at once: from here on this rule's alarms on this camera are held back
+        return
+    held_back = int(state["held_back"]) + 1
+    if occurred - _parse(state["last_summary_at"]) >= SUMMARY_EVERY:
+        _summary_alarm(db, event, occurred, held_back)
+        db.execute("UPDATE alarm_suppressions SET held_back=0,last_summary_at=? WHERE rule_id=? AND camera_id=?", (occurred.isoformat(), event["rule_id"], event["camera_id"]))
+    else:
+        db.execute("UPDATE alarm_suppressions SET held_back=? WHERE rule_id=? AND camera_id=?", (held_back, event["rule_id"], event["camera_id"]))
+
+
+def _ceiling_cleared(db: sqlite3.Connection, event: sqlite3.Row, occurred: datetime) -> None:
+    """The rule is under its ceiling again: what was held back since the last summary is said once, and the count is put away."""
+    state = db.execute("SELECT held_back FROM alarm_suppressions WHERE rule_id=? AND camera_id=?", (event["rule_id"], event["camera_id"])).fetchone()
+    if state is None:
+        return
+    db.execute("DELETE FROM alarm_suppressions WHERE rule_id=? AND camera_id=?", (event["rule_id"], event["camera_id"]))
+    if int(state["held_back"]) > 1:  # (The first one held back was announced by the summary that began it)
+        _summary_alarm(db, event, occurred, int(state["held_back"]) - 1)
+
+
+def create_alarm(db: sqlite3.Connection, rule_event_id: str, *, late: bool = False) -> str | None:
+    """Raise the alarm for a rule event, inside the caller's transaction. None when the rule is over its ceiling on this camera (#514): the
+    event stays recorded, no alarm is raised and nothing is sent.
+
+    During a maintenance window for the camera (#234) the alarm is kept and marked with the window, but nothing goes out: no pop-in, webhook, push or rule action.
+    The same holds for a ``late`` alarm: one for something long past, found when the rules worker caught up after being down (#514)."""
     from . import maintenance
 
     event = db.execute("SELECT * FROM rule_events WHERE id=?", (rule_event_id,)).fetchone()
     occurred = _parse(event["occurred_at"]).astimezone(timezone.utc)
+    if event["rule_id"] is not None and event["condition_type"] not in NEVER_HELD_BACK:
+        if _over_ceiling(db, event, occurred):
+            _hold_back(db, event, occurred)
+            return None
+        _ceiling_cleared(db, event, occurred)
     alarm_id = str(uuid.uuid4())
     stamp = _now()
     window = maintenance.covering(db, event["camera_id"], occurred)
@@ -90,6 +165,9 @@ def create_alarm(db: sqlite3.Connection, rule_event_id: str) -> str:
         _record(db, alarm_id, None, "created", {"rule_name": event["rule_name"], "camera_id": event["camera_id"], "maintenance": window["name"]})
         maintenance.count_held(db, window["id"], "alarm")
         return alarm_id
+    if late:
+        _record(db, alarm_id, None, "created", {"rule_name": event["rule_name"], "camera_id": event["camera_id"], "late": True})
+        return alarm_id
     if db.execute("SELECT 1 FROM rules WHERE id=? AND pop_into_live=1", (event["rule_id"],)).fetchone():
         db.execute("INSERT INTO alarm_pop_ins(alarm_id) VALUES(?)", (alarm_id,))
     _record(db, alarm_id, None, "created", {"rule_name": event["rule_name"], "camera_id": event["camera_id"]})
@@ -99,6 +177,28 @@ def create_alarm(db: sqlite3.Connection, rule_event_id: str) -> str:
     queue_for_alarm(db, alarm_id)
     queue_for_event(db, event["id"], alarm_id)
     return alarm_id
+
+
+def stretch_ended(db: sqlite3.Connection, rule_event_id: str, at: datetime) -> None:
+    """An occupancy alarm's count has dropped back: the alarm records when (#513). Inside the caller's transaction; nothing is sent."""
+    alarm = db.execute("SELECT id FROM alarms WHERE rule_event_id=?", (rule_event_id,)).fetchone()
+    if alarm is not None:
+        _record(db, alarm["id"], None, "ended", {"ended_at": at.astimezone(timezone.utc).isoformat()})
+        db.execute("UPDATE alarms SET updated_at=? WHERE id=?", (_now(), alarm["id"]))
+
+
+def remind(db: sqlite3.Connection, rule_event_id: str, at: datetime, since: datetime) -> None:
+    """An occupancy stretch is still going after the rule's reminder interval: a note on its alarm and a notification to the devices that
+    want it. Not a new alarm, and nothing for an alarm that has been resolved or was raised during maintenance."""
+    from .push import queue_reminder
+
+    alarm = db.execute("SELECT id,state,maintenance_window_id FROM alarms WHERE rule_event_id=?", (rule_event_id,)).fetchone()
+    if alarm is None or alarm["state"] == "resolved" or alarm["maintenance_window_id"] is not None:
+        return
+    minutes = max(1, round((at - since).total_seconds() / 60))
+    _record(db, alarm["id"], None, "reminded", {"at": at.astimezone(timezone.utc).isoformat(), "minutes": minutes})
+    db.execute("UPDATE alarms SET updated_at=? WHERE id=?", (_now(), alarm["id"]))
+    queue_reminder(db, alarm["id"], f"Still over the limit after {minutes} minute{'' if minutes == 1 else 's'}")
 
 
 def _open_alarm(db: sqlite3.Connection, alarm_id: str) -> sqlite3.Row:

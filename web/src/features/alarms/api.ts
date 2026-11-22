@@ -104,4 +104,5 @@ export const STATE_LABEL: Record<AlarmState, string> = { new: "New", acknowledge
 export const FILTER_LABEL: Record<AlarmFilter, string> = { open: "Open", new: "New", acknowledged: "Acknowledged", assigned: "Assigned", resolved: "Resolved", all: "All" };
 export const ACTION_LABEL: Record<string, string> = {
   created: "Raised", acknowledged: "Acknowledged", assigned: "Assigned", commented: "Commented", resolved: "Resolved",
+  ended: "The count dropped back", reminded: "Still over the limit",
 };

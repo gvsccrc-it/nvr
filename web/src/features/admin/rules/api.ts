@@ -14,7 +14,7 @@ export type Condition =
   | { type: "line_crossing"; line: Line; direction: CrossingDirection }
   | { type: "loitering"; zone: Zone; dwell_seconds: number }
   | { type: "inactivity"; zone: Zone | null; still_seconds: number }
-  | { type: "occupancy"; zone: Zone | null; limit: number; for_seconds: number }
+  | { type: "occupancy"; zone: Zone | null; limit: number; for_seconds: number; remind_minutes?: number | null }
   | { type: "wrong_way"; zone: Zone; direction: TravelDirection }
   | { type: "tamper"; kinds: TamperKind[] }
   | { type: "external_event"; source_ids: string[]; types: string[]; subjects: string[] }
@@ -139,7 +139,7 @@ export function switchCondition(current: Condition, type: Condition["type"]): Co
 
 export const newRule = (): RuleDefinition => ({
   name: "", enabled: true, camera_ids: [], group_ids: [], condition: { type: "zone_entry", zone: DEFAULT_ZONE },
-  classes: ["person"], schedule: null, cooldown_seconds: 0, pop_into_live: false, actions: [],
+  classes: ["person"], schedule: null, cooldown_seconds: 60, pop_into_live: false, actions: [],
 });
 
 export const definitionOf = (rule: Rule): RuleDefinition => ({
@@ -168,6 +168,8 @@ export function definitionProblem(definition: RuleDefinition): string | null {
   if (definition.condition.type === "inactivity" && !(definition.condition.still_seconds >= 10)) return "Enter at least 10 seconds for how long an object must stay still.";
   if (definition.condition.type === "occupancy" && !(definition.condition.limit >= 1)) return "Enter the number above which the rule fires (1 or more).";
   if (definition.condition.type === "occupancy" && !(definition.condition.for_seconds >= 1)) return "Enter how many seconds the count must stay above the limit.";
+  if (definition.condition.type === "occupancy" && definition.condition.remind_minutes != null && !(definition.condition.remind_minutes >= 15 && definition.condition.remind_minutes <= 1440))
+    return "A reminder interval is between 15 minutes and 24 hours. Leave it empty for no reminders.";
   if (!(definition.cooldown_seconds >= 0)) return "Enter a cooldown of 0 seconds or more.";
   if (definition.schedule && !definition.schedule.intervals.length) return "Add a schedule interval, or make the rule always active.";
   for (const action of definition.actions) {

@@ -12,9 +12,14 @@ import {
   type Alarm, type AlarmFilter, type AlarmQuery,
 } from "./api";
 
-const LABEL: Record<string, string> = { person: "Person", vehicle: "Vehicle", covered: "Camera covered", moved: "Camera moved", defocused: "Camera defocused", fall: "Person fell" };
+const LABEL: Record<string, string> = { person: "Person", vehicle: "Vehicle", covered: "Camera covered", moved: "Camera moved", defocused: "Camera defocused", fall: "Person fell", occupancy: "Over the occupancy limit" };
 /** What an alarm was about: an object, tampering, or a licence plate ("plate:AB12CDE"). */
-const labelOf = (label: string) => (label.startsWith("plate:") ? `Plate ${label.slice(6)}` : LABEL[label] ?? label);
+const labelOf = (label: string) => {
+  if (label.startsWith("plate:")) return `Plate ${label.slice(6)}`;
+  // A rule over its ceiling (10 alarms a minute, 60 an hour, on one camera): this alarm stands for the ones that were not raised.
+  if (label.startsWith("suppressed:")) return label === "suppressed:0" ? "Too many alarms: further ones are being held back" : `${label.slice(11)} more alarms held back`;
+  return LABEL[label] ?? label;
+};
 
 function useWhen() {
   const display = useDisplaySettings();
@@ -184,7 +189,9 @@ function AlarmDetailView({ id, onBack, onNavigate }: { id: string; onBack: () =>
         <ol className="plain-list">
           {data.history.map(entry => (
             <li key={`${entry.occurred_at}-${entry.action}`}>{ACTION_LABEL[entry.action] ?? entry.action}{entry.actor ? ` by ${entry.actor}` : ""} · {when(entry.occurred_at)}
-              {typeof entry.details.assigned_to === "string" ? ` · to ${entry.details.assigned_to}` : ""}</li>
+              {typeof entry.details.assigned_to === "string" ? ` · to ${entry.details.assigned_to}` : ""}
+              {entry.action === "ended" && typeof entry.details.ended_at === "string" ? ` · at ${when(entry.details.ended_at)}` : ""}
+              {entry.action === "reminded" && typeof entry.details.minutes === "number" ? ` · after ${entry.details.minutes} minutes` : ""}</li>
           ))}
         </ol>
       </section>

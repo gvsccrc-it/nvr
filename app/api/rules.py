@@ -79,6 +79,8 @@ class Occupancy(BaseModel):
     zone: Zone | None = None
     limit: int = Field(ge=1, le=1000)
     for_seconds: int = Field(default=10, ge=1, le=3600)
+    # While a stretch goes on, a note on its alarm and a notification this often (#513). Off unless set; never more often than every 15 minutes.
+    remind_minutes: int | None = Field(default=None, ge=15, le=1440)
 
 
 class Face(BaseModel):
@@ -187,6 +189,7 @@ class RuleDefinition(BaseModel):
     condition: Condition
     classes: list[Literal["person", "vehicle"]] = Field(default_factory=list)
     schedule: RuleSchedule | None = None
+    # 0 when a caller leaves it out, as it always was for API clients. The interface starts a new rule at a minute and marks a rule with none (#514).
     cooldown_seconds: int = Field(default=0, ge=0, le=86400)
     # Bring the alarm's camera and its neighbours into Live for people who opted in.
     pop_into_live: bool = False
