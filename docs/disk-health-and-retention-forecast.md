@@ -58,6 +58,14 @@ Metrics: `nvr_disk_health_state{volume,state}`, `nvr_camera_retention_policy_day
 
 Each recordings volume keeps some space free (its headroom, set in Settings, Recording & storage) by removing its oldest footage. It never removes footage that is held, held for a case, kept for an alarm, in an export or being played. When that alone leaves a volume short, an incident says so on the first pass that ends short: how much is short, and what is holding the space (how much each person holds, how much is held for cases, kept for alarms and in exports). It recovers on the first pass that has the room again. Release holds, close cases or resolve alarms that are no longer needed: when the disk is full, every camera on it stops recording.
 
+**Holds placed by operators are limited**, because held footage is never removed to make room:
+
+- A hold placed by an operator **expires after 30 days**. An administrator can give it a new expiry or make it indefinite (`PATCH /api/cameras/<camera>/segments/<segment>/hold` with `{"expires_in_days": 90}` or `{"expires_in_days": null}`).
+- All of one operator's own holds together may cover **at most 10% of a recordings volume**. Past that the operator is told to ask an administrator.
+- Holds that belong to a case follow the case, not these limits. An administrator's own holds have no limit and no expiry unless they set one.
+- Operators' holds that were placed before this was introduced are not changed: they have no expiry until an administrator gives them one.
+- Placing, extending and releasing a hold are in the security log (`preserve`, `extend_hold`, `release_hold`).
+
 A volume is under **pressure** when its free space is less than 15 minutes of recording at the rate its cameras have been writing (over the last ten minutes), or less than the configured reserve (`NVR_STORAGE_PRESSURE_FREE_BYTES`, 1 GiB by default) if that is more. A fixed 1 GiB is about ten seconds' warning on a large site.
 
 ## Limits
