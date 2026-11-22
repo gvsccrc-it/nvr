@@ -272,6 +272,8 @@ jobs:
           with urllib.request.urlopen(request, timeout=5) as response:
               assert response.status == 201
           PY
+          # Every mounted volume can be written by the user the NVR runs as, the archive volume inside the recordings volume included (#551).
+          docker compose exec -T nvr sh -c 'for folder in /data /secrets /recordings /recordings/archive /backups; do touch "$folder/.ci-write-check" && rm "$folder/.ci-write-check" || exit 1; done; id -u'
           docker compose restart nvr
           python - <<'PY'
           import json

@@ -51,7 +51,7 @@ RUN apt-get update \
     && echo '0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79  /opt/nvr/models/faces/face_recognition_sface_2021dec.onnx' | sha256sum -c - \
     && groupadd --system --gid 10001 nvr \
     && useradd --system --uid 10001 --gid nvr --home-dir /nonexistent nvr \
-    && mkdir -p /data /secrets /recordings /backups \
+    && mkdir -p /data /secrets /recordings /recordings/archive /backups \
     && chown -R nvr:nvr /app /data /secrets /recordings /backups /opt/nvr/models
 COPY --chown=nvr:nvr app ./app
 COPY --from=web --chown=nvr:nvr /app/web_dist ./app/web_dist

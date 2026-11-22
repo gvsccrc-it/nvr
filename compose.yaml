@@ -123,6 +123,9 @@ services:
       - nvr-archive:/recordings/archive
       # Point this at storage on a different disk or host, for example
       # "- /mnt/offsite/nvr-backups:/backups", so a host or disk loss does not take the backups too.
+      # A folder mounted from the host keeps the host's owner, and the NVR runs as user 10001 with no privileges: give it the folder first
+      # with "sudo chown -R 10001:10001 /mnt/offsite/nvr-backups" (the same for a recordings disk mounted this way). The NVR says so in its
+      # log and raises an incident at start-up if it cannot write to a folder it was given.
       - nvr-backups:/backups
     healthcheck:
       test: ["CMD", "python", "-m", "app.healthcheck"]  # Asks /healthz at the address the interface is served on (NVR_LISTEN_HOST)
