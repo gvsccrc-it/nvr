@@ -190,6 +190,7 @@ def create_app(*, start_workers: bool = True) -> FastAPI:
             raise exc  # A busy database, a constraint or a bug keeps its usual 500 and traceback
         if time.monotonic() - damaged_logged["at"] > 60:  # One line a minute, not one per request
             damaged_logged["at"] = time.monotonic()
+            await asyncio.to_thread(db_health.report_damage, exc, "web request")  # The health check fails from now on (#453)
             logger.error("A request failed because the database file is damaged (%s). %s", exc, db_health.ADVICE)
         return JSONResponse(status_code=503, content={"detail": "The NVR's database is damaged. Ask an administrator to check the server log; nothing has been deleted."})
 

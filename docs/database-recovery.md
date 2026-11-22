@@ -9,6 +9,14 @@ The NVR keeps its settings, users, alarms, recording index and history in one SQ
 
 The container's health check (`/healthz`) also fails with "Database damaged" when it cannot open the file and read the start of every table, so `docker compose ps` shows the container as unhealthy. Docker only marks it; it does not restart it.
 
+The probe is light on purpose, so damage deeper in a table passes it. Since #453 the first part of the NVR that meets such damage while running (a worker, a background loop, a request, or the nightly check) records it in `run/database-damaged.json` beside the database. From then on:
+
+- the health check fails, so the container shows as unhealthy;
+- the log carries one line, `THE DATABASE FILE IS DAMAGED`, from each process that met it, and a short reminder every five minutes, not a traceback on every pass;
+- a worker that cannot start because of the damage is tried again every five minutes, not every few seconds. **Recording may be stopped while this lasts**: restore the database as below.
+
+The record is cleared each time the NVR starts. If the file is still damaged, it is found and recorded again as soon as the damaged part is read.
+
 A busy database ("database is locked") is not damage and is reported differently.
 
 ## Why it happens

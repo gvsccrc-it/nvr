@@ -6,7 +6,7 @@ import copy
 import uvicorn
 from uvicorn.config import LOGGING_CONFIG
 
-from app import logforward
+from app import db_health, logforward
 from app.entrypoint import listen_port
 
 
@@ -20,6 +20,7 @@ def log_config() -> dict:
 
 def main() -> None:
     logforward.install("web")
+    db_health.install_log_filter("web")  # A background task of the web process that meets a damaged database says so once and fails the health check (#453)
     # Forwarded headers are believed only from NVR_TRUSTED_PROXIES (app.network), never by uvicorn on its own: its default trusts any 127.0.0.1 sender.
     uvicorn.run("app.main:app", host="0.0.0.0", port=listen_port(), timeout_graceful_shutdown=10, log_config=log_config(), proxy_headers=False)
 
