@@ -95,6 +95,8 @@ class SiteLink:
     open_alarms: int | None = None
     cameras: list[dict[str, Any]] = field(default_factory=list)
     cameras_at: float = 0.0
+    failed_at: float = 0.0  # time.monotonic() of the failure that marked it down
+    probing: bool = False
 
     @property
     def state(self) -> str:
@@ -107,6 +109,7 @@ class SiteLink:
 
     def failed(self, reason: str) -> None:
         self.down = True
+        self.failed_at = time.monotonic()
         self.last_error = reason
         self.last_checked_at = _now_iso()
 
@@ -155,6 +158,9 @@ class Registry:
                 link = self.links.get(row["id"])
                 if link is not None and link.fingerprint == fingerprint:
                     link.name, link.allow_private = row["name"], bool(row["allow_private"])  # A rename keeps what is known about the site
+                    if link.down and not row["last_error"] and row["last_contact_at"] and row["last_contact_at"] > (link.last_checked_at or ""):
+                        # Another process (the background worker's health check) has reached the site since it failed here (#499).
+                        link.down, link.last_error, link.last_contact_at = False, None, row["last_contact_at"]
                     kept[row["id"]] = link
                     continue
                 try:
@@ -201,6 +207,7 @@ async def active() -> bool:
 async def call(link: SiteLink, method: str, path: str, *, params: Any = None, body: Any = None, headers: dict[str, str] | None = None, probe: bool = False) -> httpx.Response:
     """One request to a site. Raises ``SiteDown`` without trying when the site is down: only a ``probe`` (the health check) tries a site that is."""
     if link.down and not probe:
+        _try_again_soon(link)
         raise SiteDown(link.last_error or "No answer")
     try:
         request = link.client.build_request(method, path, params=params, json=body, headers=headers)
@@ -216,6 +223,14 @@ async def call(link: SiteLink, method: str, path: str, *, params: Any = None, bo
             response._content = bytes(received)
         finally:
             await response.aclose()
+    except _SLOW as exc:
+        # No answer in time. A hung site and a site that is only slow on this one question look the same from here, so the site is taken
+        # as down, as before, and asked again at once in the background with a light question: a site that is alive answers that in
+        # moments and is back for everyone, where one heavy search used to take its live video away until somebody pressed "check" (#499).
+        link.failed(type(exc).__name__)
+        if not probe:
+            _try_again_soon(link, at_once=True)
+        raise SiteDown(link.last_error or "No answer") from exc
     except httpx.HTTPError as exc:
         link.failed(type(exc).__name__ or "No answer")
         raise SiteDown(link.last_error or "No answer") from exc
@@ -226,9 +241,37 @@ async def call(link: SiteLink, method: str, path: str, *, params: Any = None, bo
     return response
 
 
+_SLOW = (httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout)
+_probes: set[asyncio.Task[None]] = set()
+
+
+def _try_again_soon(link: SiteLink, at_once: bool = False) -> None:
+    """A site that is down is asked again, in the background, once it has been down for a few seconds: the request that found it down is
+    refused at once, as before, and costs nothing more. Under the supervisor the health check that used to be the only thing to try a
+    down site runs in another process, so in the web process a site that failed one request stayed refused until an administrator
+    pressed "check" or the server restarted (#499)."""
+    if link.probing or not link.enabled or (not at_once and time.monotonic() - link.failed_at < RECHECK_SECONDS):
+        return
+    link.probing = True
+
+    async def probe() -> None:
+        try:
+            check_url(link.base_url, link.allow_private)
+            await call(link, "GET", "/api/cameras", probe=True)
+        except (SiteDown, ConsoleError):
+            link.failed_at = time.monotonic()  # Not yet: the next request after the wait asks again
+        finally:
+            link.probing = False
+
+    task = asyncio.get_running_loop().create_task(probe(), name=f"console-probe-{link.id}")
+    _probes.add(task)
+    task.add_done_callback(_probes.discard)
+
+
 async def stream(link: SiteLink, method: str, path: str, *, query: str = "", headers: dict[str, str] | None = None, content: bytes | None = None) -> httpx.Response:
     """A request whose answer is read as it arrives (footage, pictures). The caller closes the response."""
     if link.down:
+        _try_again_soon(link)
         raise SiteDown(link.last_error or "No answer")
     request = link.client.build_request(method, f"{path}?{query}" if query else path, headers=headers, content=content)
     try:

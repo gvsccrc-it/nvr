@@ -62,6 +62,9 @@ def register(user_id: int, platform: str, token: str, device_label: str) -> dict
     with connect() as db:
         db.execute("BEGIN IMMEDIATE")
         try:
+            from .push import make_room_for_device
+
+            make_room_for_device(db, user_id, endpoint)  # Ten devices a person, browsers and phones together (#523)
             existing = db.execute("SELECT id FROM push_subscriptions WHERE endpoint=?", (endpoint,)).fetchone()
             subscription_id = existing["id"] if existing else str(uuid.uuid4())
             db.execute("INSERT INTO push_subscriptions(id,user_id,endpoint,p256dh,auth,device_label,kind) VALUES(?,?,?,'','',?,?) "
