@@ -218,6 +218,83 @@ class LogFilterTests(DamageCase):
         self.assertEqual((len(self.records), len(second), self.filter.suppressed), (1, 1, 2))
 
 
+class PatrolTests(DamageCase):
+    """A page of zeros in a hot table is found within minutes, by a check that reads, not by whoever trips over it (#455)."""
+
+    def setUp(self):
+        super().setUp()
+        from app import self_test
+
+        self_test._patrol = None
+        self.addCleanup(setattr, self_test, "_patrol", None)
+
+    def test_a_zeroed_page_of_a_hot_table_raises_the_incident_and_fails_the_health_check(self):
+        from fastapi.testclient import TestClient
+
+        from app import self_test
+        from app.application import create_app
+        from app.store import connect
+
+        self.damage_coverage()
+        with TestClient(create_app(start_workers=False), raise_server_exceptions=False) as client:
+            self.assertEqual(client.get("/healthz").status_code, 200)
+            with self.assertLogs("app.self_test", level="ERROR") as logged:
+                self_test.SelfTestManager.process_once()
+            self.assertEqual(len(logged.output), 1, logged.output)
+            self.assertIn("coverage_intervals", logged.output[0])
+            self.assertIn(db_health.RECOVERY_DOCUMENT, logged.output[0])
+            self.assertEqual(client.get("/healthz").status_code, 503)
+        self.assertEqual(db_health.damage_reported()["where"], "database patrol")
+        with connect() as db:
+            incident = db.execute("SELECT summary, fault_active FROM incidents WHERE incident_key='self_test:database'").fetchone()
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM self_test_runs").fetchone()[0], 0, "the nightly run was not started on a file known to be damaged")
+        self.assertEqual(incident["fault_active"], 1)
+        self.assertIn("The database file is damaged", incident["summary"])
+        with self.assertNoLogs("app.self_test", level="ERROR"):
+            self_test.patrol()  # Known: said once
+
+    def test_a_healthy_file_passes_and_a_pass_is_made_only_every_few_minutes(self):
+        from app import self_test
+
+        with patch.object(db_health.Patrol, "run", autospec=True, side_effect=db_health.Patrol.run) as run:
+            self.assertTrue(self_test.patrol())
+            self.assertTrue(self_test.patrol())
+            self.assertEqual(run.call_count, 1)
+            self_test._patrol._last -= db_health.PATROL_SECONDS
+            self.assertTrue(self_test.patrol())
+            self.assertEqual(run.call_count, 2)
+        self.assertIsNone(db_health.damage_reported())
+
+    def test_every_pass_checks_the_hot_tables_and_the_others_take_turns(self):
+        seen: list[list[str]] = []
+        real = db_health.Patrol._table
+
+        def table(db, name):
+            seen[-1].append(name)
+            return real(db, name)
+
+        db = sqlite3.connect(os.environ["NVR_DB_PATH"])
+        others = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")} - set(db_health.HOT_TABLES)
+        db.close()
+        patrol = db_health.Patrol()
+        with patch.object(db_health.Patrol, "_table", staticmethod(table)), patch.object(db_health, "PATROL_BUDGET_SECONDS", 0.0):
+            for _ in range(len(others)):
+                seen.append([])
+                self.assertTrue(patrol.run().ok)
+        self.assertTrue(all(tuple(names[:2]) == db_health.HOT_TABLES and len(names) == 3 for names in seen), seen[:3])
+        self.assertEqual({names[2] for names in seen}, others, "one round covers every table")
+        with patch.object(db_health.Patrol, "_table", staticmethod(table)):
+            seen.append([])
+            patrol.run()
+        self.assertEqual(len(seen[-1]), len(others) + 2, "an empty database is gone over whole within the budget")
+
+    def test_a_table_too_large_for_a_pass_is_left_to_the_nightly_check(self):
+        self.damage_coverage()
+        with patch.object(db_health, "PATROL_TABLE_SECONDS", -1.0), patch.object(db_health, "_PROGRESS_STEPS", 1):
+            outcome = db_health.Patrol().run()
+        self.assertTrue(outcome.ok, outcome.lines)
+
+
 class SupervisorTests(DamageCase):
     def exited(self, code: int) -> tuple[float, list[str]]:
         worker = supervisor.Worker("recorder", "app.workers.recorder")
