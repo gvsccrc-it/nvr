@@ -196,6 +196,38 @@ class PasskeyTests(SecondFactorCase):
         options = client.post("/api/auth/mfa/passkey/options", json={"challenge": challenge}).json()
         return client, client.post("/api/auth/mfa/passkey/verify", json={"challenge": challenge, "credential": authenticator.get(options, **assertion)})
 
+    def relayed(self, authenticator: SoftwareAuthenticator, elsewhere: str):
+        """An answer the person's authenticator gave to a page at another address, passed on to the NVR by that page's server, which
+        writes that address into the Origin and Host headers itself (a browser would not let a page do that; a server can)."""
+        claimed = {"Origin": elsewhere, "Host": elsewhere.split("://", 1)[1]}
+        client = self.browser()
+        challenge = self.sign_in(client)["challenge"]
+        asked = client.post("/api/auth/mfa/passkey/options", json={"challenge": challenge}, headers=claimed)
+        self.assertEqual(asked.status_code, 200, asked.text)
+        return client.post("/api/auth/mfa/passkey/verify", json={"challenge": challenge, "credential": authenticator.get(asked.json(), origin=elsewhere)}, headers=claimed)
+
+    def test_an_answer_naming_another_address_is_refused_even_when_the_request_claims_that_address_too(self):
+        # The request's own Origin header is written by the caller. A page at another port of the same host name, or at another name,
+        # sends its own address in both places: the answer must be checked against where the passkey was registered (#464).
+        authenticator = SoftwareAuthenticator()
+        self.enrol_passkey(self.admin, authenticator)
+        with connect() as db:
+            self.assertEqual(tuple(db.execute("SELECT rp_id,origin FROM user_passkeys").fetchone()), ("testserver", "http://testserver"))
+        for elsewhere in ("http://testserver:8443", "https://testserver", "http://other.example.test"):
+            refused = self.relayed(authenticator, elsewhere)
+            self.assertEqual(refused.status_code, 401, f"{elsewhere}: {refused.text}")
+        self.assertEqual(self.second_step(authenticator)[1].status_code, 200)  # At its own address it still works
+
+    def test_a_passkey_from_before_the_address_was_kept_works_and_remembers_it_at_first_use(self):
+        authenticator = SoftwareAuthenticator()
+        self.enrol_passkey(self.admin, authenticator)
+        with connect() as db:
+            db.execute("UPDATE user_passkeys SET rp_id=NULL,origin=NULL")  # As a passkey registered before this was
+        self.assertEqual(self.second_step(authenticator)[1].status_code, 200)
+        with connect() as db:
+            self.assertEqual(tuple(db.execute("SELECT rp_id,origin FROM user_passkeys").fetchone()), ("testserver", "http://testserver"))
+        self.assertEqual(self.relayed(authenticator, "http://testserver:8443").status_code, 401)
+
     def test_forged_and_misdirected_responses_are_refused(self):
         authenticator = SoftwareAuthenticator()
         self.enrol_passkey(self.admin, authenticator)
