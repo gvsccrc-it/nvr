@@ -17,7 +17,7 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 from authlib.integrations.starlette_client import OAuth
 
-from app import accounts, auth_limits as limits, mfa, network
+from app import accounts, auth_limits as limits, known_browser, mfa, network
 from app.audit import record
 from app.clock import stamp
 from app.access import ensure_default_grant
@@ -197,6 +197,8 @@ def signed_in(response: Response, user: sqlite3.Row, account: str, address: str,
     start_session(response, int(user["id"]))
     limits.succeeded(account, address)
     with connect() as db:
+        # This browser has now signed in to this account: the account-wide sign-in wait will leave it alone (#457). Not a session.
+        known_browser.remember(db, getattr(address, "tokens", ()), response, int(user["id"]), secure=secure_cookie())
         owes = mfa.required_for(mfa.policy(db), user["role"], local=user["provider_issuer"] is None, remote_policy=mfa.remote_required(db),
                                 remote=remote) and not mfa.has_factor(db, int(user["id"]))
     return {"username": user["username"], "role": user["role"], **({"mfa_enrolment_required": True} if owes else {})}

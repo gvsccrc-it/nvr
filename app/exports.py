@@ -63,17 +63,10 @@ def max_open_sources() -> int:
     """How many recorded files an export may hold open at once in this process (each source stays reserved, with a file open, for the
     whole job). The process's own limit is raised to the most the system allows first: a common default of 1,024 failed an export of 1,100
     files with "Too many open files", while requests of up to 5,000 were accepted (#356)."""
-    import resource
+    from app import open_files
 
-    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-    wanted = hard if hard != resource.RLIM_INFINITY else max(soft, 1 << 20)
-    if soft != resource.RLIM_INFINITY and soft < wanted:
-        try:
-            resource.setrlimit(resource.RLIMIT_NOFILE, (wanted, hard))
-            soft = wanted
-        except (ValueError, OSError):
-            pass
-    limit = MAX_EXPORT_SEGMENTS + OPEN_FILE_RESERVE if soft == resource.RLIM_INFINITY else soft
+    soft = open_files.raise_limit()  # The one helper every worker uses (#546)
+    limit = MAX_EXPORT_SEGMENTS + OPEN_FILE_RESERVE if soft is None else soft
     return max(0, limit - OPEN_FILE_RESERVE)
 
 

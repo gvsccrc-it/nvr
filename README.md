@@ -36,7 +36,9 @@ The `nvr-data` volume stores the database and account/session state. `nvr-secret
 | `NVR_WEBAUTHN_RP_ID` | unset | Optional parent domain for passkeys, to share them between hosts |
 | `NVR_TRUST_FORWARDED_FOR` | false | Count sign-in attempts by the last `X-Forwarded-For` address; only behind a proxy you control (older; prefer `NVR_TRUSTED_PROXIES`) |
 | `NVR_TRUSTED_PROXIES` | none | Addresses or networks of your reverse proxy or tunnel: forwarded client address, HTTPS and host are believed only from these; see [remote access](docs/remote-access.md) |
-| `NVR_LOCAL_NETWORKS` | none | Networks counted as local besides private, loopback, link-local and Tailscale ranges |
+| `NVR_LOCAL_NETWORKS` | none | Networks counted as local besides the private, loopback and link-local ranges. Listing a tunnel's range here is how people on that tunnel are made to count as at the site |
+| `NVR_REMOTE_NETWORKS` | none | Networks counted as remote even though they are private ranges: a VPN or a link between sites. Wins over everything else |
+| `NVR_TUNNEL_NETWORKS` | none | A tunnel's address range. People in it count as remote unless the range is also in `NVR_LOCAL_NETWORKS`. The WireGuard overlay sets it (`WG_TUNNEL_NETWORKS`, `10.13.13.0/24` unless changed); the network of any `wg*`, `tun*` or `tap*` interface on the host is found by itself |
 | `NVR_HWACCEL` | auto | Graphics-chip video work: `auto`, `none`, or `nvenc`, `qsv`, `vaapi`; see [H.265 and hardware acceleration](docs/hevc-and-acceleration.md) |
 | `NVR_VAAPI_DEVICE` | first render device | The `/dev/dri/renderD*` device VAAPI and Quick Sync use |
 | `NVR_ALLOWED_ORIGINS` | none | Extra browser origins allowed to open the live video socket and to make requests that change something (`NVR_PUBLIC_URL` is always allowed) |
@@ -76,6 +78,8 @@ The `nvr-data` volume stores the database and account/session state. `nvr-secret
 | `NVR_DB_LOG_LIMIT_MB` | `128` | The size the database's write-ahead log is brought back to once it can be reset, 16 to 4096 |
 | `NVR_DB_SYNCHRONOUS` | `NORMAL` | SQLite's `synchronous` setting. `FULL` or `EXTRA` wait for the disk on every write (slower; nothing is lost in a power cut). `OFF` is accepted and is **not for a production server**: a crash or power cut can then damage the database. Leave it unless you know why |
 | `NVR_STOP_GRACE_SECONDS` | `25` | How long a worker is given to stop before it is killed, 1 to 600; keep it under the container's `stop_grace_period` |
+| `NVR_WEB_MAX_CONNECTIONS` | `512` | The most connections the web interface holds at once, 16 to 16384. Live video sockets count. At the limit a new connection takes the place of the one that has waited longest without sending a request |
+| `NVR_WEB_FIRST_REQUEST_SECONDS` | `10` | How long a new connection has to send its first request before it is closed, 1 to 300 |
 | `NVR_WORKER_START_SECONDS` | `300` | How long a worker may take to start before it is treated as hung, 30 to 3600 |
 | `NVR_ONVIF_TIMEOUT_SECONDS` | `8` | How long an ONVIF request to a camera may take, 1 to 120 |
 | `NVR_TAMPER_SAMPLE_SECONDS` | `15` | Seconds between tamper-detection samples of a camera, 1 to 3600 |
@@ -92,6 +96,8 @@ The `nvr-data` volume stores the database and account/session state. `nvr-secret
 A number that cannot be read (`30s` for `30`) or is outside its limits never stops the server: the default or the nearest limit is used, and one line in the log names the setting and the value used.
 
 **Not for you to set.** These are fixed by `compose.yaml`, or set by the NVR itself: `NVR_DB_PATH`, `NVR_RECORDINGS_PATH`, `NVR_STORAGE_VOLUMES`, `NVR_CREDENTIAL_KEY_PATH`, `NVR_BACKUP_PATH` and `NVR_LISTEN_PORT` (the paths and port inside the container; change the volumes and `NVR_PORT` instead), `NVR_BUILD_COMMIT` (the commit the image was built from), and `NVR_SUPERVISED`, `NVR_STARTED_AT` and `NVR_CONTROL_DIR` (how the worker processes find each other).
+
+**Connections and open files.** The web interface holds at most 512 connections at once (`NVR_WEB_MAX_CONNECTIONS`) and closes one that has not sent a request within 10 seconds (`NVR_WEB_FIRST_REQUEST_SECONDS`), so a machine that opens connections and sends nothing cannot make the interface unreachable. That is far above what viewing needs: the live-view limits allow 16 video and 16 audio streams in all, and each open tab makes a handful of short background requests. `compose.yaml` lets the container hold 65,536 open files (`ulimits`), and each worker raises its own limit to that at start. A server with its own `compose.yaml` should copy the `ulimits` section across.
 
 **Container logs.** Every service's log is bounded in the Compose files: the NVR keeps at most five files of 20 MB (100 MB), each tunnel three of 10 MB. Without that, Docker keeps every line for ever on the system disk. To keep more, raise `max-size` or `max-file` under `logging:` in `compose.yaml`; to send logs elsewhere as well, see `NVR_LOG_FORWARD_URL`. The web server's access log holds only the requests that failed (status 400 and above), not a line for every request.
 

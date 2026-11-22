@@ -9,7 +9,7 @@ import sqlite3
 import sys
 from typing import Protocol
 
-from app import db_health, logforward
+from app import db_health, logforward, open_files
 from app.workers import control, liveness
 
 
@@ -49,6 +49,7 @@ def main(name: str, service: Service) -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     logforward.install(name)
     db_health.install_log_filter(name)
+    open_files.raise_limit()  # Every worker its own: the recorder holds several handles a camera (#546)
     try:
         asyncio.run(run(name, service))
     except sqlite3.DatabaseError as exc:

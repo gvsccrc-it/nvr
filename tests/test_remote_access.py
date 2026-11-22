@@ -26,7 +26,8 @@ from tests.fixtures.reverse_proxy import ReverseProxy
 from tests.test_support import TEST_PASSWORD, setup_code
 
 OPERATOR_PASSWORD = "operator-password-1234"
-ENVIRONMENT = ("NVR_TRUSTED_PROXIES", "NVR_TRUST_FORWARDED_FOR", "NVR_LOCAL_NETWORKS", "NVR_ALLOWED_ORIGINS", "NVR_PUBLIC_URL", "NVR_COOKIE_SECURE")
+ENVIRONMENT = ("NVR_TRUSTED_PROXIES", "NVR_TRUST_FORWARDED_FOR", "NVR_LOCAL_NETWORKS", "NVR_REMOTE_NETWORKS", "NVR_TUNNEL_NETWORKS", "NVR_ALLOWED_ORIGINS",
+               "NVR_PUBLIC_URL", "NVR_COOKIE_SECURE")
 
 
 def make_request(peer: str | None, headers: dict[str, str] | list[tuple[str, str]] | None = None, scheme: str = "http", host: str = "nvr.lan:8280") -> Request:
@@ -175,6 +176,105 @@ class RemoteTests(NetworkCase):
         for bad in ("203.0.113.9:", "203.0.113.9:port", "[2001:db8::7", "[2001:db8::7]x", "1.2.3.4:99999999"):
             self.assertEqual(network.client_address(make_request("127.0.0.1", {"x-forwarded-for": bad})), "127.0.0.1", bad)
         self.assertTrue(network.peer_is_trusted_proxy(make_request("::ffff:127.0.0.1")))  # The proxy's own address may arrive mapped
+
+
+class TunnelTests(NetworkCase):
+    """People on a tunnel count as remote unless the administrator says otherwise (#458). Addresses are the guide's example tunnel range
+    and documentation ranges; none is a real site's."""
+
+    def setUp(self):
+        super().setUp()
+        self.on_host: list[tuple[str, str]] = [("192.168.50.0/24", "eth0")]
+        import ipaddress
+
+        patched = mock.patch.object(network, "interfaces", lambda: [(ipaddress.ip_network(text), name) for text, name in self.on_host])
+        patched.start()
+        self.addCleanup(patched.stop)
+
+    def overlay(self, **env: str) -> dict[str, str]:
+        """What the NVR is given by compose.yaml with compose.wireguard.yaml over it, as Docker Compose works it out from an .env."""
+        import re
+
+        import yaml
+
+        root = Path(__file__).resolve().parents[1]
+        given: dict[str, str] = {}
+        for name in ("compose.yaml", "compose.wireguard.yaml"):
+            for key, value in yaml.safe_load((root / name).read_text(encoding="utf-8"))["services"]["nvr"]["environment"].items():
+                if value is None:
+                    continue
+                given[key] = re.sub(r"\$\{(\w+):-([^}]*)\}", lambda match: env.get(match.group(1)) or match.group(2), str(value))
+        return {key: value for key, value in given.items() if key in ("NVR_LOCAL_NETWORKS", "NVR_REMOTE_NETWORKS", "NVR_TUNNEL_NETWORKS")}
+
+    def test_with_the_wireguard_overlays_defaults_a_caller_on_the_tunnel_is_remote(self):
+        os.environ.update(self.overlay())
+        self.assertEqual(os.environ["NVR_TUNNEL_NETWORKS"], "10.13.13.0/24")
+        self.assertEqual(network.classify("10.13.13.2"), (True, "tunnel"))
+        self.assertTrue(network.request_is_remote(make_request("10.13.13.2")))
+        self.assertEqual(network.classify("192.168.50.20"), (False, "private_range"))  # Someone at the site is still local
+        self.assertEqual(network.classify("10.20.0.9"), (False, "private_range"))  # As is any other private range: existing sites do not change
+
+    def test_with_wg_local_networks_set_to_the_tunnels_range_its_callers_are_local(self):
+        os.environ.update(self.overlay(WG_LOCAL_NETWORKS="10.13.13.0/24"))
+        self.assertEqual(network.classify("10.13.13.2"), (False, "listed_local"))
+        self.assertFalse(network.request_is_remote(make_request("10.13.13.2")))
+
+    def test_a_tunnel_on_another_range_is_named_or_found_on_the_host(self):
+        os.environ.update(self.overlay(WG_TUNNEL_NETWORKS="10.99.0.0/24"))
+        self.assertEqual(network.classify("10.99.0.7"), (True, "tunnel"))
+        os.environ.pop("NVR_TUNNEL_NETWORKS")
+        self.assertEqual(network.classify("10.99.0.7"), (False, "private_range"))  # Not named, and no tunnel interface on the host
+        self.on_host.append(("10.99.0.0/24", "wg0"))
+        self.assertEqual(network.classify("10.99.0.7"), (True, "tunnel"))  # The host's own wg0 says what the tunnel's range is
+        self.on_host[-1] = ("10.8.0.0/24", "tun0")
+        self.assertEqual(network.classify("10.8.0.6"), (True, "tunnel"))
+        self.assertEqual(network.classify("10.99.0.7"), (False, "private_range"))
+
+    def test_remote_networks_win_over_the_defaults_and_over_local_networks(self):
+        os.environ["NVR_REMOTE_NETWORKS"] = "172.20.0.0/16, 192.168.50.64/26"
+        os.environ["NVR_LOCAL_NETWORKS"] = "172.20.0.0/16, 203.0.113.0/24"
+        self.assertEqual(network.classify("172.20.0.3"), (True, "listed_remote"))  # Listed as both: remote wins
+        self.assertEqual(network.classify("192.168.50.70"), (True, "listed_remote"))  # A slice of a private range
+        self.assertEqual(network.classify("192.168.50.20"), (False, "private_range"))
+        self.assertEqual(network.classify("203.0.113.9"), (False, "listed_local"))
+        self.assertEqual(network.classify("198.51.100.4"), (True, "public"))
+        self.assertEqual(network.classify("nonsense"), (True, "unreadable"))
+        self.assertEqual(network.classify("100.64.0.5"), (True, "public"))  # Tailscale's range was never local
+
+    def test_settings_says_how_this_request_was_classed_and_by_which_rule(self):
+        os.environ["NVR_TUNNEL_NETWORKS"] = "10.13.13.0/24"
+        info = network.describe(make_request("10.13.13.2"))
+        self.assertEqual((info["remote"], info["classed_by"]), (True, "tunnel"))
+        self.assertIn("people on a tunnel count as remote unless that range is listed in NVR_LOCAL_NETWORKS", info["classed_reason"])
+        self.assertEqual((info["tunnel_networks"], info["host_networks"]), (["10.13.13.0/24"], ["192.168.50.0/24"]))
+        info = network.describe(make_request("192.168.50.20"))
+        self.assertEqual((info["remote"], info["classed_by"], info["on_host_network"]), (False, "private_range", True))
+        # Through a proxy that was not listed, the caller is unknown: remote, and said to be for that reason
+        info = network.describe(make_request("192.168.50.3", {"x-forwarded-for": "198.51.100.4"}))
+        self.assertEqual((info["remote"], info["classed_by"]), (True, "unknown_caller"))
+        self.assertEqual(set(network.REASONS) >= {info["classed_by"], "listed_remote", "listed_local", "public", "unreadable"}, True)
+
+    def test_a_private_address_from_no_network_of_this_machine_is_warned_about_while_the_remote_rule_is_on(self):
+        def found(peer: str, remote_mfa: bool = True) -> list[str]:
+            info = {**network.describe(make_request(peer)), "cookie_secure": False}
+            return [item["code"] for item in warnings(info, "off", remote_mfa, "administrator")]
+
+        self.assertIn("private_address_off_site", found("10.8.0.6"))  # A VPN's usual range, not named anywhere: counted local, and questioned
+        self.assertNotIn("private_address_off_site", found("192.168.50.20"))  # On the machine's own network
+        self.assertNotIn("private_address_off_site", found("10.8.0.6", remote_mfa=False))  # The rule is off: nothing rests on the answer
+        os.environ["NVR_REMOTE_NETWORKS"] = "10.8.0.0/24"
+        self.assertNotIn("private_address_off_site", found("10.8.0.6"))  # Listed: it is remote now, and asked for its second factor
+        os.environ.pop("NVR_REMOTE_NETWORKS")
+        self.on_host.clear()
+        self.assertNotIn("private_address_off_site", found("10.8.0.6"))  # The machine's networks cannot be read: no guess is made
+
+    def test_the_guide_the_overlay_and_the_module_say_what_the_code_does(self):
+        root = Path(__file__).resolve().parents[1]
+        guide = (root / "docs" / "remote-access.md").read_text(encoding="utf-8")
+        for words in ("NVR_REMOTE_NETWORKS", "NVR_TUNNEL_NETWORKS", "WG_LOCAL_NETWORKS", "must be listed in `NVR_REMOTE_NETWORKS`"):
+            self.assertTrue(words in guide, f"the guide does not say: {words}")
+        self.assertTrue("WG_TUNNEL_NETWORKS" in (root / "compose.wireguard.yaml").read_text(encoding="utf-8"), "the overlay does not name WG_TUNNEL_NETWORKS")
+        self.assertTrue("NVR_REMOTE_NETWORKS" in network.__doc__, "the module does not say what the code does")
 
 
 class WarningTests(NetworkCase):
