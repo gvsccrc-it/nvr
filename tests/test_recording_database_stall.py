@@ -106,11 +106,11 @@ class ContinuousTests(StallCase):
         locked = {"on": True}
         managers: list[RecordingManager] = []
 
-        def index(manager, *args):
+        def index(manager, *args, **options):
             managers.append(manager)
-            if locked["on"]:
+            if locked["on"] and options.get("must_store"):  # As the real one does when its transaction fails on a run's last pass
                 raise sqlite3.OperationalError("database is locked")
-            return real(manager, *args)
+            return 0 if locked["on"] else real(manager, *args, **options)
 
         with patch.object(RecordingManager, "_index_csv", index), self.assertLogs("nvr.recording", level="WARNING"):
             raised = self.run_loop(camera_id, self.recorder(), seconds=1)

@@ -278,6 +278,19 @@ async def _write_camera(sql: str, parameters: tuple[object, ...]) -> None:
     await asyncio.to_thread(write)
 
 
+FRESH_SECONDS = 10.0  # A segment written to within this long is "being written"
+RELIST_SECONDS = 6.0  # A run's folder is listed for a newer segment at most this often while its newest one is quiet
+CAMERA_WRITE_SECONDS = 5.0  # "Video is arriving" is written for a camera at most this often (#279)
+STATUS_REFRESH_SECONDS = 60.0  # An unchanged "recording" state is written again this often, in case anything else has changed it
+
+
+def _newest_end(db: sqlite3.Connection, camera_id: str) -> str | None:
+    """When the camera's newest indexed segment ended. The newest by start is the newest by end: one entry of the (camera, start) index,
+    where ``MAX(ends_at)`` walked every entry the camera has (#481)."""
+    row = db.execute("SELECT ends_at FROM recording_segments WHERE camera_id=? ORDER BY starts_at DESC LIMIT 1", (camera_id,)).fetchone()
+    return row[0] if row else None
+
+
 RESTARTS_AT_ONCE = 4  # Recordings restarted for changed settings at the same time: a group's volume change touches every camera in it
 RESTART_SPACING_SECONDS = 1.0  # Each of them then waits this long before the next takes its place
 
@@ -326,6 +339,9 @@ class RecordingManager:
         self.storage_task: asyncio.Task[None] | None = None
         self.stopping = False
         self._database_warned = float("-inf")
+        self._newest_segment: dict[Path, tuple[str, float]] = {}  # Per run folder: the newest segment's path, and when the folder was last listed
+        self._fresh_written: dict[str, float] = {}  # Per camera: when "video is arriving" was last written
+        self._status_written: dict[str, tuple[tuple[object, ...], float]] = {}  # Per camera: the last state written, and when
         self._unindexed: list[tuple[str, Path, Path]] = []  # Runs that ended while the database could not be written: (camera, list, folder)
 
     async def start(self) -> None:
@@ -622,9 +638,15 @@ class RecordingManager:
         camera's recording supervision and the worker's heartbeat must not. A burst of these comes when many cameras drop at once."""
         await asyncio.to_thread(self._set_status, camera_id, value, error, fault)
 
-    def _set_status(self, camera_id: str, value: str, error: str | None = None, fault: str | None = None) -> None:
+    def _set_status(self, camera_id: str, value: str, error: str | None = None, fault: str | None = None, *, unless_written_within: float = 0.0) -> None:
         """Record the recorder's state. ``fault`` says what went wrong when the state is a failure; it is kept while the recorder
-        retries and cleared once the stream works (see ``_sync_coverage``) or recording stops."""
+        retries and cleared once the stream works (see ``_sync_coverage``) or recording stops. ``unless_written_within``: nothing is
+        written when this same state was written that recently (the watch says "recording" every two seconds for as long as it is)."""
+        now = time.monotonic()
+        written = self._status_written.get(camera_id)
+        if unless_written_within and written is not None and written[0] == (value, error, fault) and now - written[1] < unless_written_within:
+            return
+        self._status_written[camera_id] = ((value, error, fault), now)
         with connect() as db:
             db.execute(
                 "UPDATE cameras SET recording_status=?, last_error=?, "
@@ -633,7 +655,13 @@ class RecordingManager:
                 (value, error, value, fault, value, camera_id),
             )
 
-    def _mark_video_fresh(self, camera_id: str) -> None:
+    def _mark_video_fresh(self, camera_id: str, at_most_every: float = 0.0) -> None:
+        """Say that video is arriving now. ``at_most_every``: skipped when it was said that recently (the watch asks every two seconds;
+        "fresh" means within 45 s, and one write per camera every five seconds was the owner's choice on #279)."""
+        now = time.monotonic()
+        if at_most_every and now - self._fresh_written.get(camera_id, float("-inf")) < at_most_every:
+            return
+        self._fresh_written[camera_id] = now
         with connect() as db:
             db.execute("UPDATE cameras SET last_video_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?", (camera_id,))
 
@@ -644,26 +672,34 @@ class RecordingManager:
             self._dropped.add(key)
             metrics.segment_dropped(camera_id)
 
-    def _index_csv(self, camera_id: str, index_path: Path, output_dir: Path) -> int:
+    def _index_csv(self, camera_id: str, index_path: Path, output_dir: Path, *, must_store: bool = False) -> int:
         """Index the segments FFmpeg has finished since the last pass over this list, and return how many were new.
 
         FFmpeg adds a line per finished segment and never trims the list, so the lines already dealt with are remembered per list: a pass costs
         what is new, not how long the camera has been connected (#334). A pass with nothing new touches no database; new segments and their
-        counters are stored in one transaction, and if that fails nothing is remembered, so the same lines are tried again next pass."""
+        counters are stored in one transaction, and if that fails nothing is remembered, so the same lines are tried again next pass
+        (``must_store``: the failure is raised, for the last pass over a run's list, which has no next pass of its own)."""
+        # Where the last pass got to in the list, in bytes, and the line that ended there: the list is read from that point, not from its
+        # start. FFmpeg never trims it, so after a month connected it holds 43,000 lines, and reading them all every two seconds for
+        # every camera was a part of what the watch cost that grew without end (#481).
+        done, last = self._indexed_lines.get(index_path, (0, ""))
         try:
-            with index_path.open(newline="", encoding="utf-8") as source:
-                lines = source.read().splitlines(keepends=True)
+            with index_path.open("rb") as source:
+                if done:
+                    remembered = last.encode("utf-8")
+                    source.seek(max(0, done - len(remembered)))
+                    if source.read(len(remembered)) != remembered:  # Not the list that was remembered: start again
+                        done = 0
+                        source.seek(0)
+                lines = source.read().decode("utf-8").splitlines(keepends=True)
         except (OSError, UnicodeError):
             return 0
-        done, last = self._indexed_lines.get(index_path, (0, ""))
-        if done > len(lines) or (done and lines[done - 1] != last):  # Not the list that was remembered: start again
-            done = 0
-        # A last line without its line end may still be being written: it is read, and read again next pass, never remembered.
-        complete = len(lines) if not lines or lines[-1].endswith(("\n", "\r")) else len(lines) - 1
-        if len(lines) <= done:
+        if not lines:
             return 0
+        # A last line without its line end may still be being written: it is read, and read again next pass, never remembered.
+        finished = lines if lines[-1].endswith(("\n", "\r")) else lines[:-1]
         try:
-            rows = list(csv.reader(lines[done:]))
+            rows = list(csv.reader(lines))
         except csv.Error:
             return 0
         root = recordings_path()
@@ -713,8 +749,11 @@ class RecordingManager:
                         raise
                     db.execute("COMMIT")
             except sqlite3.Error:
+                if must_store:
+                    raise
                 return 0  # Nothing is remembered: these lines are read again next pass
-        self._indexed_lines[index_path] = (complete, lines[complete - 1] if complete else "")
+        if finished:
+            self._indexed_lines[index_path] = (done + sum(len(line.encode("utf-8")) for line in finished), finished[-1])
         return indexed
 
     async def _run(self, camera_id: str, expected_mode: str) -> None:
@@ -999,12 +1038,13 @@ class RecordingManager:
         kept and tried again every few seconds: the run's folder is never read again otherwise, and its last segments stayed on disk with
         no row (#483)."""
         try:
-            self._index_csv(camera_id, list_path, output_dir)
+            self._index_csv(camera_id, list_path, output_dir, must_store=True)
         except sqlite3.Error as exc:
             self._database_unavailable(camera_id, exc)
             self._unindexed.append((camera_id, list_path, output_dir))
             return
         self._indexed_lines.pop(list_path, None)  # Each run writes a new list
+        self._newest_segment.pop(output_dir, None)
         remove_run_folder_if_empty(output_dir)
 
     def _index_leftovers(self) -> None:
@@ -1014,20 +1054,55 @@ class RecordingManager:
             self._index_rest(camera_id, list_path, output_dir)
 
     def _watch_pass(self, camera_id: str, list_path: Path, output_dir: Path, segment_duration: int) -> None:
-        """One pass of the watch over a running recording. Blocking, so the watch runs it in a thread."""
+        """One pass of the watch over a running recording. Blocking, so the watch runs it in a thread.
+
+        It costs the same for a camera connected for a month as for a minute (#481): the list is read from where the last pass stopped,
+        the file being written is looked at by name and not found again among every file of the run, the newest indexed segment is one
+        index entry, and the camera's row is written when something changed or a few seconds have passed, not on every pass."""
         self._index_csv(camera_id, list_path, output_dir)
-        if newest_is_fresh(output_dir, "segment-*.mp4"):
-            self._mark_video_fresh(camera_id)
+        if self._being_written(output_dir):
+            self._mark_video_fresh(camera_id, at_most_every=CAMERA_WRITE_SECONDS)
         recent_cutoff = (datetime.now(timezone.utc) - timedelta(seconds=segment_duration * 2)).isoformat()
         with connect() as db:
-            latest = db.execute(
-                "SELECT MAX(ends_at) AS latest FROM recording_segments WHERE camera_id=?",
-                (camera_id,),
-            ).fetchone()["latest"]
-            if latest and latest < recent_cutoff:  # Written here, while the connection is open: leaving the block closes it (#278)
+            latest = _newest_end(db, camera_id)
+            if latest and latest < recent_cutoff and db.execute("SELECT recording_fault_since FROM cameras WHERE id=?", (camera_id,)).fetchone()[0] is None:
+                # Written here, while the connection is open: leaving the block closes it (#278). Once: the start of the fault is kept.
                 db.execute("UPDATE cameras SET recording_fault_since=COALESCE(recording_fault_since,strftime('%Y-%m-%dT%H:%M:%fZ','now')) WHERE id=?", (camera_id,))
         if latest and latest >= recent_cutoff:
-            self._set_status(camera_id, "recording")
+            self._set_status(camera_id, "recording", unless_written_within=STATUS_REFRESH_SECONDS)
+
+    def _being_written(self, output_dir: Path) -> bool:
+        """Whether FFmpeg has written to this run's newest segment in the last ten seconds.
+
+        The file found last time is looked at alone. Only when it has gone quiet (FFmpeg has moved on to the next segment, or the stream
+        has stalled) is the folder listed for a newer name, and then at most every few seconds: listing and reading the time of every
+        file of the run on every pass took 141 ms for a run of 43,200 files."""
+        now = time.time()
+        known = self._newest_segment.get(output_dir)
+        if known is not None:
+            try:
+                if now - os.stat(known[0]).st_mtime <= FRESH_SECONDS:
+                    return True
+            except OSError:
+                known = None  # Removed (retention): look again
+            if known is not None and time.monotonic() - known[1] < RELIST_SECONDS:
+                return False
+        newest = ""
+        try:
+            with os.scandir(output_dir) as entries:
+                for entry in entries:  # Names only: a segment's name is its start time, so the greatest name is the newest
+                    if entry.name.startswith("segment-") and entry.name.endswith(".mp4") and entry.name > newest:
+                        newest = entry.name
+        except OSError:
+            return False
+        if not newest:
+            return False
+        path = os.path.join(output_dir, newest)
+        self._newest_segment[output_dir] = (path, time.monotonic())
+        try:
+            return now - os.stat(path).st_mtime <= FRESH_SECONDS
+        except OSError:
+            return False
 
     async def _run_continuous(self, camera_id: str, expected_mode: str = "continuous") -> None:
         executable = shutil.which("ffmpeg")
