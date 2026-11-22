@@ -845,7 +845,7 @@ class DetectionManager:
 
         source = _camera_source(camera_id, bool(config["use_substream"]))
         zones = json.loads(config["zones_json"])
-        tracker = Tracker()
+        tracker = Tracker(take_up=True)  # The objects in view when the stream last closed keep their tracks, and what has fired for them (#514)
         provider = str(config["provider"])
         watches = (_PlateWatch(self, camera_id, provider, background), _FaceWatch(self, camera_id, provider, background),
                    _FallWatch(self, camera_id, provider))

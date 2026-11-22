@@ -295,11 +295,26 @@ def queue_for_alarm(db: sqlite3.Connection, alarm_id: str) -> int:
     return queued
 
 
-def _queue_for_alarm(db: sqlite3.Connection, alarm_id: str) -> int:
+def queue_reminder(db: sqlite3.Connection, alarm_id: str, body: str) -> int:
+    """Notify the devices that want this alarm again, with ``body`` (a stretch that is still going, #513). The alarm's earlier
+    notification to a device is replaced by this one; one still waiting to be sent is left as it is."""
+    db.execute("SAVEPOINT push_reminder")
+    try:
+        queued = _queue_for_alarm(db, alarm_id, reminder=body)
+    except Exception:  # noqa: BLE001 - notifications must not cost the note on the alarm
+        db.execute("ROLLBACK TO push_reminder")
+        db.execute("RELEASE push_reminder")
+        logger.exception("The reminder for alarm %s could not be queued", alarm_id)
+        return 0
+    db.execute("RELEASE push_reminder")
+    return queued
+
+
+def _queue_for_alarm(db: sqlite3.Connection, alarm_id: str, reminder: str | None = None) -> int:
     alarm = db.execute("SELECT a.*,c.name AS camera_name,c.group_id FROM alarms a JOIN cameras c ON c.id=a.camera_id WHERE a.id=?", (alarm_id,)).fetchone()
     if alarm is None:
         return 0
-    occurred = datetime.fromisoformat(alarm["occurred_at"])
+    occurred = datetime.fromisoformat(alarm["occurred_at"]) if reminder is None else _now()  # A reminder is about now: its quiet hours are now's
     groups = {row[0] for row in db.execute("SELECT group_id FROM cameras WHERE id=? AND group_id IS NOT NULL UNION SELECT group_id FROM camera_group_memberships WHERE camera_id=?",
                                            (alarm["camera_id"], alarm["camera_id"]))}
     label = label_text(alarm["label"])
@@ -309,7 +324,7 @@ def _queue_for_alarm(db: sqlite3.Connection, alarm_id: str) -> int:
     except ZoneInfoNotFoundError:
         shown = occurred
     payload = json.dumps({
-        "alarm_id": alarm_id, "title": f"{alarm['rule_name']}: {alarm['camera_name']}", "body": f"{label} at {shown.strftime('%H:%M:%S')}",
+        "alarm_id": alarm_id, "title": f"{alarm['rule_name']}: {alarm['camera_name']}", "body": reminder or f"{label} at {shown.strftime('%H:%M:%S')}",
         "occurred_at": alarm["occurred_at"], "url": f"/?alarm={alarm_id}", "thumbnail_url": f"/api/push/thumbnails/{thumbnail_token(alarm_id)}",
     }, separators=(",", ":"))
     queued = 0
@@ -327,8 +342,14 @@ def _queue_for_alarm(db: sqlite3.Connection, alarm_id: str) -> int:
             continue
         if in_quiet_hours(subscription["quiet_start"], subscription["quiet_end"], subscription["quiet_timezone"], occurred):
             continue
-        queued += db.execute("INSERT OR IGNORE INTO push_deliveries(id,subscription_id,alarm_id,payload_json,next_attempt_at) VALUES(?,?,?,?,?)",
-                             (str(uuid.uuid4()), subscription["id"], alarm_id, payload, now)).rowcount
+        if reminder is None:
+            queued += db.execute("INSERT OR IGNORE INTO push_deliveries(id,subscription_id,alarm_id,payload_json,next_attempt_at) VALUES(?,?,?,?,?)",
+                                 (str(uuid.uuid4()), subscription["id"], alarm_id, payload, now)).rowcount
+        else:  # One delivery a device and alarm: the one already made is sent again with the reminder's words
+            queued += db.execute(
+                "INSERT INTO push_deliveries(id,subscription_id,alarm_id,payload_json,next_attempt_at) VALUES(?,?,?,?,?) ON CONFLICT(subscription_id,alarm_id) DO UPDATE SET "
+                "payload_json=excluded.payload_json,status='queued',attempt_count=0,next_attempt_at=excluded.next_attempt_at,last_error=NULL WHERE push_deliveries.status IN ('sent','failed')",
+                (str(uuid.uuid4()), subscription["id"], alarm_id, payload, now)).rowcount
     return queued
 
 
