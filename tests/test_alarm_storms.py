@@ -122,6 +122,12 @@ class CeilingTests(StormCase):
         self.assertEqual(labels[12:22], ["vehicle"] * 10)
         self.assertEqual(labels[22], "suppressed:0")
         self.assertEqual(alarms.label_text("suppressed:89"), "89 more alarms held back")
+        # The closing summary is dated before the alarm of the event that ended the holding back, so their order never rests on which
+        # row happened to be written first: listed by time alone, newest first as the inbox lists them, the alarm is above the summary.
+        with connect() as db:
+            ending = [dict(row) for row in db.execute("SELECT label,occurred_at FROM alarms WHERE label IN ('suppressed:89','vehicle') ORDER BY occurred_at")][10:12]
+        self.assertEqual([row["label"] for row in ending], ["suppressed:89", "vehicle"])
+        self.assertLess(ending[0]["occurred_at"], ending[1]["occurred_at"])
 
     def test_sixty_in_an_hour_is_the_other_ceiling(self):
         rule_id = self.rule()
