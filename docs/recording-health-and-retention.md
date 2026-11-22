@@ -16,6 +16,8 @@ Retention targets are integers from 1 through 3650 days. Operators can read effe
 
 **Changed settings reach a running recording.** Switching audio off, changing a camera's address or login, its motion settings, or its group's storage volume restarts that camera's recording within a few seconds, so the new setting is used at once and not only after the stream next drops. The few seconds without footage show in coverage as "Restarted for changed settings". A change that touches many cameras (a group's volume) restarts them four at a time. Saving a schedule that leaves a camera's mode as it was restarts nothing.
 
+**After the recorder was stopped abruptly.** If the recording process is killed (a restart that ran out of time, the machine short of memory), the segment each camera was writing is left unfinished and the last finished ones may not be in the index. Within five minutes of the next start, and every five minutes after, the recorder goes over the folders of earlier runs: finished segments are added to the index, so they play and expire like any other footage, and the unfinished file, which cannot be played, is removed once its folder has been untouched for five minutes. The log says what it did.
+
 ## Multiple recording volumes
 
 The default Compose file provides a separate `archive` volume mounted at `/recordings/archive`. Set `NVR_STORAGE_VOLUMES` to a JSON object that maps volume names to directories below `NVR_RECORDINGS_PATH`, for example `{"default":"","archive":"archive"}`. Every non-default directory must be a mounted filesystem; the recorder reports it unavailable when the mount is missing. Add additional Compose bind or named volumes at matching paths to expose more local disks.
