@@ -346,7 +346,7 @@ function RuleEditor({ rule, onSaved, onClose, onDeleted }: {
           </label>
           <p className="muted field-hint">Each object fires a rule at most once. The quiet time also waits this long after an event on a camera before the next; new rules start with a minute.
             Whatever it is set to, a rule raises at most 10 alarms a minute and 60 an hour on one camera: past that its events are still recorded, and one alarm says further ones are being held back.</p>
-          {draft.cooldown_seconds === 0 ? <p className="notice" data-tone="warn" role="status">With no quiet time, every object that meets the rule raises its own alarm at once. A minute is the usual choice.</p> : null}
+          {draft.cooldown_seconds === 0 ? <p className="notice" data-tone="warn">With no quiet time, every object that meets the rule raises its own alarm at once. A minute is the usual choice.</p> : null}
           <label className="check"><input type="checkbox" checked={draft.pop_into_live} onChange={event => tab.change({ pop_into_live: event.target.checked })} /> Pop alarms into Live</label>
           <p className="muted field-hint">Brings the alarm's camera and its neighbors into Live for people who turned alarm pop-in on, and onto video walls.</p>
         </fieldset>
