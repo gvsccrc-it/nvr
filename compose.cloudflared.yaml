@@ -21,6 +21,9 @@ services:
       TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:?Set CLOUDFLARE_TUNNEL_TOKEN to the tunnel's token}
   nvr:
     environment:
+      # The interface is reached through the tunnel and nowhere else (#541): it is served to this machine only, so the plain-HTTP port is
+      # not also open on the local and camera networks beside the tunnel.
+      NVR_LISTEN_HOST: ${NVR_LISTEN_HOST:-127.0.0.1}  # Set it in .env only if something on the local network must still reach the NVR directly
       NVR_TRUSTED_PROXIES: 127.0.0.1
       NVR_PUBLIC_URL: https://${NVR_PUBLIC_HOST:?Set NVR_PUBLIC_HOST to the tunnel's public hostname}
       NVR_COOKIE_SECURE: "true"

@@ -33,6 +33,9 @@ services:
       - ./deploy/tailscale-serve.json:/config/serve.json:ro
   nvr:
     environment:
+      # The interface is reached through the tunnel and nowhere else (#541): it is served to this machine only, so the plain-HTTP port is
+      # not also open on the local and camera networks beside the tunnel.
+      NVR_LISTEN_HOST: ${NVR_LISTEN_HOST:-127.0.0.1}  # Set it in .env only if something on the local network must still reach the NVR directly
       NVR_TRUSTED_PROXIES: 127.0.0.1
       NVR_PUBLIC_URL: https://${TS_HOSTNAME:-nvr}.${TS_TAILNET:?Set TS_TAILNET to your tailnet name}.ts.net
       NVR_COOKIE_SECURE: "true"

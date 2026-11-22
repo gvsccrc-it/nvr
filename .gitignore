@@ -10,3 +10,5 @@ test-results/
 playwright-report/
 app/web_dist/
 web/node_modules/
+# The site's WireGuard configuration holds its private key (docs/remote-access.md puts it at deploy/wireguard/wg_confs/wg0.conf).
+deploy/wireguard/

@@ -10,3 +10,4 @@ web/node_modules
 app/web_dist
 test-results
 playwright-report
+deploy/wireguard

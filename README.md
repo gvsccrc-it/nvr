@@ -30,6 +30,7 @@ The `nvr-data` volume stores the database and account/session state. `nvr-secret
 |---|---:|---|
 | `NVR_PORT` | `8280` | Host listening port for the web application |
 | `NVR_SESSION_HOURS` | `12` | Session lifetime, clamped to 1–168 hours |
+| `NVR_LISTEN_HOST` | every address | The one address of this machine the interface is served on: the management network's address, or `127.0.0.1` behind a tunnel or proxy on the same machine (the Tailscale and Cloudflare overlays set that). Not set, it is served on every network the host is on, the camera network included; the hardening page then shows a standing warning. Anything that is not an IP address stops start-up with a message |
 | `NVR_COOKIE_SECURE` | `false` | Set `true` behind HTTPS so session cookies are HTTPS-only |
 | `NVR_PUBLIC_URL` | unset | Public HTTPS origin used to construct the fixed Entra callback URL, and the origin and relying party of passkeys |
 | `NVR_WEBAUTHN_RP_ID` | unset | Optional parent domain for passkeys, to share them between hosts |

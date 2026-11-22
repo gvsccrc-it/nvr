@@ -32,6 +32,31 @@ MAX_HOPS = 10
 _HOST = re.compile(r"^(?:[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*|\[[0-9a-f:.]+\])(?::\d{1,5})?$")
 
 
+def interface_networks() -> list[str]:
+    """The IPv4 networks this machine has an address on, loopback left out ("192.0.2.0/24 (eth0)"), for saying where the interface can be
+    reached from (#541). Linux only, and best effort: an empty list when they cannot be read."""
+    import fcntl
+    import socket
+    import struct
+
+    found: list[str] = []
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            for _, name in socket.if_nameindex():
+                request = struct.pack("256s", name.encode()[:15])
+                try:
+                    address = socket.inet_ntoa(fcntl.ioctl(probe.fileno(), 0x8915, request)[20:24])  # SIOCGIFADDR
+                    mask = socket.inet_ntoa(fcntl.ioctl(probe.fileno(), 0x891B, request)[20:24])  # SIOCGIFNETMASK
+                except OSError:
+                    continue  # No IPv4 address on this interface
+                interface = ipaddress.ip_interface(f"{address}/{mask}")
+                if not interface.ip.is_loopback:
+                    found.append(f"{interface.network} ({name})")
+    except (OSError, ValueError):
+        return []
+    return sorted(set(found))
+
+
 def _truthy(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes"}
 

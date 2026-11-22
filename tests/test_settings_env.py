@@ -169,3 +169,22 @@ class ContainerLogTests(unittest.TestCase):
         self.assertEqual([status for status in (200, 204, 304, 399, 400, 401, 404, 500, 503) if keep.filter(line(status))], [400, 401, 404, 500, 503])
         odd = logging.LogRecord("uvicorn.access", logging.INFO, __file__, 1, "something else", None, None)
         self.assertTrue(keep.filter(odd))  # Not a request line: never swallowed
+
+
+class SecretsInTheRepositoryFolderTests(unittest.TestCase):
+    """#550: the guides put the site's WireGuard configuration, with its private key, inside the repository's folder. It can never be added by accident."""
+
+    def test_the_wireguard_folder_is_ignored_by_git_and_left_out_of_the_image(self):
+        ignored = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+        self.assertIn("deploy/wireguard/", ignored)
+        self.assertIn(".env", ignored)  # Where the Tailscale key and the Cloudflare token go
+        self.assertIn("deploy/wireguard", (ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines())
+        self.assertIn(".env", (ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines())
+        if (ROOT / ".git").exists():
+            checked = subprocess.run(["git", "check-ignore", "deploy/wireguard/wg_confs/wg0.conf"], cwd=ROOT, capture_output=True, check=False)
+            self.assertEqual(checked.returncode, 0)
+        # The overlay mounts that folder and nothing else of the kind from the repository; Tailscale's state is a named volume.
+        wireguard = yaml.safe_load((ROOT / "compose.wireguard.yaml").read_text(encoding="utf-8"))["services"]["wireguard"]["volumes"]
+        self.assertIn("./deploy/wireguard:/config", wireguard)
+        tailscale = yaml.safe_load((ROOT / "compose.tailscale.yaml").read_text(encoding="utf-8"))["services"]["tailscale"]["volumes"]
+        self.assertIn("tailscale-state:/var/lib/tailscale", tailscale)

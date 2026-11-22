@@ -60,6 +60,7 @@ services:
       # Everything below is passed through only when it is set, in .env or in the shell that runs Compose (#544): a name with no value
       # here means "take it from there, and leave it unset in the container if it is not there". Compose reads .env only to fill in this
       # file, so a setting that is not named in this list never reaches the NVR. The README's table says what each one does.
+      NVR_LISTEN_HOST:
       NVR_WEBAUTHN_RP_ID:
       NVR_TRUST_FORWARDED_FOR:
       NVR_VAPID_SUBJECT:
@@ -124,7 +125,7 @@ services:
       # "- /mnt/offsite/nvr-backups:/backups", so a host or disk loss does not take the backups too.
       - nvr-backups:/backups
     healthcheck:
-      test: ["CMD", "python", "-c", "import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('NVR_LISTEN_PORT','8280')+'/healthz', timeout=3)"]
+      test: ["CMD", "python", "-m", "app.healthcheck"]  # Asks /healthz at the address the interface is served on (NVR_LISTEN_HOST)
       interval: 30s
       timeout: 5s
       retries: 3
