@@ -35,7 +35,7 @@ async def refresh_disk_health(admin: Administrator) -> dict[str, object]:
 @router.get("/api/storage/forecast")
 def get_forecast(_: Administrator) -> dict[str, object]:
     with connect() as db:
-        return forecast.forecast(db)
+        return forecast.current(db)
 
 
 @router.get("/api/cameras/{camera_id}/retention-forecast")
@@ -43,7 +43,9 @@ def get_camera_forecast(camera_id: str, user: CurrentUser) -> dict[str, object]:
     with connect() as db:
         if not user.access.can_see(camera_id) or db.execute("SELECT 1 FROM cameras WHERE id=?", (camera_id,)).fetchone() is None:
             raise HTTPException(status_code=404, detail="Camera not found")
-        result = forecast.forecast(db)
+        result = forecast.current(db)
+        if not any(item["id"] == camera_id for item in result["cameras"]):
+            result = forecast.refresh(db)  # A camera added since the forecast was last worked out
     camera = next(item for item in result["cameras"] if item["id"] == camera_id)
     disk = next((disk for disk in result["disks"] if camera["volume_id"] in disk["volume_ids"]), None)
     if not user.access.unrestricted:

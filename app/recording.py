@@ -565,7 +565,7 @@ class RecordingManager:
         try:
             volumes = smart.volumes_to_read()
             with connect() as db:
-                forecast.sync_incidents(db, forecast.forecast(db))
+                forecast.sync_incidents(db, forecast.refresh(db))  # Worked out here and kept: the scrape and the forecast pages read it (#460)
                 due = smart.due(db, volume_ids=volumes)
             if due:
                 smart.refresh(volumes)

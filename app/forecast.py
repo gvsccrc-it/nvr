@@ -18,6 +18,7 @@ and raises an incident when the shortfall begins within ``WARN_DAYS`` (7 days).
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sqlite3
@@ -181,6 +182,33 @@ def forecast(db: sqlite3.Connection, now: datetime | None = None, usage: Callabl
         cameras.append(entry)
     return {"as_of": now.isoformat(), "window_hours": int(WINDOW.total_seconds() // 3600), "warn_days": WARN_DAYS, "reserve_bytes": reserve, "disks": disks, "cameras": cameras,
             "note": "Footage is removed when it passes its policy, and the oldest is removed early to keep each volume's headroom free (Settings > Recording & storage > Storage headroom), so a full disk does not stop recording. Estimates use the last 48 hours of writing, and footage under a hold is not counted as room."}
+
+
+# A kept forecast older than this is worked out again by whoever reads it. The recorder refreshes it every five minutes, so a reader
+# works it out itself only when the recorder is not running, or has not got round to it since the server started.
+SNAPSHOT_MAX_AGE = timedelta(minutes=10)
+
+
+def refresh(db: sqlite3.Connection, now: datetime | None = None) -> dict[str, Any]:
+    """Work the forecast out now and keep it for the readers (#460). The one place that adds up every recorded segment."""
+    result = forecast(db, now)
+    db.execute("INSERT INTO forecast_snapshot(id,computed_at,result_json) VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET "
+               "computed_at=excluded.computed_at,result_json=excluded.result_json", (result["as_of"], json.dumps(result, separators=(",", ":"))))
+    return result
+
+
+def current(db: sqlite3.Connection, now: datetime | None = None) -> dict[str, Any]:
+    """The forecast as last worked out, if that is recent; otherwise worked out now and kept. For the metrics scrape and the forecast pages,
+    which asked for it often and each used to add up every recorded segment (#460). Its ``as_of`` says when it was worked out."""
+    now = now or datetime.now(timezone.utc)
+    row = db.execute("SELECT computed_at,result_json FROM forecast_snapshot WHERE id=1").fetchone()
+    if row is not None:
+        try:
+            if timedelta(0) <= now - _parse(row["computed_at"]) <= SNAPSHOT_MAX_AGE:
+                return json.loads(row["result_json"])
+        except ValueError:
+            pass  # Unreadable: worked out again below
+    return refresh(db, now)
 
 
 def suggest(camera: dict[str, Any], measured: list[dict[str, Any]], context: dict[str, Any], volumes: dict[str, dict[str, Any]], groups: dict[Any, list[str]],
