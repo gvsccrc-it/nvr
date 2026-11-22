@@ -200,7 +200,10 @@ class DisableTests(RemovalCase):
         self.assertEqual(self.admin.get("/api/auth/me").status_code, 200)
         created = self.admin.post("/api/admin/api-tokens", json={"name": "ci", "scopes": ["admin"]}).json()["secret"]
         by_token = TestClient(self.app).put("/api/admin/users/1/disabled", json={"disabled": True}, headers={"Authorization": f"Bearer {created}"})
-        self.assertEqual(by_token.status_code, 409)
+        # Was 409 (a token could not disable the administrator who made it). Since #463, by the owner's decision, no API token disables
+        # anyone: the refusal comes sooner and covers more, and the administrator still remains.
+        self.assertEqual(by_token.status_code, 403)
+        self.assertEqual(self.admin.get("/api/auth/me").status_code, 200)
 
     def test_only_administrators_disable_and_an_unknown_person_is_not_found(self):
         self.assertEqual(self.disable(1, client=self.limited).status_code, 403)

@@ -98,12 +98,12 @@ def requires_scope(scope: Scope) -> Callable[[Endpoint], Endpoint]:
 
 
 def scope_for(route: object, method: str) -> Scope:
+    dependant = getattr(route, "dependant", None)
+    if dependant is None or depends_on(dependant, administrator):
+        return "admin"  # Before any scope a route names for itself: an administrator's route never opens to a weaker token (#463)
     explicit = getattr(getattr(route, "endpoint", None), "required_scope", None)
     if explicit:
         return explicit
-    dependant = getattr(route, "dependant", None)
-    if dependant is None or depends_on(dependant, administrator):
-        return "admin"
     return "read" if method.upper() in {"GET", "HEAD"} else "admin"
 
 
@@ -155,6 +155,18 @@ def current_user(request: HTTPConnection) -> Principal:
 def administrator(user: Annotated[Principal, Depends(current_user)]) -> Principal:
     if user["role"] != "administrator":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Administrator role required")
+    return user
+
+
+def administrator_session(user: Annotated[Principal, Depends(administrator)]) -> Principal:
+    """An administrator signed in with a browser session: never an API token, whatever its scopes (#463).
+
+    For the routes that change how people sign in, or the record of what was done: the sign-in and second-factor policy, another
+    person's second factors, disabling or enabling an account, how long the security log is kept, and camera access grants. An ``admin``
+    token is never asked for a second factor, so a leaked one could otherwise turn the second factor off for everyone, lock every other
+    account out and shorten the log of having done it. Managing API tokens is refused to tokens the same way (``app/api/automation.py``)."""
+    if user.scopes is not None or user.token_id is not None or user.wall:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="This needs an administrator signed in with a browser, not an API token")
     return user
 
 
@@ -268,4 +280,5 @@ def _principal(row: sqlite3.Row, remote: bool = False, *, db: sqlite3.Connection
 
 CurrentUser = Annotated[Principal, Depends(current_user)]
 Administrator = Annotated[Principal, Depends(administrator)]
+AdministratorSession = Annotated[Principal, Depends(administrator_session)]
 SignedInPerson = Annotated[Principal, Depends(signed_in_person)]

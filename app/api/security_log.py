@@ -15,7 +15,7 @@ from app import security_log
 from app.api.viewing_audit import _cell, _range
 from app.audit import record
 from app.clock import stamp
-from app.principal import Administrator
+from app.principal import Administrator, AdministratorSession
 from app.store import connect
 
 router = APIRouter()
@@ -66,7 +66,7 @@ def security_log_settings(_: Administrator) -> dict[str, int]:
 
 
 @router.put("/api/admin/security-log/settings")
-def update_security_log_settings(payload: LogSettings, admin: Administrator) -> dict[str, int]:
+def update_security_log_settings(payload: LogSettings, admin: AdministratorSession) -> dict[str, int]:
     with connect() as db:
         before = security_log.retention_days(db)
         db.execute("UPDATE security_settings SET security_log_retention_days=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE singleton_id=1", (payload.retention_days,))

@@ -37,6 +37,17 @@ The person's access is resolved once per request, from their grants as they stan
 
 What is stored is untouched, so restoring access brings a saved view back.
 
+**What an API token can never do, whatever its scopes.** These need an administrator signed in with a browser, and are refused to every token with 403, the `admin` scope included:
+
+- changing the sign-in and second-factor policy (`PUT /api/admin/security`);
+- resetting another person's second factors (`DELETE /api/admin/users/{id}/mfa`);
+- disabling or enabling an account (`PUT /api/admin/users/{id}/disabled`);
+- changing how long the security log is kept (`PUT /api/admin/security-log/settings`);
+- changing camera access grants (`PUT /api/admin/access-grants`, `DELETE /api/admin/access-grants/{id}`);
+- making, listing or revoking API tokens.
+
+A token is never asked for a second factor, so a leaked one must not be able to turn the second factor off, lock people out, or shorten the record of what it did. A token can still read all of these. An automation that has to remove someone's access does it by removing their Entra role, which ends their access at their next sign-in.
+
 An **API token** has its creator's access, resolved at each request. Tokens are made by administrators, who see every camera, so a token sees every camera; a token whose creator stops being an administrator stops working.
 
 ## Removing a person
