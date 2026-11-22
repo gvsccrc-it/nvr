@@ -57,3 +57,8 @@ All for administrators.
 - The list of defaults is bundled and cannot be edited; a default it does not know is not found.
 - A camera that offers RTSPS or HTTPS on an unusual port is not detected as offering it.
 - Whether a camera is reachable from outside the building is not tested; the report relies on its configured addresses.
+
+## A run with cameras that do not answer
+
+Asking a camera whether it offers a secure connection waits up to 15 seconds when nothing answers. **Run checks now**, and saving the camera networks, answer within a few seconds either way: a run that is still going carries on in the background, the page shows how many of its questions have been answered or given up on, and the results appear when it is done. Only one run goes on at a time. Afterwards the page lists the cameras that did not answer, whose protocol checks could therefore not be made.
+

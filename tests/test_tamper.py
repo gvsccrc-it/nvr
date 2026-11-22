@@ -304,6 +304,7 @@ class SlowSamplingTests(TamperCase):
     def test_a_camera_that_gives_no_picture_is_tried_less_and_less_often_by_the_running_loop(self):
         self.enable()
         asked: list[float] = []
+        passes: list[int] = []
 
         async def scenario() -> None:
             loop = asyncio.get_running_loop()
@@ -314,8 +315,12 @@ class SlowSamplingTests(TamperCase):
 
             manager = tamper.TamperManager(grabber=nothing, interval=0.05)
             manager._patient = True  # As the running loop asks
-            for _ in range(40):
+            # Five seconds of passes, not a number of them: tries fall due at 0, at once, after 2 s, after 4 s more. Forty passes 0.05 s
+            # apart took about two seconds, and on a fast machine ended just before the third try was due (2 tries, not 3; failed on main).
+            ends = loop.time() + 5
+            while loop.time() < ends:
                 await manager.sample_all()
+                passes.append(1)
                 await asyncio.sleep(0.05)
             misses, _ = manager._unreachable[self.camera]
             self.assertEqual(misses, len(asked))
@@ -328,7 +333,8 @@ class SlowSamplingTests(TamperCase):
             self.assertNotIn(self.camera, manager._unreachable)
 
         asyncio.run(scenario())
-        self.assertLess(len(asked), 12)  # Forty passes, a handful of tries: the first two, then after 2, 4, 8, ... seconds (never under a second)
+        self.assertGreater(len(passes), 30)  # Many passes...
+        self.assertLess(len(asked), 12)  # ...and a handful of tries: the first two, then after 2, 4, 8, ... seconds (never under a second)
         self.assertGreaterEqual(len(asked), 3)
         # A pass asked for directly (a test, a tool) still tries every camera every time.
         direct: list[int] = []

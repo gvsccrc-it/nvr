@@ -65,6 +65,23 @@ def parse(url: str) -> Target:
     return Target(kind, parts.hostname, parts.port or default_port, tls, parts.path if kind == "otlp" and parts.path not in ("", "/") else "/v1/logs")
 
 
+# What each stored encrypted value holds, once decrypted, kept for the process: a value is decrypted once, not at every refresh of every
+# scrubber (the metrics scrape made a new one each time and decrypted every camera's addresses and logins, #460). A changed value is a
+# different key, so it is decrypted when it changes. Held in memory only, as the scrubber's own patterns already hold the same secrets.
+_decrypted: dict[bytes, str] = {}
+
+
+def _plain(ciphertext: bytes) -> str:
+    from .credentials import decrypt
+
+    key = bytes(ciphertext)
+    if key not in _decrypted:
+        if len(_decrypted) > 4096:  # Bounded: old values of cameras that changed are not kept for ever
+            _decrypted.clear()
+        _decrypted[key] = decrypt(key)
+    return _decrypted[key]
+
+
 class Scrubber:
     """Removes what a log line must never carry: URLs, and the addresses and credentials of the configured cameras."""
 
@@ -77,7 +94,6 @@ class Scrubber:
         self._refreshed = time.monotonic()
 
     def refresh(self) -> None:
-        from .credentials import decrypt
         from .store import connect
         secrets: set[str] = set()
 
@@ -100,12 +116,12 @@ class Scrubber:
                 for column in ("stream_url_ciphertext", "live_substream_url_ciphertext"):
                     if row[column]:
                         try:
-                            take_url(decrypt(row[column]))
+                            take_url(_plain(row[column]))
                         except RuntimeError:
                             pass
                 if row["motion_credentials_ciphertext"]:
                     try:
-                        credentials = json.loads(decrypt(row["motion_credentials_ciphertext"]))
+                        credentials = json.loads(_plain(row["motion_credentials_ciphertext"]))
                         secrets.update(str(credentials.get(key)) for key in ("username", "password") if credentials.get(key))
                     except (RuntimeError, ValueError, AttributeError):
                         pass

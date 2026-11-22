@@ -565,7 +565,7 @@ class RecordingManager:
         try:
             volumes = smart.volumes_to_read()
             with connect() as db:
-                forecast.sync_incidents(db, forecast.forecast(db))
+                forecast.sync_incidents(db, forecast.refresh(db))  # Worked out here and kept: the scrape and the forecast pages read it (#460)
                 due = smart.due(db, volume_ids=volumes)
             if due:
                 smart.refresh(volumes)
@@ -577,6 +577,9 @@ class RecordingManager:
         with connect() as db:
             viewing_audit.close_orphans(db)  # What a crash left open, once it has gone quiet; at start alone, a full restart's own were too fresh to close
             viewing_audit.prune(db)
+            from . import backfill  # Here: backfill imports this module
+
+            backfill.prune_jobs(db)  # Jobs about time older than the camera's oldest footage (#475)
             security_log.prune(db)
         from . import talk
 

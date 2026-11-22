@@ -165,7 +165,7 @@ def _disks(out: _Output, db: sqlite3.Connection, scrub: logforward.Scrubber) -> 
     for row in rows:
         out.sample("nvr_disk_health_state", 1, volume=row["volume_id"], state=row["state"])
     try:
-        result = forecast.forecast(db)
+        result = forecast.current(db)  # As the recorder last worked it out: a scrape adds up no segments (#460)
     except (sqlite3.Error, ValueError, OSError):
         return  # The forecast families are skipped; the rest of the scrape stands.
     for name, help_text, key in (("nvr_camera_retention_policy_days", "The retention policy of each camera, in days.", "policy_days"),

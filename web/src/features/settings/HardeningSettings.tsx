@@ -15,6 +15,7 @@ interface Report {
   probe_gap_seconds: number; findings: Finding[]; acknowledged: Finding[]; counts: { high: number; medium: number; acknowledged: number };
   listening?: { host: string; every_address: boolean; networks: string[] };
   unprotected_talk?: { camera_id: string; camera_name: string }[];
+  run?: { running: boolean; started_at: string | null; probes_total: number; probes_done: number; not_answered: { camera_id: string; camera_name: string }[] };
 }
 
 const SEVERITY = { high: "High", medium: "Medium" } as const;
@@ -23,7 +24,9 @@ const key = (finding: Finding) => `${finding.camera_id}/${finding.check}`;
 /** How exposed the cameras are: default passwords, unencrypted streams, and cameras off the camera network. */
 export function HardeningSettings() {
   const client = useQueryClient();
-  const report = useQuery({ queryKey: ["hardening"], queryFn: ({ signal }) => api<Report>("/api/hardening", { signal }) });
+  // While a run goes on in the background (cameras that do not answer take a while to give up on), ask how far it has got
+  const report = useQuery({ queryKey: ["hardening"], queryFn: ({ signal }) => api<Report>("/api/hardening", { signal }),
+                            refetchInterval: query => (query.state.data?.run?.running ? 2_000 : false) });
   const run = useMutation({ mutationFn: () => api<Report>("/api/hardening/run", { method: "POST" }), onSuccess: result => client.setQueryData(["hardening"], result) });
   const data = report.data;
   return (
@@ -42,9 +45,23 @@ export function HardeningSettings() {
               : `The checks have not run yet${data.next_run_at ? `; the first weekly run is ${formatRelative(data.next_run_at)}` : ""}. Run them now to see where the cameras stand.`}
           </p>
         ) : null}
+        {data?.run?.running ? (
+          <p className="notice" role="status">
+            <span className="spinner" aria-hidden="true" /> <span>Checking the cameras: {data.run.probes_done} of {data.run.probes_total} questions answered or given up on. The results appear here when it is done.</span>
+          </p>
+        ) : data?.run?.not_answered.length ? (
+          <p className="notice" data-tone="warn">
+            <span>
+            {data.run.not_answered.length === 1 ? "One camera" : `${data.run.not_answered.length} cameras`} did not answer whether {data.run.not_answered.length === 1 ? "it offers" : "they offer"} a secure
+            connection in the last run, so {data.run.not_answered.length === 1 ? "its" : "their"} protocol checks could not be made: {data.run.not_answered.map(camera => camera.camera_name).join(", ")}.
+            </span>
+          </p>
+        ) : null}
         {run.error ? <p className="notice" data-tone="bad" role="alert">The checks could not run: {failureText(run.error)}.</p> : null}
         <div className="field-actions">
-          <button type="button" className="button" disabled={run.isPending} onClick={() => run.mutate()}>{run.isPending ? "Checking…" : "Run checks now"}</button>
+          <button type="button" className="button" disabled={run.isPending || Boolean(data?.run?.running)} onClick={() => run.mutate()}>
+            {run.isPending || data?.run?.running ? "Checking…" : "Run checks now"}
+          </button>
         </div>
       </section>
       {data?.listening?.every_address ? (
