@@ -23,6 +23,9 @@ def write_history(camera: int, tb_per_day: float, hours: int = 48) -> dict[str, 
             start = now - timedelta(hours=hours - hour)
             db.execute("INSERT INTO recording_segments(camera_id,relative_path,starts_at,ends_at,size_bytes) VALUES(?,?,?,?,?)",
                        (camera_id, f"{camera_id}/{uuid.uuid4()}.mp4", start.isoformat(), (start + timedelta(hours=1)).isoformat(), int(tb_per_day * TB / 24)))
+        # Hours of footage written at once: a forecast saved before it describes a moment hours earlier, and would have been worked out
+        # again many times since (#460 keeps it for up to ten minutes), so it is cleared rather than shown.
+        db.execute("DELETE FROM forecast_snapshot")
     return {"camera_id": camera_id}
 
 
