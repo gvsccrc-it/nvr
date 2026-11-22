@@ -54,6 +54,20 @@ def _bump(camera_id: str) -> None:
     _generations[camera_id] = generation(camera_id) + 1
 
 
+# Bumped when a camera's audio is turned off: open streams that carry its audio stop, and their viewers come back without it (#489).
+# Streams of video alone, and other cameras' streams, carry on. Kept in memory like the generation above: the change and the streams
+# are both in the web process.
+_audio_generations: dict[str, int] = {}
+
+
+def audio_generation(camera_id: str) -> int:
+    return _audio_generations.get(camera_id, 0)
+
+
+def audio_turned_off(camera_id: str) -> None:
+    _audio_generations[camera_id] = audio_generation(camera_id) + 1
+
+
 class UnmaskedRefused(PermissionError):
     """Unmasked footage was asked for without an active grant."""
 
@@ -186,11 +200,15 @@ class StreamGuard:
     """For an open live stream: stops it when the camera's masks or grants change, its grant lapses, or the
     viewer's access to the camera ends (re-checked every second, so an expired access grant cuts a stream at once)."""
 
-    def __init__(self, principal: Any, camera_id: str, unmasked: bool) -> None:
+    def __init__(self, principal: Any, camera_id: str, unmasked: bool, *, carries_audio: bool = False) -> None:
         self.camera_id = camera_id
+        # Whether this stream carries the camera's audio: such a stream also stops when the camera's audio is turned off. Set it once the
+        # stream's form is known; the generation it is compared with is taken now, so a change made in between is not missed.
+        self.carries_audio = carries_audio
+        self.audio_generation = audio_generation(camera_id)
         self.user_id = int(principal.id)
         self.principal = principal
-        self.reason: str | None = None  # "credential", "access" or "masks", once it has stopped being valid
+        self.reason: str | None = None  # "credential", "access", "masks" or "audio", once it has stopped being valid
         self._access_checked = time.monotonic()
         self.generation = generation(camera_id)
         self.until: datetime | None = None
@@ -245,6 +263,9 @@ class StreamGuard:
             return False
         if generation(self.camera_id) != self.generation or (self.until is not None and _now() >= self.until):
             self.reason = "masks"
+            return False
+        if self.carries_audio and audio_generation(self.camera_id) != self.audio_generation:
+            self.reason = "audio"
             return False
         return True
 

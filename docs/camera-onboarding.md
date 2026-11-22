@@ -97,3 +97,12 @@ Record the result for each camera model in `docs/acceptance/`:
 - [ ] The decoded-frame check passes.
 - [ ] A wrong password reports an authentication failure, not a connection failure.
 - [ ] The report and the application logs contain no password.
+
+## Moving a camera's ONVIF address to another host
+
+A camera's saved ONVIF login (used for motion events, PTZ, privacy masks, health checks and backfill) is only ever sent to the hosts it has been used with: the camera's address and the hosts of its device and event addresses. Changing an address to another path or port on the same host keeps it. Moving one to a **different host** does not take the saved login along:
+
+- **Motion source:** an event address on another host is refused until the ONVIF username and password are entered with it.
+- **Camera source:** a device address on another host uses the camera login entered with the change; if none was entered, the saved ONVIF login is cleared and must be entered again under Motion source.
+
+Both changes are written to the security log, with the new host and whether the login was kept, replaced or cleared.
