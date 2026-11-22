@@ -150,7 +150,10 @@ class VideoWallTests(SceneTestCase):
         self.assertEqual(wall.get("/api/wall/session").status_code, 401)
         signed_in = wall.post("/api/wall/session", json={"token": secret})
         self.assertEqual(signed_in.status_code, 200, signed_in.text)
-        self.assertEqual(signed_in.json(), {"name": "Lobby wall", "scopes": ["read", "media"]})
+        from app.api.web_interface import interface_version
+
+        # "interface" names the build of the interface the server gives out, so a wall left running across an upgrade can reload (#535)
+        self.assertEqual(signed_in.json(), {"name": "Lobby wall", "scopes": ["read", "media"], "interface": interface_version()})
         self.assertNotIn(secret, json.dumps(dict(wall.cookies)))
         self.assertEqual(wall.get("/api/wall/session").json()["name"], "Lobby wall")
 

@@ -11,9 +11,17 @@ import { formatSiteTime } from "@/lib/zonedTime";
 import { INITIAL_WALL, MIN_ALARM_SECONDS, MIN_DWELL_SECONDS, MAX_DWELL_SECONDS, parseWallAddress, wallReducer, wallSearch, type WallAddress } from "./rotation";
 import { WallTile } from "./WallTile";
 
-interface WallSession { name: string; scopes: string[] }
+interface WallSession { name: string; scopes: string[]; interface?: string }
 
 const sessionKey = ["wall", "session"] as const;
+/** How often a running wall checks its session and its views again. Nobody is there to reload it, and a kiosk never gets a focus event. */
+const BACKGROUND_MS = 60_000;
+/** The wait before asking an NVR that cannot be reached again: 2 s, 4 s, 8 s… up to half a minute. */
+const waitBeforeRetry = (attempt: number) => Math.min(30_000, 2_000 * 2 ** attempt);
+
+function Waiting() {
+  return <main className="wall-setup"><p className="wall-panel" role="status"><span className="spinner" /> <span>Waiting for the NVR…</span></p></main>;
+}
 
 /**
  * Video wall mode at /wall: full screen video for a monitor, signed in once with an API
@@ -21,11 +29,31 @@ const sessionKey = ["wall", "session"] as const;
  */
 export function WallApp() {
   const client = useQueryClient();
+  // Only "not signed in" (401) is an answer. Anything else (no network, a 503 while the NVR starts) is tried again, for ever, with a
+  // growing wait: a display that starts before the NVR after a power cut must not end on a form asking for a token shown once (#535).
   const session = useQuery({
     queryKey: sessionKey,
-    queryFn: ({ signal }) => api<WallSession>("/api/wall/session", { signal, quietUnauthorized: true }),
-    retry: false,
+    queryFn: async ({ signal }): Promise<WallSession | null> => {
+      try {
+        return await api<WallSession>("/api/wall/session", { signal, quietUnauthorized: true });
+      } catch (error) {
+        if (error instanceof ApiError && error.unauthorized) return null;
+        throw error;
+      }
+    },
+    retry: true,
+    retryDelay: waitBeforeRetry,
+    refetchInterval: BACKGROUND_MS,
+    refetchIntervalInBackground: true,
   });
+  // The interface this page was loaded with, as the server named it then. A different name later means the NVR was upgraded under a
+  // running wall, which would otherwise keep running the old interface against the new server.
+  const serving = session.data?.interface || null;
+  const [loadedWith, setLoadedWith] = useState<string | null>(null);
+  useEffect(() => {
+    if (serving && !loadedWith) setLoadedWith(serving);
+  }, [serving, loadedWith]);
+  const outdated = Boolean(serving && loadedWith && serving !== loadedWith);
   const [address, setAddress] = useState<WallAddress>(() => parseWallAddress(window.location.search));
 
   useEffect(() => {
@@ -35,7 +63,7 @@ export function WallApp() {
   // A revoked or expired token ends the session: go back to the token form.
   useEffect(() => onSessionExpired(() => client.setQueryData(sessionKey, null)), [client]);
 
-  if (session.isPending) return <div className="app-loading" role="status"><span className="spinner" /> <span>Loading…</span></div>;
+  if (session.isPending) return session.failureCount ? <Waiting /> : <div className="app-loading" role="status"><span className="spinner" /> <span>Loading…</span></div>;
   if (!session.data) return <WallSignIn />;
   if (!address.views.length) {
     return <WallSetup onStart={next => {
@@ -44,7 +72,7 @@ export function WallApp() {
       void document.documentElement.requestFullscreen?.().catch(() => undefined);
     }} />;
   }
-  return <WallScreen address={address} />;
+  return <WallScreen address={address} outdated={outdated} />;
 }
 
 function WallSignIn() {
@@ -59,6 +87,7 @@ function WallSignIn() {
     setError(null);
     try {
       const signedIn = await api<WallSession>("/api/wall/session", { method: "POST", body: { token }, quietUnauthorized: true });
+      await client.cancelQueries({ queryKey: sessionKey });  // A background check asked before the sign-in must not answer "signed out" after it
       client.setQueryData(sessionKey, signedIn);
     } catch (failure) {
       setError(failure instanceof ApiError ? failure.detail : "The video wall could not sign in.");
@@ -116,10 +145,10 @@ function members(view: SavedView): string[] {
   return view.layout_mode === "manual" ? view.tile_camera_ids.filter((id): id is string => id !== null) : view.camera_ids;
 }
 
-function WallScreen({ address }: { address: WallAddress }) {
+function WallScreen({ address, outdated }: { address: WallAddress; outdated: boolean }) {
   const mainOnly = useViewingPrefs(prefs => prefs.mainOnly);
   const cameras = useCameras();
-  const views = useLiveViews();
+  const views = useLiveViews(BACKGROUND_MS);
   const display = useDisplaySettings();
   const [state, dispatch] = useReducer(wallReducer, INITIAL_WALL);
   const byName = useMemo(() => new Map((views.data ?? []).filter(view => view.scope === "shared").map(view => [view.name, view])), [views.data]);
@@ -138,6 +167,11 @@ function WallScreen({ address }: { address: WallAddress }) {
     return () => window.clearTimeout(timer);
   }, [state.alarm, address.dwellSeconds]);
 
+  // A newer interface is loaded at a quiet moment: never over an alarm that is showing.
+  useEffect(() => {
+    if (outdated && !state.alarm) window.location.reload();
+  }, [outdated, state.alarm]);
+
   const available = useMemo(() => new Map((cameras.data ?? []).filter(camera => !camera.archived_at).map(camera => [camera.id, camera])), [cameras.data]);
   const view = rotation[state.viewIndex % Math.max(1, viewCount)];
   const ids = state.alarm ? state.alarm.camera_ids : view ? members(view) : [];
@@ -145,6 +179,8 @@ function WallScreen({ address }: { address: WallAddress }) {
   const { columns, rows } = autoGrid(shown.length);
   const time = state.alarm && display.data ? formatSiteTime(Date.parse(state.alarm.occurred_at), display.data, true) : "";
 
+  // Nothing to draw yet because the first fetch failed: say so, not an empty grid. Both are fetched again by themselves.
+  if ((!views.data && views.isError) || (!cameras.data && cameras.isError)) return <Waiting />;
   if (views.isSuccess && !viewCount) {
     return <main className="wall-setup"><p className="notice wall-panel" data-tone="warn" role="alert">None of this wall's views exist any more. Open /wall again to choose views.</p></main>;
   }
