@@ -33,6 +33,12 @@ Those callers are limited by their own counts only (the first two rows of the ta
 
 When the account-wide wait starts for an account that exists, the NVR raises an incident naming the account ("Wrong passwords for the account … are arriving from several addresses"). It recovers when that account is signed in to, or once the guessing has been quiet for 15 minutes and anyone next signs in. The security log holds each `auth_throttled` entry with the address.
 
+## Load from sign-in attempts
+
+Checking a password is made slow on purpose (about a tenth of a second of one processor core). So that a burst of sign-in attempts cannot keep every core and every request thread busy, only a few passwords from people who are not signed in are checked at once: half the machine's cores, at least 2 and at most 8. An attempt that finds no place waits up to 2 seconds, then is told "Many people are signing in at this moment. Try again in a few seconds." It is not counted as a wrong password.
+
+Sign-ins with a passkey alone that have been started and not finished are capped at 10 for each caller (an IPv6 /64 is one caller) and 1,000 in all.
+
 ## What is not limited by this
 
 Microsoft Entra sign-in (the tenant's own limits apply), API tokens, and video-wall sessions.

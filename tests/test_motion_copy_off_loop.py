@@ -76,9 +76,11 @@ class MotionCopyOffLoopTests(unittest.TestCase):
     def fill_buffer(self) -> None:
         """A buffer of three two-second parts, the newest ending now: a pre-roll of ten seconds covers them all.
 
-        Written at the moment the motion event is made, not in setUp. The parts are dated from "now" and the event's pre-roll reaches
-        back ten seconds from when it arrives, so anything slow between the two (a loaded machine took more than four seconds to get
-        from setUp to the event) let the oldest part age out of the pre-roll, and two parts were copied where three were expected."""
+        Written at the moment the event is taken in, not before. The parts are dated from "now" and the pre-roll reaches back ten
+        seconds from when the event is taken in, so anything slow between the two let the oldest part age out of the pre-roll, and two
+        parts were copied where three were expected. That happened twice on a loaded machine: first with the buffer written in setUp,
+        then with it written when the event was made, because the garbage collection that longest_stall runs before the loop starts
+        took seconds after two thousand other tests."""
         start = datetime.now(timezone.utc) - timedelta(seconds=6)
         lines = ["#EXTM3U", "#EXT-X-PROGRAM-DATE-TIME:" + start.isoformat()]
         for number in range(3):
@@ -108,7 +110,13 @@ class MotionCopyOffLoopTests(unittest.TestCase):
         from app.onvif_events import CameraMotionEvent
 
         assembler = MotionClipAssembler(self.camera_id, self.spool, pre_roll_seconds=10, post_roll_seconds=30)
-        self.fill_buffer()  # As late as possible: see fill_buffer
+        take_in = assembler.ingest
+
+        async def fill_then_take_in(event):
+            self.fill_buffer()  # In the same breath as the event: see fill_buffer. Three small files, far below what counts as a stall
+            return await take_in(event)
+
+        assembler.ingest = fill_then_take_in
         return assembler, CameraMotionEvent(True, datetime.now(timezone.utc), "RuleEngine/CellMotionDetector/Motion")
 
     def test_copying_the_pre_roll_does_not_stop_the_loop(self):

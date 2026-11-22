@@ -133,7 +133,11 @@ def _ceiling_cleared(db: sqlite3.Connection, event: sqlite3.Row, occurred: datet
         return
     db.execute("DELETE FROM alarm_suppressions WHERE rule_id=? AND camera_id=?", (event["rule_id"], event["camera_id"]))
     if int(state["held_back"]) > 1:  # (The first one held back was announced by the summary that began it)
-        _summary_alarm(db, event, occurred, int(state["held_back"]) - 1)
+        # Dated a millisecond before the event that ended the holding back: it speaks of what came before, and that event's own alarm
+        # is raised next with the event's time. Given the same time, the two were put in order only by the moment each row was written,
+        # to the millisecond, so written within one millisecond they came out in either order (the inbox, and a test that failed on main
+        # three runs in nine).
+        _summary_alarm(db, event, occurred - timedelta(milliseconds=1), int(state["held_back"]) - 1)
 
 
 def create_alarm(db: sqlite3.Connection, rule_event_id: str, *, late: bool = False) -> str | None:
