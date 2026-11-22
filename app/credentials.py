@@ -91,6 +91,7 @@ _said: set[str] = set()
 # sign in with them) used to get a new key without a word, and every token stopped working. A test keeps this list and the code the same.
 DERIVED_USES: dict[str, tuple[str, str] | None] = {
     "api-token": ("api_tokens", "secret_digest"),
+    "known-browser": None,  # Signs the cookie that spares a returning browser the account-wide sign-in wait: without it they wait like anyone
     "push-thumbnail": None,  # Signs picture links that live two hours: nothing kept
     "security-log-username": None,  # Groups repeated tries of one unknown name in the log; old rows merely stop matching new ones
 }
