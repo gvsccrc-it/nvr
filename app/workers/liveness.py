@@ -6,6 +6,7 @@ import logging
 import os
 import sqlite3
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -39,8 +40,12 @@ def record(name: str, *, state: str, pid: int | None = None, started: bool = Fal
         )
 
 
+BEAT_BUSY_SECONDS = 2.0  # The status row waits this long for another process's write, not the usual ten seconds: it is written again five seconds later
+
+
 def beat(name: str) -> None:
     with connect() as db:
+        db.execute(f"PRAGMA busy_timeout = {int(BEAT_BUSY_SECONDS * 1000)}")
         db.execute(
             "UPDATE worker_status SET state='running',pid=?,heartbeat_at=?,updated_at=? WHERE name=?",
             (os.getpid(), _now(), _now(), name),
@@ -76,15 +81,32 @@ def pulse_fresh(name: str, pid: int | None, now: float | None = None) -> bool:
 
 
 async def heartbeat_forever(name: str) -> None:
-    """Report this process alive until cancelled: the pulse the supervisor reads, then the database row the status page reads. Neither failing
-    stops the other, and a database that is busy only makes the status page stale."""
+    """Report this process alive until cancelled: the pulse the supervisor reads, and the database row the status page reads.
+
+    The two do not wait for each other. The pulse is written by the event loop itself and by nothing else, so it stops only when the loop
+    does. It used to be written in the same loop as the row, one after the other, and the row's write queued in the process's shared
+    thread pool: with the database locked, every camera's write sat in that pool for its ten-second time-out, the row waited its turn
+    behind them, the next pulse came more than 30 s later, and the supervisor killed a recorder whose loop was fine (#482). The row now
+    has a thread of its own and a short wait; a busy database only makes the status page stale."""
+    threads = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"{name}-status")
+    status = asyncio.create_task(_status_forever(name, threads), name=f"{name}-status-row")
+    try:
+        while True:
+            try:
+                pulse(name)
+            except OSError:
+                logger.warning("%s worker could not write its liveness file", name)
+            await asyncio.sleep(HEARTBEAT_SECONDS)
+    finally:
+        status.cancel()
+        threads.shutdown(wait=False)
+
+
+async def _status_forever(name: str, threads: ThreadPoolExecutor) -> None:
+    loop = asyncio.get_running_loop()
     while True:
         try:
-            pulse(name)
-        except OSError:
-            logger.warning("%s worker could not write its liveness file", name)
-        try:
-            await asyncio.to_thread(beat, name)
+            await loop.run_in_executor(threads, beat, name)
         except sqlite3.Error:
             pass
         await asyncio.sleep(HEARTBEAT_SECONDS)

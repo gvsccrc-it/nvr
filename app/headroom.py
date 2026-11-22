@@ -6,10 +6,13 @@ volume the shortfall is reported beside the setting instead.
 """
 from __future__ import annotations
 
+import heapq
+import itertools
 import os
 import shutil
 import sqlite3
 from datetime import datetime, timedelta, timezone
+from typing import Iterator
 
 from .store import connect, has_row
 
@@ -57,6 +60,41 @@ def volume_of(relative_path: str, volumes: dict[str, str]) -> str:
     return name
 
 
+PAGE = 100  # Segments read at a time for one camera
+
+
+def _oldest_of_camera(camera_id: str, where: str, values: list[str], now: datetime) -> Iterator[sqlite3.Row]:
+    """One camera's hot footage on a volume that nothing in the database protects, oldest first, a page at a time through the
+    (camera, start) index. Held and reserved footage is left out in the query, so a long run of it at the front cannot use up the pass."""
+    after = ""
+    while True:
+        with connect() as db:
+            rows = db.execute(
+                f"SELECT id,relative_path,starts_at,ends_at FROM recording_segments s WHERE camera_id=? AND starts_at>? AND {where} "
+                "AND NOT EXISTS (SELECT 1 FROM recording_holds h WHERE h.segment_id=s.id AND h.released_at IS NULL AND (h.expires_at IS NULL OR h.expires_at>?)) "
+                "AND NOT EXISTS (SELECT 1 FROM export_sources x JOIN exports e ON e.id=x.export_id WHERE x.segment_id=s.id AND e.status IN ('queued','running')) "
+                f"ORDER BY starts_at LIMIT {PAGE}", (camera_id, after, *values, now.isoformat())).fetchall()
+        yield from rows
+        if len(rows) < PAGE:
+            return
+        after = rows[-1]["starts_at"]
+
+
+def oldest_removable(volume_id: str, volumes: dict[str, str], now: datetime) -> Iterator[sqlite3.Row]:
+    """A volume's removable footage, oldest first across its cameras, read as it is asked for.
+
+    This used to select every hot segment on the server, sort them all, turn each into an object and filter by volume in Python, to keep
+    the first 5,000: 1.8 s and 334 MB for a million segments, every minute for every volume that was below its headroom, which is the
+    normal state of a recorder (#480). Each camera's oldest are now read through the index, a page at a time, and merged by end time;
+    a pass that needs 200 segments reads a few hundred rows."""
+    from .volume_marker import _prefix_filter
+
+    where, values = _prefix_filter(volume_id, volumes, available_only=False)
+    with connect() as db:
+        cameras = [row[0] for row in db.execute("SELECT id FROM cameras")]
+    return heapq.merge(*(_oldest_of_camera(camera_id, where, values, now) for camera_id in cameras), key=lambda row: row["ends_at"])
+
+
 def _record_check(volume_id: str, now: datetime, short_bytes: int) -> None:
     with connect() as db:
         db.execute(
@@ -96,14 +134,8 @@ def keep_headroom(now: datetime | None = None) -> dict[str, dict[str, int]]:
         if free < wanted:
             with connect() as db:
                 kept_since = resolved_kept_since(db, now)
-                # This volume's oldest footage that nothing in the database protects; alarms are checked as each is removed. Held and reserved footage is left out here, so a long run of it
-                # at the front cannot use up the pass.
-                candidates = [row for row in db.execute(
-                    "SELECT id,relative_path,ends_at FROM recording_segments s WHERE tier_id IS NULL "
-                    "AND NOT EXISTS (SELECT 1 FROM recording_holds h WHERE h.segment_id=s.id AND h.released_at IS NULL AND (h.expires_at IS NULL OR h.expires_at>?)) "
-                    "AND NOT EXISTS (SELECT 1 FROM export_sources x JOIN exports e ON e.id=x.export_id WHERE x.segment_id=s.id AND e.status IN ('queued','running')) "
-                    "ORDER BY ends_at", (now.isoformat(),)) if volume_of(row["relative_path"], volumes) == volume_id][:MAX_SEGMENTS_PER_PASS]
-            for candidate in candidates:
+            candidates = oldest_removable(volume_id, volumes, now)
+            for candidate in itertools.islice(candidates, MAX_SEGMENTS_PER_PASS):
                 if free >= wanted:
                     break
                 try:

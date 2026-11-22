@@ -67,8 +67,9 @@ def _write(path: Path, volume_id: str, marker_id: str) -> bool:
         return False
 
 
-def _prefix_filter(volume_id: str, volumes: dict[str, str]) -> tuple[str, list[str]]:
-    """The SQL that picks a volume's footage by path: under its own folder, and under no other volume's folder inside it."""
+def _prefix_filter(volume_id: str, volumes: dict[str, str], *, available_only: bool = True) -> tuple[str, list[str]]:
+    """The SQL that picks a volume's footage by path: under its own folder, and under no other volume's folder inside it. Footage that has
+    moved to a cold tier is never counted; ``available_only`` also leaves out footage marked unavailable."""
     def like(prefix: str) -> str:
         return prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "/%"
 
@@ -82,7 +83,7 @@ def _prefix_filter(volume_id: str, volumes: dict[str, str]) -> tuple[str, list[s
         if other != volume_id and inner and (not own or inner.startswith(own + "/")):
             clauses.append("relative_path NOT LIKE ? ESCAPE '\\'")
             values.append(like(inner))
-    return " AND ".join(["tier_id IS NULL", "unavailable_at IS NULL", *clauses]), values
+    return " AND ".join(["tier_id IS NULL", *(["unavailable_at IS NULL"] if available_only else []), *clauses]), values
 
 
 def _footage(db: sqlite3.Connection, volume_id: str, volumes: dict[str, str]) -> list[str]:
@@ -183,8 +184,7 @@ def adopt(volume_id: str, path: Path, *, clear_footage: bool) -> int:
         raise OSError("The volume's folder is not there")
     removed = 0
     if clear_footage:
-        where, values = _prefix_filter(volume_id, volumes)
-        where = where.replace("unavailable_at IS NULL AND ", "").replace(" AND unavailable_at IS NULL", "")
+        where, values = _prefix_filter(volume_id, volumes, available_only=False)
         while True:
             with connect() as db:
                 db.execute("BEGIN IMMEDIATE")
