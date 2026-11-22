@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import os
 import secrets
+import threading
+from contextlib import contextmanager
 
 _ITERATIONS = 600_000
 _SALT_BYTES = 16
@@ -36,6 +39,30 @@ def verify_password(password: str, encoded: str) -> bool:
         return hmac.compare_digest(actual, expected)
     except (ValueError, TypeError):
         return False
+
+
+# How many password checks may run at once for callers who are not signed in (#462). One check is about a tenth of a second of one
+# processor core, on purpose, and runs in the pool of threads every ordinary request shares: unlimited, some 45 sign-in attempts a second
+# kept every core hashing and every thread taken. Half the cores, between 2 and 8.
+SIGN_IN_CHECKS_AT_ONCE = max(2, min(8, (os.cpu_count() or 2) // 2))
+SIGN_IN_CHECK_WAIT_SECONDS = 2.0
+_sign_in_checks = threading.BoundedSemaphore(SIGN_IN_CHECKS_AT_ONCE)
+
+
+class SignInBusy(Exception):
+    """Too many sign-in attempts are being checked at this moment; this one was not checked at all."""
+
+
+@contextmanager
+def sign_in_check():
+    """Hold one of the few places in which a password from someone not signed in may be checked. Waits briefly for a place, then raises
+    ``SignInBusy``: the caller answers 429 and does not count the attempt as a wrong password."""
+    if not _sign_in_checks.acquire(timeout=SIGN_IN_CHECK_WAIT_SECONDS):
+        raise SignInBusy()
+    try:
+        yield
+    finally:
+        _sign_in_checks.release()
 
 
 def new_session_token() -> str:

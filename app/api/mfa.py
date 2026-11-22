@@ -175,7 +175,8 @@ def _waiting_from(address: str, now: float | None = None) -> int:
     moment = time.monotonic() if now is None else now
     for challenge in [key for key, (_, at) in _passkey_pending.items() if moment - at >= _PASSKEY_START_SECONDS]:
         del _passkey_pending[challenge]
-    return sum(1 for started_by, _ in _passkey_pending.values() if started_by == address)
+    # Counted as the sign-in limits count callers: an IPv6 host has a whole /64 of addresses to start them from (#462)
+    return sum(1 for started_by, _ in _passkey_pending.values() if limits.counted_as(started_by) == limits.counted_as(address))
 
 
 @router.post("/api/auth/passkey/options")
