@@ -14,6 +14,7 @@ interface Report {
   last_run_at: string | null; last_run_kind: "manual" | "scheduled" | null; next_run_at: string | null; camera_networks: string[]; network_check: boolean; probes_enabled: boolean;
   probe_gap_seconds: number; findings: Finding[]; acknowledged: Finding[]; counts: { high: number; medium: number; acknowledged: number };
   listening?: { host: string; every_address: boolean; networks: string[] };
+  unprotected_talk?: { camera_id: string; camera_name: string }[];
 }
 
 const SEVERITY = { high: "High", medium: "Medium" } as const;
@@ -55,6 +56,18 @@ export function HardeningSettings() {
             The NVR's own interface is served over plain HTTP on every address of this machine{data.listening.networks.length ? `, so it can be reached from: ${data.listening.networks.join(", ")}` : ", so it can be reached from every network the machine is on"}.
             That includes the camera network. Set <code>NVR_LISTEN_HOST</code> to the one address people should reach it by (the management network's address, or <code>127.0.0.1</code> behind a tunnel or proxy on this machine),
             and close the port on the camera interface with the host's firewall. The README's settings table and the remote access guide have the steps.
+            </span>
+          </p>
+        </section>
+      ) : null}
+      {data?.unprotected_talk?.length ? (
+        <section className="field-group settings-block" aria-label="Unprotected sign-in for two-way audio">
+          <h2 className="field-heading">Unprotected sign-in for two-way audio</h2>
+          <p className="notice" data-tone="warn">
+            <span>
+            {data.unprotected_talk.map(camera => camera.camera_name).join(", ")} {data.unprotected_talk.length === 1 ? "is" : "are"} allowed to ask for the camera's password unprotected
+            during two-way audio (Basic sign-in over plain RTSP): anything answering at {data.unprotected_talk.length === 1 ? "that camera's address" : "those cameras' addresses"} could read it.
+            Turn it off under Cameras, Talk once a camera can sign in another way.
             </span>
           </p>
         </section>

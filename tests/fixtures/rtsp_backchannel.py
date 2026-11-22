@@ -1,7 +1,8 @@
 """A camera's RTSP server with an ONVIF audio backchannel, for the two-way audio tests (#147).
 
 It answers DESCRIBE with an SDP that has the video track the camera sends and, when the request carries the backchannel requirement, a second audio track the
-camera receives (``a=sendonly``), then SETUP and PLAY, and collects the RTP packets that arrive on the interleaved channel. Digest sign-in is optional.
+camera receives (``a=sendonly``), then SETUP and PLAY, and collects the RTP packets that arrive on the interleaved channel. Sign-in is optional:
+Digest, Basic only (an older camera, or a device answering at a camera's address and asking for the password unprotected), or both offered.
 """
 from __future__ import annotations
 
@@ -33,8 +34,9 @@ def decode_alaw(data: bytes) -> np.ndarray:
 
 
 class BackchannelCamera:
-    def __init__(self, *, codec: str = "PCMU", backchannel: bool = True, username: str = "", password: str = "") -> None:
+    def __init__(self, *, codec: str = "PCMU", backchannel: bool = True, username: str = "", password: str = "", sign_in: str = "digest") -> None:
         self.codec, self.backchannel = codec, backchannel
+        self.sign_in = sign_in  # "digest", "basic", or "both" (Basic offered first, then Digest)
         self.username, self.password = username, password
         self.requests: list[tuple[str, dict[str, str]]] = []
         self.packets: list[tuple[int, int, int, bytes, float]] = []  # payload type, sequence, timestamp, payload, arrival time
@@ -89,7 +91,11 @@ class BackchannelCamera:
         if not self.username:
             return True
         header = headers.get("authorization", "")
-        if not header.lower().startswith("digest "):
+        if header.lower().startswith("basic ") and self.sign_in in {"basic", "both"}:
+            import base64
+
+            return base64.b64decode(header.split(" ", 1)[1]).decode() == f"{self.username}:{self.password}"
+        if not header.lower().startswith("digest ") or self.sign_in == "basic":
             return False
         fields = dict(re.findall(r'(\w+)="?([^",]+)"?', header))
         if fields.get("nonce") != self.nonce or fields.get("username") != self.username:
@@ -113,8 +119,9 @@ class BackchannelCamera:
     def serve(self, handler: socketserver.StreamRequestHandler) -> None:
         reader, writer = handler.rfile, handler.wfile
 
-        def respond(cseq: str, status: str, headers: dict[str, str] | None = None, body: str = "") -> None:
-            lines = [f"RTSP/1.0 {status}", f"CSeq: {cseq}"] + [f"{key}: {value}" for key, value in (headers or {}).items()]
+        def respond(cseq: str, status: str, headers: dict[str, str] | list[tuple[str, str]] | None = None, body: str = "") -> None:
+            pairs = list(headers.items()) if isinstance(headers, dict) else list(headers or [])
+            lines = [f"RTSP/1.0 {status}", f"CSeq: {cseq}"] + [f"{key}: {value}" for key, value in pairs]
             if body:
                 lines += ["Content-Type: application/sdp", f"Content-Length: {len(body.encode())}"]
             writer.write(("\r\n".join(lines) + "\r\n\r\n" + body).encode())
@@ -143,7 +150,9 @@ class BackchannelCamera:
                 with self.lock:
                     self.requests.append((method, headers))
                 if not self.authorised(method, headers):
-                    respond(cseq, "401 Unauthorized", {"WWW-Authenticate": f'Digest realm="nvr-camera", nonce="{self.nonce}", qop="auth"'})
+                    digest = ("WWW-Authenticate", f'Digest realm="nvr-camera", nonce="{self.nonce}", qop="auth"')
+                    basic = ("WWW-Authenticate", 'Basic realm="nvr-camera"')
+                    respond(cseq, "401 Unauthorized", {"digest": [digest], "basic": [basic], "both": [basic, digest]}[self.sign_in])
                     continue
                 if method == "OPTIONS":
                     respond(cseq, "200 OK", {"Public": "OPTIONS, DESCRIBE, SETUP, PLAY, TEARDOWN"})
