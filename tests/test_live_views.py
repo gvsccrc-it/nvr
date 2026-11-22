@@ -180,11 +180,11 @@ class LiveViewTests(unittest.TestCase):
                     live_camera(self.camera_two, self.active_user, "low")
                 self.assertEqual(video_limit.exception.status_code, 503)
                 for camera_id in audio_cameras[:16]:
-                    audio = live_camera_audio(camera_id, {})
+                    audio = live_camera_audio(camera_id, self.active_user)  # A real listener: the route checks it every second since #489
                     audio_acquired += 1
                     self.assertEqual(audio.media_type, "audio/mpeg")
                 with self.assertRaises(HTTPException) as bounded:
-                    live_camera_audio(audio_cameras[16], {})
+                    live_camera_audio(audio_cameras[16], self.active_user)
                 self.assertEqual(bounded.exception.status_code, 503)
         finally:
             if video_acquired:
