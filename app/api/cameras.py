@@ -614,6 +614,29 @@ async def create_camera(
     return await add_camera(payload, request.app.state.recorders, discovery_claim=getattr(request.state, "discovery_add_claim", None))
 
 
+def _url_host(url: str | None) -> str | None:
+    """The host of an ONVIF address, spelled as camera addresses are stored (lower case, no brackets), or None."""
+    if not url:
+        return None
+    try:
+        host = urlsplit(url).hostname
+        return normalise_host(host) if host else None
+    except ValueError:
+        return None
+
+
+def _login_hosts(row: sqlite3.Row) -> set[str]:
+    """The hosts a camera's saved ONVIF login has been given to: its address, and the hosts of its device and event addresses.
+
+    The login is sent to whatever device and event addresses are stored (PTZ, masks, health, backfill, motion events). An address moved to
+    any other host must not take the saved login with it: whoever runs that host could then see a digest of the password, which can be
+    guessed offline (#472). Moving within one of these hosts (another path or port) keeps it."""
+    hosts = {_url_host(row["device_service_url"]), _url_host(row["motion_service_url"])}
+    if row["camera_ip"]:
+        hosts.add(normalise_host(row["camera_ip"]))
+    return {host for host in hosts if host}
+
+
 def _reuse_source_credentials(current: sqlite3.Row, payload: CameraSourceUpdateRequest) -> CameraSourceUpdateRequest:
     if payload.camera_ip and payload.camera_ip == current["camera_ip"] and not payload.clear_credentials:
         try:
@@ -691,12 +714,13 @@ async def update_camera_source(
     camera_id: str,
     payload: CameraSourceUpdateRequest,
     request: Request,
-    _: Administrator,
+    user: Administrator,
 ) -> dict[str, object]:
-    current = await asyncio.to_thread(read_one, "SELECT camera_ip,stream_url_ciphertext FROM cameras WHERE id=?", (camera_id,))
+    current = await asyncio.to_thread(read_one, "SELECT camera_ip,stream_url_ciphertext,device_service_url,motion_service_url,motion_credentials_ciphertext FROM cameras WHERE id=?", (camera_id,))
     if current is None:
         raise HTTPException(status_code=404, detail="Camera not found")
 
+    entered = (payload.camera_username, payload.camera_password) if payload.camera_ip and payload.camera_username and payload.camera_password else None
     payload = _reuse_source_credentials(current, payload)
 
     try:
@@ -713,8 +737,17 @@ async def update_camera_source(
     live_substream_url = await _check_live_substream(payload, resolved_service_url, capability) if payload.live_substream_profile_token else None
 
     selected_service_url = resolved_service_url or payload.device_service_url
+    # The saved ONVIF login goes only where it has gone before (#472). An ONVIF address on another host takes the login entered with this
+    # change, as adding a camera does, or none: it is cleared, and the camera's ONVIF login is entered again under Motion source.
+    new_host = _url_host(selected_service_url)
+    moved = bool(new_host and current["motion_credentials_ciphertext"] and new_host not in _login_hosts(current))
+    onvif_login = "kept" if not moved else ("replaced" if entered else "cleared")
     def save():
         with connect() as db:
+            if moved:
+                db.execute("UPDATE cameras SET motion_credentials_ciphertext=? WHERE id=?",
+                           (encrypt(json.dumps({"username": entered[0], "password": entered[1]}, separators=(",", ":"))) if entered else None, camera_id))
+            audit_record(db, user.id, "camera_source_changed", "camera", camera_id, device_host=new_host, onvif_login=onvif_login)
             db.execute(
                 "UPDATE cameras SET camera_ip=?,camera_brand=?,device_service_url=?,onvif_profile_token=?,live_substream_profile_token=?,"
                 "motion_service_url=COALESCE(?,motion_service_url),"
@@ -864,17 +897,23 @@ async def configure_motion_source(
     camera_id: str,
     payload: MotionSourceUpdateRequest,
     request: Request,
-    _: Administrator,
+    user: Administrator,
 ) -> dict[str, object]:
     credentials_supplied = payload.username is not None or payload.password is not None
     if credentials_supplied and bool(payload.username) != bool(payload.password):
         raise HTTPException(status_code=422, detail="Provide both ONVIF motion username and password")
     def save():
         with connect() as db:
-            row = db.execute("SELECT recording_mode,recording_enabled,motion_service_url,motion_fallback_enabled,motion_zones_json,motion_sensitivity,motion_pre_roll_seconds,motion_post_roll_seconds FROM cameras WHERE id=?", (camera_id,)).fetchone()
+            row = db.execute("SELECT recording_mode,recording_enabled,motion_service_url,motion_fallback_enabled,motion_zones_json,motion_sensitivity,motion_pre_roll_seconds,motion_post_roll_seconds,"
+                             "camera_ip,device_service_url,motion_credentials_ciphertext FROM cameras WHERE id=?", (camera_id,)).fetchone()
             if row is None:
                 raise HTTPException(status_code=404, detail="Camera not found")
             service_url = payload.service_url if "service_url" in payload.model_fields_set else row["motion_service_url"]
+            new_host = _url_host(service_url)
+            if new_host and new_host not in _login_hosts(row) and row["motion_credentials_ciphertext"] and not credentials_supplied:
+                # The saved login would go to a host it has never gone to (#472): ask for it again rather than send it.
+                raise HTTPException(status_code=422, detail="This event address is on another host than the camera's. Enter the ONVIF username and password "
+                                                            "again, so the saved login is not sent to a different device.")
             fallback_enabled = payload.fallback_enabled if payload.fallback_enabled is not None else bool(row["motion_fallback_enabled"])
             if not service_url and not fallback_enabled:
                 raise HTTPException(status_code=422, detail="Configure an ONVIF event service or enable server motion fallback")
@@ -894,6 +933,9 @@ async def configure_motion_source(
             db.execute(
                 f"UPDATE cameras SET {','.join(assignments)} WHERE id=?", values,
             )
+            # Recorded once the change is certain to be made. The address holds no login (the request refuses one with credentials in it).
+            audit_record(db, user.id, "camera_motion_source_changed", "camera", camera_id, event_host=new_host,
+                         onvif_login="replaced" if credentials_supplied else "kept", fallback=bool(fallback_enabled))
 
     await asyncio.to_thread(save)
     await request.app.state.recorders.sync_camera(camera_id, force_restart=True)
