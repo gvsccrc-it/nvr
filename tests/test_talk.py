@@ -273,5 +273,68 @@ class TalkApiTests(SceneTestCase):
         self.assertEqual(other.get(self.path).status_code, 404)
 
 
+class KeptAudioTests(unittest.TestCase):
+    """#478: kept talk audio is removed after 30 days even when nobody talks again."""
+
+    def setUp(self):
+        import os
+        import tempfile
+        from pathlib import Path
+
+        from app.store import initialize
+
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        previous = os.environ.get("NVR_DB_PATH")
+        os.environ["NVR_DB_PATH"] = str(Path(self.temporary.name) / "state.sqlite3")
+        self.addCleanup(lambda: os.environ.__setitem__("NVR_DB_PATH", previous) if previous is not None else os.environ.pop("NVR_DB_PATH", None))
+        initialize()
+        from datetime import datetime, timedelta, timezone
+
+        self.now = datetime.now(timezone.utc)
+        with connect() as db:
+            db.execute("INSERT INTO cameras(id,name,stream_url_ciphertext) VALUES('cam','Door',X'01')")
+            for name, days in (("old", 31), ("recent", 29)):
+                started = (self.now - timedelta(days=days)).isoformat()
+                db.execute("INSERT INTO talk_sessions(id,camera_id,user_id,username,started_at,ended_at,seconds,ended_reason,codec,audio_wav) VALUES(?,?,1,'keeper',?,?,4.5,'released','PCMU',?)",
+                           (name, "cam", started, started, b"RIFF-audio"))
+
+    def rows(self):
+        with connect() as db:
+            return {row["id"]: (row["audio_wav"] is not None, row["username"], row["seconds"]) for row in db.execute("SELECT * FROM talk_sessions")}
+
+    def test_the_retention_pass_clears_audio_past_thirty_days_with_no_new_talk_and_keeps_the_row(self):
+        from app import talk
+        from app.recording import RecordingManager
+
+        RecordingManager._prune_viewing_audit()  # The recorder's regular pass: nobody has talked since
+        self.assertEqual(self.rows(), {"old": (False, "keeper", 4.5), "recent": (True, "keeper", 4.5)})  # Who, when and how long stay
+        self.assertEqual(talk.clear_old_recordings(self.now), 0)
+
+    def test_with_nothing_due_the_pass_writes_nothing(self):
+        from unittest.mock import patch
+
+        from app import talk
+
+        talk.clear_old_recordings(self.now)
+        statements: list[str] = []
+        real = talk.connect
+
+        class Watched:
+            def __enter__(self_inner):
+                self_inner.context = real()
+                db = self_inner.context.__enter__()
+                db.set_trace_callback(statements.append)
+                return db
+
+            def __exit__(self_inner, *args):
+                return self_inner.context.__exit__(*args)
+
+        with patch.object(talk, "connect", Watched):
+            self.assertEqual(talk.clear_old_recordings(self.now), 0)
+        self.assertTrue(statements)
+        self.assertFalse([statement for statement in statements if statement.lstrip().split()[0].upper() in {"BEGIN", "UPDATE", "DELETE", "INSERT"}], statements)
+
+
 if __name__ == "__main__":
     unittest.main()

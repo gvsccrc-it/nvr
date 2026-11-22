@@ -209,6 +209,14 @@ Email alerts go through Microsoft 365 with a Microsoft sign-in (device code) rat
 
 Backups run daily at 02:17 in the site time zone, before every schema migration, and on demand (**Back up now** in **Settings › Recording & storage**, or `POST /api/backups`; administrators only). They are written to `NVR_BACKUP_PATH` (`/backups` in Compose), and the newest `NVR_BACKUP_KEEP` (default 14) are kept. The backups a standby's sync makes are counted on their own (the newest two are kept), so they never push out the others. Mount `/backups` on a different disk or host than the NVR data. A backup needs free space for one copy of the database on the disk that holds the NVR data (the only unencrypted copy, removed when the backup is done), and for the encrypted backup where backups go; both on one disk need about twice the database size. When there is not enough, the backup is refused before anything is written, the message says how much is needed where, and the backup incident is raised. A restore likewise needs room for one copy of the database where the NVR data is, and is refused before anything changes when there is not. `GET /api/backups` reports backup age, the last success and failure, and the stored files. A failed backup, or no success for 26 hours, raises an incident (`system.failure` webhook) that recovers on the next success.
 
+**Mounting a folder from the host** (another disk for backups, or a recordings disk): the NVR runs as user id `10001` with no privileges, and a folder mounted from the host keeps the host's owner, so give the NVR's user the folder before starting:
+
+```sh
+sudo chown -R 10001:10001 /mnt/offsite/nvr-backups
+```
+
+At every start the NVR tries each folder it was given (the database's, the secrets', each recordings volume and the backups'). For one it cannot write to, a line in the log names the folder and this command, and an incident is raised; it recovers at a start that can write there. Docker's own named volumes need nothing: they take the image's ownership.
+
 To check that a backup could be restored, without changing anything (safe while the NVR runs), run:
 
 ```sh

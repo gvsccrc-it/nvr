@@ -400,6 +400,19 @@ def end_record(talk: Talk, reason: str, pcm: bytes | None, codec: str | None = N
                    ((datetime.now(timezone.utc) - timedelta(days=RECORDING_KEEP_DAYS)).isoformat(),))  # Kept audio goes after RECORDING_KEEP_DAYS; the row stays
 
 
+def clear_old_recordings(now: datetime | None = None) -> int:
+    """Clear kept talk audio older than RECORDING_KEEP_DAYS, whether or not anyone talks again (#478). It was only cleared when a later
+    talk ended, so the last recordings stayed past the time promised once talking stopped being used. The session's row (who, when, how
+    long) stays. Reads for due rows first: with nothing due, nothing is written and no write lock is taken (#280)."""
+    from .store import has_row
+
+    cutoff = ((now or datetime.now(timezone.utc)) - timedelta(days=RECORDING_KEEP_DAYS)).isoformat()
+    with connect() as db:
+        if not has_row(db, "SELECT 1 FROM talk_sessions WHERE audio_wav IS NOT NULL AND started_at<? LIMIT 1", (cutoff,)):
+            return 0
+        return db.execute("UPDATE talk_sessions SET audio_wav=NULL WHERE audio_wav IS NOT NULL AND started_at<?", (cutoff,)).rowcount
+
+
 class Talking:
     """One talk in progress: turns what the browser sends into G.711 packets for the camera, and keeps the audio when asked to."""
 
