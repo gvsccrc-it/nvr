@@ -908,7 +908,7 @@ class DetectionManager:
             keyframed.add(track_id)
             jpeg = await asyncio.to_thread(encode_jpeg, frame)
             if jpeg:
-                await self._db(_with_db, store_keyframe, track_id, at, jpeg)
+                await self._db(store_keyframe, track_id, at, jpeg)  # A file write, then its row: in a database thread
             item = first_seen.get(track_id)
             # What the object looks like, for finding it again on other cameras. A failure here never stops detection.
             try:

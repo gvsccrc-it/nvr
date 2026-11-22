@@ -457,7 +457,7 @@ def thumbnail(alarm_id: str) -> bytes | None:
         segment = db.execute(
             "SELECT id,relative_path,starts_at FROM recording_segments WHERE camera_id=? AND starts_at<=? AND ends_at>? AND unavailable_at IS NULL ORDER BY starts_at DESC LIMIT 1",
             (alarm["camera_id"], alarm["occurred_at"], alarm["occurred_at"])).fetchone()
-        keyframe = db.execute("SELECT jpeg,captured_at FROM track_keyframes WHERE track_id=?", (alarm["track_id"],)).fetchone() if alarm["track_id"] else None
+        keyframe = db.execute("SELECT jpeg,relative_path,captured_at FROM track_keyframes WHERE track_id=?", (alarm["track_id"],)).fetchone() if alarm["track_id"] else None
         from .privacy import drawbox_filter, mask_jpeg_sync, server_zones
 
         segment_zones = server_zones(db, alarm["camera_id"], datetime.fromisoformat(segment["starts_at"])) if segment is not None else []
@@ -489,7 +489,10 @@ def thumbnail(alarm_id: str) -> bytes | None:
                 _THUMBNAILS[cache_key] = result.stdout
                 return result.stdout
     # Privacy masks apply to the keyframe too; if one cannot be drawn there is no picture at all.
-    return mask_jpeg_sync(keyframe["jpeg"], keyframe_zones) if keyframe else None
+    from . import track_pictures
+
+    picture = track_pictures.read(keyframe)  # A file on the recordings volume (#512), or the row's own picture for an older one
+    return mask_jpeg_sync(picture, keyframe_zones) if picture else None
 
 
 def recover_inflight() -> None:

@@ -521,6 +521,7 @@ class RecordingManager:
                 await asyncio.to_thread(cleanup_expired_recordings)
                 await asyncio.to_thread(self._prune_viewing_audit)
                 await asyncio.to_thread(self._reconcile_run_folders)
+                await asyncio.to_thread(self._sweep_track_pictures)
                 if started:  # Not at startup: the disks are read from the second pass, five minutes in, so starting up runs no external command.
                     await asyncio.to_thread(self._watch_disks)
             except asyncio.CancelledError:
@@ -529,6 +530,15 @@ class RecordingManager:
                 pass
             started = True
             await asyncio.sleep(300)
+
+    @staticmethod
+    def _sweep_track_pictures() -> None:
+        """Delete the picture files of objects whose detections have expired (#512), a bounded number a step, until none is left to do now."""
+        from . import track_pictures
+
+        for _ in range(20):
+            if track_pictures.sweep()["removed"] < track_pictures.SWEEP_BATCH:
+                break
 
     def _reconcile_run_folders(self) -> None:
         """Go over the run folders no recording is using: index what an earlier recorder finished and did not index, remove the segment it

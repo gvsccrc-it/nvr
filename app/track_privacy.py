@@ -122,9 +122,9 @@ def _stats(db: sqlite3.Connection, track_ids: list[str], zones: Zones) -> dict[s
     for start in range(0, len(track_ids), 500):
         chunk = track_ids[start:start + 500]
         rows = db.execute(
-            "SELECT track_id,SUM(hidden) AS hidden,SUM(1-hidden) AS shown,MIN(CASE WHEN hidden=0 THEN detected_at END) AS first_at,"
+            "SELECT track_id,SUM(hidden*frames) AS hidden,SUM((1-hidden)*frames) AS shown,MIN(CASE WHEN hidden=0 THEN detected_at END) AS first_at,"  # Frames, not rows: a thinned row stands for several (#512)
             "MAX(CASE WHEN hidden=0 THEN detected_at END) AS last_at,MAX(CASE WHEN hidden=0 THEN confidence END) AS best "
-            f"FROM (SELECT d.track_id,d.detected_at,d.confidence,CASE WHEN {visible} THEN 0 ELSE 1 END AS hidden FROM ai_detections d "
+            f"FROM (SELECT d.track_id,d.detected_at,d.confidence,d.stands_for AS frames,CASE WHEN {visible} THEN 0 ELSE 1 END AS hidden FROM ai_detections d "
             f"WHERE d.track_id IN ({','.join('?' * len(chunk))})) GROUP BY track_id", (*params, *chunk)).fetchall()
         found.update({row["track_id"]: dict(row) for row in rows})
     return found
