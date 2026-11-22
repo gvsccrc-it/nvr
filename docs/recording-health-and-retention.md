@@ -14,6 +14,8 @@ The retention API is:
 
 Retention targets are integers from 1 through 3650 days. Operators can read effective policy and achieved coverage; only administrators can change retention targets.
 
+**Changed settings reach a running recording.** Switching audio off, changing a camera's address or login, its motion settings, or its group's storage volume restarts that camera's recording within a few seconds, so the new setting is used at once and not only after the stream next drops. The few seconds without footage show in coverage as "Restarted for changed settings". A change that touches many cameras (a group's volume) restarts them four at a time. Saving a schedule that leaves a camera's mode as it was restarts nothing.
+
 ## Multiple recording volumes
 
 The default Compose file provides a separate `archive` volume mounted at `/recordings/archive`. Set `NVR_STORAGE_VOLUMES` to a JSON object that maps volume names to directories below `NVR_RECORDINGS_PATH`, for example `{"default":"","archive":"archive"}`. Every non-default directory must be a mounted filesystem; the recorder reports it unavailable when the mount is missing. Add additional Compose bind or named volumes at matching paths to expose more local disks.
