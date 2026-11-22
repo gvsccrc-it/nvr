@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from app import backup, db_health, env_numbers, failover, logforward, migrations, setup_code
+from app import backup, db_health, env_numbers, failover, folder_check, logforward, migrations, setup_code
 from app.detection import mark_analysis_interrupted
 from app.incidents import sync_incident
 from app.store import connect, initialize
@@ -330,6 +330,7 @@ def main() -> int:
     initialize()
     backup.reconcile_after_restore()
     failover.prepare_startup()  # A primary does not record until it has heard from the standby
+    folder_check.check()  # A folder mounted from the host that the NVR's user cannot write to is said now, not at the first backup (#551)
     setup_code.announce()  # With no administrator yet: the one-time code that first-time setup needs, printed here once (#542)
     logger.info("The database was ready %.1f s after the NVR started; starting the workers", time.monotonic() - started)
     supervisor = Supervisor([

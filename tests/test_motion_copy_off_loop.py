@@ -70,9 +70,15 @@ class MotionCopyOffLoopTests(unittest.TestCase):
         self.camera_id = str(uuid.uuid4())
         with connect() as db:
             db.execute("INSERT INTO cameras(id,name,stream_url_ciphertext) VALUES(?,?,?)", (self.camera_id, "Motion copy", b"encrypted"))
-        # A buffer of three two-second parts, the newest ending now: a pre-roll of ten seconds covers them all.
         self.spool = root / "spool"
         self.spool.mkdir()
+
+    def fill_buffer(self) -> None:
+        """A buffer of three two-second parts, the newest ending now: a pre-roll of ten seconds covers them all.
+
+        Written at the moment the motion event is made, not in setUp. The parts are dated from "now" and the event's pre-roll reaches
+        back ten seconds from when it arrives, so anything slow between the two (a loaded machine took more than four seconds to get
+        from setUp to the event) let the oldest part age out of the pre-roll, and two parts were copied where three were expected."""
         start = datetime.now(timezone.utc) - timedelta(seconds=6)
         lines = ["#EXTM3U", "#EXT-X-PROGRAM-DATE-TIME:" + start.isoformat()]
         for number in range(3):
@@ -102,6 +108,7 @@ class MotionCopyOffLoopTests(unittest.TestCase):
         from app.onvif_events import CameraMotionEvent
 
         assembler = MotionClipAssembler(self.camera_id, self.spool, pre_roll_seconds=10, post_roll_seconds=30)
+        self.fill_buffer()  # As late as possible: see fill_buffer
         return assembler, CameraMotionEvent(True, datetime.now(timezone.utc), "RuleEngine/CellMotionDetector/Motion")
 
     def test_copying_the_pre_roll_does_not_stop_the_loop(self):
