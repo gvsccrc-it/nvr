@@ -126,7 +126,7 @@ export const VideoTile = memo(function VideoTile({ camera, active, enlarged, sus
     setFallbackUrl(null);
     const instance = new LivePlayer({
       cameraId: camera.id, quality, video: video.current,
-      onChange: setState, onFallback: setFallbackUrl,
+      onChange: setState, onFallback: setFallbackUrl, picture: () => image.current,
       onFragment: at => governor.current?.fragment(at),
       onStall: at => governor.current?.stall(at),
     });
@@ -137,17 +137,6 @@ export const VideoTile = memo(function VideoTile({ camera, active, enlarged, sus
       player.current = null;
     };
   }, [camera.id, quality, halted]);
-
-  // The MJPEG fallback cannot report decoded frames, so ask the server when it last delivered one.
-  useEffect(() => {
-    if (!fallbackUrl || halted) return;
-    const timer = window.setInterval(async () => {
-      const response = await fetch(`/api/cameras/${encodeURIComponent(camera.id)}/live/status`, { credentials: "same-origin" }).catch(() => null);
-      const status = response?.ok ? ((await response.json()) as { state: string }) : null;
-      if (status?.state === "live") player.current?.fallbackFrame();
-    }, 2_000);
-    return () => window.clearInterval(timer);
-  }, [fallbackUrl, camera.id, halted]);
 
   const listening = listeningId === camera.id;
   useEffect(() => {
@@ -217,7 +206,7 @@ export const VideoTile = memo(function VideoTile({ camera, active, enlarged, sus
       }}
     >
       <video ref={video} className="tile-video" data-dewarped={dewarped || undefined} muted playsInline hidden={Boolean(fallbackUrl)} />
-      {fallbackUrl && !halted ? <img ref={image} className="tile-video" data-dewarped={dewarped || undefined} src={fallbackUrl} alt="" onError={() => player.current?.retry()} /> : null}
+      {fallbackUrl && !halted ? <img ref={image} className="tile-video" data-dewarped={dewarped || undefined} alt="" /> : null}
       {dewarped && lens && !halted ? (
         <DewarpStage getSource={() => (fallbackUrl ? image.current : video.current)} lens={lens} state={dewarpState} label={camera.name} playing={live}
                      onChange={next => setDewarp(camera.id, next)} onUnsupported={onNoWebgl} />
