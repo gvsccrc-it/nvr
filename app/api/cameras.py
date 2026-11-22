@@ -21,7 +21,7 @@ from app.recording import masked_stream_url, probe_stream, safe_stream_url
 from app.health import recording_health
 from app.onvif_client import normalise_host
 from app.onvif_stream import list_camera_stream_profiles, placeholder_stream_url, resolve_camera_stream
-from app import capabilities as camera_capabilities, diagnostics
+from app import capabilities as camera_capabilities, diagnostics, privacy
 from app.retention import effective_retention
 from app.api.policies import effective_schedule_view
 from app.audit import record as audit_record
@@ -765,6 +765,8 @@ async def update_camera_source(
             camera_capabilities.record(db, camera_id, "audio", "available" if capability.get("audio") else "unsupported", "The camera carries audio" if capability.get("audio") else "No audio on the stream")
 
     await asyncio.to_thread(save)
+    if not capability.get("audio"):
+        privacy.audio_turned_off(camera_id)  # The new stream has no audio, so audio is off for this camera: open streams carrying it end (#489)
     await request.app.state.recorders.sync_camera(camera_id, force_restart=True)
     return await asyncio.to_thread(_saved_view, camera_id)
 
@@ -826,6 +828,8 @@ async def update_camera(
         return name_only
 
     name_only = await asyncio.to_thread(save)
+    if payload.audio_enabled is False:
+        privacy.audio_turned_off(camera_id)  # Open streams carrying this camera's audio end; their viewers come back without it (#489)
     if not name_only:
         await request.app.state.recorders.sync_camera(camera_id, force_restart=True)
     return await asyncio.to_thread(_saved_view, camera_id)

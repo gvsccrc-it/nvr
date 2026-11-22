@@ -185,8 +185,13 @@ def live_camera_audio(
         _release_live_audio()
         raise HTTPException(status_code=503, detail="Camera stream configuration is unavailable") from exc
 
+    # Re-checked every second, as video is: a listener who signs out, is disabled, loses the camera or whose token is revoked stops
+    # hearing it, and so does everyone when the camera's audio is turned off (#489).
+    guard = privacy.StreamGuard(user, camera_id, False, carries_audio=True)
+
     async def stream():
         process: asyncio.subprocess.Process | None = None
+        upcoming: asyncio.Future | None = None
         watching = viewing_audit.LiveSession(user.id, camera_id, "audio")
         try:
             process = await asyncio.create_subprocess_exec(
@@ -201,7 +206,18 @@ def live_camera_audio(
             process.stdin.write(_manifest_bytes(source))
             await process.stdin.drain()
             process.stdin.close()
-            while chunk := await process.stdout.read(32 * 1024):
+            while True:
+                if upcoming is None:
+                    upcoming = asyncio.ensure_future(process.stdout.read(32 * 1024))
+                done, _ = await asyncio.wait({upcoming}, timeout=privacy.ACCESS_RECHECK_SECONDS)
+                if not await guard.check():
+                    return
+                if not done:
+                    continue
+                chunk = upcoming.result()
+                upcoming = None
+                if not chunk:
+                    return
                 await watching.delivered()
                 yield chunk
         except asyncio.CancelledError:
@@ -209,6 +225,9 @@ def live_camera_audio(
         except (OSError, RuntimeError):
             return
         finally:
+            if upcoming is not None and not upcoming.done():
+                upcoming.cancel()
+                await asyncio.gather(upcoming, return_exceptions=True)
             await end_process(process, 3)
             _release_live_audio()
             watching.close()
@@ -508,6 +527,9 @@ async def _deliver(session: _LiveViewer, guard: privacy.StreamGuard, watching: v
             if not await guard.check() and guard.reason in {"access", "credential"}:
                 await _ended(websocket, guard.reason)
                 return
+            if guard.reason == "audio":  # Not left playing until the next picture: a quiet camera's audio stops as promptly
+                await _send_media(session, guard, b"")
+                return
             continue
         if session.receiver in done:
             message = session.receiver.result()
@@ -537,6 +559,8 @@ async def _send_media(session: _LiveViewer, guard: privacy.StreamGuard, item: by
     if not await guard.check():
         if guard.reason in {"access", "credential"}:
             await _ended(websocket, guard.reason)
+        elif guard.reason == "audio":
+            await _refuse(websocket, CLOSE_STREAM_FAILED, {"type": "error", "detail": "This camera's audio was turned off; reconnecting continues without it"})
         else:
             await _refuse(websocket, CLOSE_STREAM_FAILED, {"type": "error", "detail": "This camera's privacy masks changed; reconnecting applies them"})
         return False
@@ -598,6 +622,7 @@ async def live_stream(
     if refused is not None:
         await _refuse(websocket, refused.code, refused.message)
         return
+    guard.carries_audio = variant.include_audio  # Its audio being turned off ends this stream; the viewer reconnects to video alone (#489)
     listening = audio and variant.include_audio and _acquire_live_audio()
     viewer = Viewer()
 
