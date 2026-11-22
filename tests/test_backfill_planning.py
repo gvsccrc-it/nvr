@@ -58,13 +58,14 @@ class NothingNewTests(PlanningCase):
         for camera_id in cameras[:5]:  # A few with a day of footage, an outage in it already planned
             self.footage(camera_id, NOW - timedelta(hours=24), NOW - timedelta(hours=10))
             self.footage(camera_id, NOW - timedelta(hours=9), NOW - timedelta(minutes=10))
-        with mock.patch.object(coverage, "timeline", wraps=coverage.timeline) as worked_out:
+        with mock.patch.object(coverage, "timeline", wraps=coverage.timeline) as worked_out, connect() as db:
+            # One connection for the pass, as the recorder's own pass uses (a connection a camera would time opening connections)
             for camera_id in cameras:
-                self.plan(camera_id, NOW)
+                backfill.plan_jobs(db, camera_id, NOW)
             first = worked_out.call_count
             began = time.perf_counter()
             for camera_id in cameras:
-                self.plan(camera_id, NOW + timedelta(seconds=30))
+                backfill.plan_jobs(db, camera_id, NOW + timedelta(seconds=30))
             took = time.perf_counter() - began
         self.assertEqual(first, 200)
         self.assertEqual(worked_out.call_count, 200, "a camera with nothing new was worked out again")
