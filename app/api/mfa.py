@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
@@ -124,6 +125,19 @@ def second_factor_passkey_options(payload: ChallengeRequest, request: Request) -
     return webauthn.request_options(_relying_party(request), value, allowed, "preferred")
 
 
+def _party_for(request: Request, passkey: sqlite3.Row) -> tuple[webauthn.RelyingParty, bool]:
+    """The address a passkey's answer must name, and whether it is the one remembered from its registration (#464).
+
+    With ``NVR_PUBLIC_URL`` or ``NVR_WEBAUTHN_RP_ID`` set, the configuration decides, as it always has. Otherwise the passkey's own
+    registration does: the request's ``Origin`` header is written by the caller, so checking an answer against it checks nothing, and
+    another service at the same host name on another port could pass. A passkey with nothing remembered (made before this) is checked
+    the old way once more and then remembers."""
+    configured = os.environ.get("NVR_PUBLIC_URL", "").strip() or os.environ.get("NVR_WEBAUTHN_RP_ID", "").strip()
+    if not configured and passkey["rp_id"] and passkey["origin"]:
+        return webauthn.RelyingParty(passkey["rp_id"], passkey["origin"]), True
+    return _relying_party(request), bool(configured)
+
+
 def _check_assertion(db: sqlite3.Connection, credential: dict[str, Any], webauthn_challenge: str | None, request: Request,
                      user_id: int | None, require_verified: bool) -> sqlite3.Row:
     """The stored passkey this assertion proves, or a refusal. ``user_id`` limits it to one person's passkeys."""
@@ -132,10 +146,13 @@ def _check_assertion(db: sqlite3.Connection, credential: dict[str, Any], webauth
     row = db.execute("SELECT * FROM user_passkeys WHERE credential_id=?", (str(credential.get("id", "")),)).fetchone()
     if row is None or (user_id is not None and row["user_id"] != user_id):
         raise webauthn.WebAuthnError("This passkey is not registered for this account")
-    count = webauthn.verify_assertion(credential, webauthn.unb64url(webauthn_challenge), _relying_party(request), bytes(row["public_key"]),
+    party, remembered = _party_for(request, row)
+    count = webauthn.verify_assertion(credential, webauthn.unb64url(webauthn_challenge), party, bytes(row["public_key"]),
                                       int(row["sign_count"]), require_verified)
-    swapped = db.execute("UPDATE user_passkeys SET sign_count=?,last_used_at=? WHERE id=? AND sign_count=?",
-                         (count, datetime.now(timezone.utc).isoformat(), row["id"], row["sign_count"]))
+    # A passkey from before the address was kept learns it at its first successful use
+    swapped = db.execute("UPDATE user_passkeys SET sign_count=?,last_used_at=?,rp_id=COALESCE(rp_id,?),origin=COALESCE(origin,?) WHERE id=? AND sign_count=?",
+                         (count, datetime.now(timezone.utc).isoformat(), None if remembered else party.id, None if remembered else party.origin,
+                          row["id"], row["sign_count"]))
     if swapped.rowcount != 1:
         raise webauthn.WebAuthnError("This passkey was just used for another sign-in")
     return row
@@ -505,16 +522,17 @@ def register_passkey(payload: PasskeyRegistration, request: Request, user: Curre
         raise HTTPException(status_code=409, detail="Start adding the passkey again")
     address = limits.client_address(request)
     try:
-        passkey = webauthn.verify_registration(payload.credential, webauthn.unb64url(row["passkey_registration_challenge"]), _relying_party(request))
+        party = _relying_party(request)
+        passkey = webauthn.verify_registration(payload.credential, webauthn.unb64url(row["passkey_registration_challenge"]), party)
     except webauthn.WebAuthnError as exc:
         with connect() as db:
             record(db, user.id, "mfa_failed", "user", user.id, method="passkey_enrolment", reason=str(exc), address=address)
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     with connect() as db:
         try:
-            db.execute("INSERT INTO user_passkeys(user_id,credential_id,public_key,algorithm,sign_count,transports_json,name) VALUES(?,?,?,?,?,?,?)",
+            db.execute("INSERT INTO user_passkeys(user_id,credential_id,public_key,algorithm,sign_count,transports_json,name,rp_id,origin) VALUES(?,?,?,?,?,?,?,?,?)",
                        (user.id, passkey.credential_id, passkey.public_key, passkey.algorithm, passkey.sign_count, json.dumps(passkey.transports),
-                        payload.name.strip() or "Passkey"))
+                        payload.name.strip() or "Passkey", party.id, party.origin))
         except sqlite3.IntegrityError as exc:
             raise HTTPException(status_code=409, detail="This passkey is already registered") from exc
         record(db, user.id, "mfa_passkey_enrolled", "user", user.id, name=payload.name.strip() or "Passkey")

@@ -93,3 +93,9 @@ The authenticator secret and codes are never written to the log.
 
 - The authenticator setup shows the key and a link, not a QR code.
 - Passkeys are not tied to hardware attestation, so the NVR cannot tell what kind of authenticator made one.
+
+## The address a passkey belongs to
+
+A passkey is tied to the address it was registered at: the site's name (which the authenticator itself enforces) and the full origin, scheme and port included (which the NVR checks). With `NVR_PUBLIC_URL` set, that address is the one the NVR expects, for every passkey. Without it, each passkey remembers the address it was registered at and an answer is accepted only for that address; the request's own `Origin` header is not what it is compared with, since whoever sends the request writes that header. A passkey registered before this was kept remembers the address at its first successful use.
+
+If the NVR's address changes (a new host name, another port, HTTP to HTTPS) and `NVR_PUBLIC_URL` is not set, passkeys registered at the old address are refused. Set `NVR_PUBLIC_URL` to the address people use, or have them sign in with a recovery code and add the passkey again.
