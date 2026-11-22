@@ -34,6 +34,7 @@ import shutil
 import sqlite3
 import tarfile
 import tempfile
+import threading
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -44,9 +45,8 @@ import httpx
 
 from . import backup
 from .credentials import decrypt, key_path
-from .footage_chain import file_sha256
 from .incidents import sync_incident
-from .store import connect, has_row
+from .store import connect, database_path, has_row
 from .webhooks import validate_target_url
 from app.clock import now as _now
 
@@ -135,6 +135,7 @@ def held_reason(db: sqlite3.Connection, now: datetime | None = None) -> str | No
 
 def prepare_startup() -> None:
     """A primary that starts does not record until it has heard from the standby (or waited ``STARTUP_GRACE_SECONDS`` without hearing). Called before the recorder starts."""
+    remove_leftovers()
     with connect() as db:
         if read_settings(db)["role"] == "primary":
             _set_state(db, yield_until=_stamp(_now() + timedelta(seconds=STARTUP_GRACE_SECONDS)), peer_state="starting")
@@ -415,43 +416,50 @@ class MissingFootage(Exception):
     """The standby no longer has a segment it listed (its retention removed it): it is skipped, not waited for."""
 
 
-def apply_configuration(archive: Path) -> dict[str, Any]:
-    """Copy the configuration needed to record from an encrypted backup of the primary into this standby.
+WORK_MARGIN_BYTES = 16 << 20  # Left free beside the database after a sync's working files
 
-    Refused unless the backup is the primary's (its credential key is this standby's own), it is not from a newer version, and it passes its integrity check."""
+
+def apply_configuration(archive: Path) -> dict[str, Any]:
+    """Copy the configuration needed to record from what the primary sent into this standby.
+
+    Refused unless it is the primary's (its credential key is this standby's own), it is not from a newer version, and it passes its
+    integrity check. It is decrypted as it is read, into a folder beside the database: the only unencrypted copies are in the protected
+    data folder, as for a backup (#328). It used to be unpacked, three times over, in the system's temporary folder (#501)."""
     secret = backup.passphrase()
     if secret is None:
         raise SyncError("Set NVR_BACKUP_PASSPHRASE to the passphrase the primary's backups use")
-    with tempfile.TemporaryDirectory(prefix=".failover-", dir=os.environ.get("NVR_BACKUP_WORK", None)) as work:
+    data = database_path().parent
+    needed = archive.stat().st_size + WORK_MARGIN_BYTES
+    free = shutil.disk_usage(data).free
+    if free < needed:
+        raise SyncError(f"There is not enough room to copy the primary's configuration: {free // (1 << 20)} MB free where {data} is, {needed // (1 << 20)} MB needed")
+    with tempfile.TemporaryDirectory(prefix=WORK_PREFIX, dir=data) as work:
         work_dir = Path(work)
         os.chmod(work_dir, 0o700)
-        plain = work_dir / "backup.tar"
         try:
-            with archive.open("rb") as sealed, plain.open("wb") as target:
-                backup.decrypt_stream(sealed, target, secret)
+            manifest = backup._unpack_checked(archive, secret, work_dir)
         except backup.BackupError as exc:
-            raise SyncError(f"The primary's backup could not be opened: {exc}") from None
-        with tarfile.open(plain, "r") as tar:
-            if sorted(tar.getnames()) != sorted(("manifest.json", *backup.MEMBERS)):
-                raise SyncError("The backup does not contain the expected files")
-            manifest = json.loads(tar.extractfile("manifest.json").read())
-            for member in backup.MEMBERS:
-                with tar.extractfile(member) as stream, (work_dir / member).open("wb") as target:
-                    shutil.copyfileobj(stream, target)
-        for member in backup.MEMBERS:
-            if file_sha256(work_dir / member) != manifest["files"][member]:
-                raise SyncError(f"Checksum mismatch for {member}")
+            raise SyncError(f"The primary's configuration could not be opened: {exc}") from None
         if not key_path().is_file() or (work_dir / "credentials.key").read_bytes() != key_path().read_bytes():
             raise SyncError("The backup is not from the primary this standby was set up from: its credential key differs. Restore a backup of the primary on this standby once "
                             "(python -m app.backup restore) before turning failover on")
-        source = work_dir / "nvr.sqlite3"
-        check = sqlite3.connect(source)
-        try:
-            if check.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
-                raise SyncError("The primary's backup failed its integrity check")
-        finally:
-            check.close()
-        return _mirror(source, manifest)
+        return _mirror(work_dir / "nvr.sqlite3", manifest)
+
+
+WORK_PREFIX = ".failover-"
+
+
+def remove_leftovers() -> int:
+    """At start: working folders a sync left when its process was killed. They hold a copy of the configuration and the credential key."""
+    removed = 0
+    try:
+        for leftover in database_path().parent.glob(f"{WORK_PREFIX}*"):
+            if leftover.is_dir():
+                shutil.rmtree(leftover, ignore_errors=True)
+                removed += 1
+    except OSError:
+        pass
+    return removed
 
 
 def _columns(db: sqlite3.Connection, schema: str, table: str) -> list[str]:
@@ -531,22 +539,54 @@ def _copy(db: sqlite3.Connection) -> dict[str, int]:
 
 # --- the primary's side: serving its backup, importing footage ----------------------------------------------------------------------------------------
 
+# What the standby copies (see ``_copy``), and the schema's version so that it can refuse a primary newer than itself.
+EXPORT_TABLES = ("camera_groups", "cameras", *REPLACED_TABLES, "site_display_settings", "schema_migrations")
+EXPORT_REUSE_SECONDS = 60.0  # A standby that asks again within this long is given the export just made
+_export_lock = threading.Lock()
+
+
+def _export_configuration(target: Path) -> None:
+    """A small database holding only the tables the standby copies, read from the live one."""
+    export = sqlite3.connect(target, isolation_level=None)
+    try:
+        export.execute("ATTACH DATABASE ? AS live", (str(database_path()),))
+        export.execute("BEGIN")
+        present = {row[0] for row in export.execute("SELECT name FROM live.sqlite_master WHERE type='table'")}
+        for table in EXPORT_TABLES:
+            if table in present:
+                export.execute(f"CREATE TABLE {table} AS SELECT * FROM live.{table}")
+        export.execute("COMMIT")
+        export.execute("DETACH DATABASE live")
+    finally:
+        export.close()
+
+
 def backup_for_standby() -> Path:
-    """The newest encrypted backup (made now if there is none from the last five minutes), for the standby to copy the configuration from."""
+    """The primary's configuration for the standby, sealed as a backup is (it holds the credential key): a small export of the tables the
+    standby copies, made now unless one was made in the last minute.
+
+    This used to be a backup of the whole database, made for every sync to move a few small tables: each sync wrote the database about
+    twice over on the primary and three times on the standby, and past some size no sync finished within the standby's wait (#501). Two
+    requests at once now make one export."""
     if backup.disabled_reason():
         raise PeerError(409, backup.disabled_reason() or "Backups are not configured")
     with connect() as db:
         if read_settings(db)["role"] != "primary":
             raise PeerError(409, "This NVR is not a primary")
     directory = backup.destination()
-    newest = max(directory.glob(f"*{backup.SUFFIX}"), key=lambda path: path.stat().st_mtime, default=None) if directory.is_dir() else None
-    if newest is None or time.time() - newest.stat().st_mtime > 300:
+    with _export_lock:
+        made = sorted(directory.glob(f"*-failover{backup.SUFFIX}"), key=lambda path: path.stat().st_mtime) if directory.is_dir() else []
+        if made and time.time() - made[-1].stat().st_mtime <= EXPORT_REUSE_SECONDS:
+            return made[-1]
         try:
-            result = backup.create_backup("failover")
+            with tempfile.TemporaryDirectory(prefix=f"{WORK_PREFIX}export-", dir=database_path().parent) as work:
+                os.chmod(work, 0o700)
+                export = Path(work) / "configuration.sqlite3"
+                _export_configuration(export)
+                result = backup.create_backup("failover", database=export)
         except backup.BackupError as exc:
             raise PeerError(409, str(exc)) from None
-        newest = directory / str(result["file_name"])
-    return newest
+        return directory / str(result["file_name"])
 
 
 def _episode(db: sqlite3.Connection, role: str, epoch: int) -> sqlite3.Row | None:
@@ -860,7 +900,7 @@ class FailoverManager:
             path = "/api/inbound/failover/backup"
             headers = sign(secret, "GET", path)
             url = check_peer_url(settings["peer_url"], settings["allow_private"]) + path
-            with tempfile.TemporaryDirectory(prefix=".failover-fetch-") as directory:
+            with tempfile.TemporaryDirectory(prefix=f"{WORK_PREFIX}fetch-", dir=database_path().parent) as directory:  # Beside the database, not in the system's temporary folder
                 archive = Path(directory) / "primary.nvrbackup"
                 async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=4.0), follow_redirects=False) as client:
                     async with client.stream("GET", url, headers=headers) as response:

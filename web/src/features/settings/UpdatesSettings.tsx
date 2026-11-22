@@ -6,16 +6,16 @@ import { failureText } from "@/features/admin/tabDraft";
 interface Release { version: string; tag: string; notes: string; url: string; published_at: string; image: string; schema_version: number | null; has_migrations: boolean | null }
 interface Migration { version: number; name: string }
 interface Updates {
-  version: string; schema_version: number; image: string; check_enabled: boolean; disabled_by_environment: boolean; checking: boolean;
-  last_checked_at: string | null; last_error: string | null; stale: boolean; available: Release | null; rollback: { steps: string[]; copy: string | null; previous_image: string; has_copy: boolean; will_migrate: boolean } | null;
+  version: string; schema_version: number; image: string; build?: string | null; check_enabled: boolean; disabled_by_environment: boolean; checking: boolean;
+  last_checked_at: string | null; last_error: string | null; stale: boolean; available: Release | null; rollback: { steps: string[]; copy: string | null; previous_image: string | null; has_copy: boolean; will_migrate: boolean } | null;
   prepared: { at: string; run_id: string | null; without_backup: boolean } | null;
-  history: { at: string; from_version: string; to_version: string; from_schema: number | null; to_schema: number; migrations: Migration[] }[];
+  history: { at: string; from_version: string; to_version: string; from_schema: number | null; to_schema: number; migrations: Migration[]; from_build?: string | null; to_build?: string | null }[];
   applied_migrations: { version: number; name: string; applied_at: string }[];
 }
 interface BackupRun { id: string; status: string; file_name: string | null; size_bytes: number | null; finished_at: string | null }
 interface Plan {
   target: Release; backup: BackupRun | null; backup_destination: string | null; without_backup: boolean; upgrade: string[]; pre_migration_copies: { file: string; from_schema: number | null; to_schema: number | null; size_bytes: number }[];
-  rollback: { steps: string[]; copy: string | null; previous_image: string; has_copy: boolean; will_migrate: boolean }; will_migrate: boolean | null; note: string;
+  rollback: { steps: string[]; copy: string | null; previous_image: string | null; has_copy: boolean; will_migrate: boolean }; will_migrate: boolean | null; note: string;
 }
 
 const KEY = ["admin", "updates"] as const;
@@ -75,7 +75,8 @@ export function UpdatesSettings() {
       {error ? <p className="notice" data-tone="bad" role="alert">{error}</p> : null}
       <section className="field-group settings-block" aria-label="Version">
         <h2 className="field-heading">Updates</h2>
-        <p>Running version <strong>{data.version}</strong>, database schema <strong>v{data.schema_version}</strong>.</p>
+        <p>Running version <strong>{data.version}</strong>{data.build ? <> (build <code>{data.build.slice(0, 7)}</code>)</> : null}, database schema <strong>v{data.schema_version}</strong>.</p>
+        {data.build ? <p className="muted">This exact image is <code>{data.image}</code>. Note it before an upgrade: it is the way back.</p> : null}
         <label className="check">
           <input type="checkbox" checked={data.check_enabled && !data.disabled_by_environment} disabled={data.disabled_by_environment || setting.isPending} onChange={event => setting.mutate(event.target.checked)} />
           {" "}Check for new releases (asks the published releases list; nothing about this installation is sent)
@@ -134,7 +135,7 @@ export function UpdatesSettings() {
           <ul className="status-list">
             {data.history.map(item => (
               <li key={item.at}>
-                <strong>{item.from_version} to {item.to_version}</strong>
+                <strong>{item.from_version} to {item.to_version}</strong>{item.from_build && item.to_build ? <span className="muted"> (build {item.from_build.slice(0, 7)} to {item.to_build.slice(0, 7)})</span> : null}
                 <span className="muted">{when(item.at)} · schema v{item.from_schema ?? "?"} to v{item.to_schema} · {item.migrations.length ? `migrations applied: ${item.migrations.map(migration => `${migration.version} ${migration.name}`).join(", ")}` : "no migrations"}</span>
               </li>
             ))}

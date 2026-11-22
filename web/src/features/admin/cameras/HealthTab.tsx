@@ -20,6 +20,8 @@ interface Verification {
   signed_upto: number;
   segments: { segment_id: number; starts_at: string; ends_at: string; status: string }[];
   problems: { segment_id: number; starts_at: string; ends_at: string; status: string }[];
+  before_kept_chain?: boolean;
+  kept_from?: string | null;
 }
 
 const STATUS_LABEL: Record<string, string> = {
@@ -131,6 +133,9 @@ function FootageVerification({ camera }: { camera: Camera }) {
               : result.valid ? `${result.segments.length} segment${result.segments.length === 1 ? "" : "s"} checked; no tampering found.`
                 : `${result.problems.length} segment${result.problems.length === 1 ? "" : "s"} failed verification.`}
           </p>
+          {result.before_kept_chain && result.kept_from ? (
+            <p className="muted">Part of this range is before the kept chain: the signed record of footage removed long ago is kept for a set period, and here it begins at {new Date(result.kept_from).toLocaleString()}. Earlier footage cannot be checked; that is expected, not a sign of tampering.</p>
+          ) : null}
           {counts.size ? <p className="muted">{[...counts].map(([status, count]) => `${STATUS_LABEL[status] ?? status}: ${count}`).join(" · ")}</p> : null}
           {result.problems.length ? (
             <ul className="plain-list" aria-label="Segments that failed verification">

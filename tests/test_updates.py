@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from app import backup, updates
+from app import backup, updates, version
 from app.routes import all_routes
 from app.application import create_app
 from app.migrations import latest_version
@@ -245,6 +245,63 @@ class UpdateApiTests(unittest.TestCase):
         self.assertEqual(shlex.split(script)[-2], copy["path"])  # One argument, whatever it holds
         os.environ["NVR_UPDATE_IMAGE"] = "ghcr.io/x/y; rm -rf /"
         self.assertEqual(updates.image_repository(), updates.DEFAULT_IMAGE)
+
+    def test_going_back_from_one_build_of_main_to_another_names_the_build_that_ran_before(self):
+        """#540: no release had been cut, so ":0.1.0" named an image that did not exist. Every build of main is published as sha-<commit>."""
+        before, after = "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b", "9f8e7d6c5b4a39281706f5e4d3c2b1a098765432"
+        with patch.dict(os.environ, {"NVR_BUILD_COMMIT": before}):
+            updates.note_start()  # The build that was running: the same version, the same schema
+            self.assertEqual(self.client.get("/api/admin/updates").json()["image"], "ghcr.io/example/nvr:sha-1a2b3c4")
+            self.assertEqual(self.client.get("/api/admin/updates").json()["history"], [])
+        with patch.dict(os.environ, {"NVR_BUILD_COMMIT": after}):
+            updates.note_start()  # The next merge's build starts
+            state = self.client.get("/api/admin/updates").json()
+            updates.note_start()  # And starts again: nothing new
+            self.assertEqual(len(self.client.get("/api/admin/updates").json()["history"]), 1)
+        self.assertEqual((state["build"], state["image"]), (after, "ghcr.io/example/nvr:sha-9f8e7d6"))
+        entry = state["history"][0]
+        self.assertEqual((entry["from_version"], entry["to_version"], entry["from_build"], entry["to_build"]), (updates.APP_VERSION, updates.APP_VERSION, before, after))
+        text = "\n".join(state["rollback"]["steps"])
+        self.assertIn("image: ghcr.io/example/nvr:sha-1a2b3c4", text)
+        self.assertNotIn(f"nvr:{updates.APP_VERSION}", text)  # Not a tag that may never have been published
+        self.assertEqual(state["rollback"]["previous_image"], "ghcr.io/example/nvr:sha-1a2b3c4")
+        # The plan shown before an upgrade names the build running now as the way back.
+        with patch.dict(os.environ, {"NVR_BUILD_COMMIT": after}):
+            plan = "\n".join(updates.rollback_steps(updates.APP_VERSION, None, True, updates.build_commit())["steps"])
+        self.assertIn("image: ghcr.io/example/nvr:sha-9f8e7d6", plan)
+        self.assertNotIn(f"nvr:{updates.APP_VERSION}", plan)
+
+    def test_a_build_the_nvr_does_not_know_is_not_given_a_made_up_name(self):
+        # An image made before builds were recorded, or by hand: the steps say so, and offer the version tag only as "if it was that release".
+        result = updates.rollback_steps("0.0.9", None, False)
+        text = "\n".join(result["steps"])
+        self.assertIsNone(result["previous_image"])
+        self.assertIn("the one you noted before upgrading", text)
+        self.assertIn("If it was the 0.0.9 release:   image: ghcr.io/example/nvr:0.0.9", text)
+        # Only a plain commit id is believed: it ends up in a command.
+        for value in ("", "edge", "1a2b3c4; rm -rf /", "$(boom)", "xyz1234"):
+            with patch.dict(os.environ, {"NVR_BUILD_COMMIT": value}):
+                self.assertEqual((version.build_commit(), version.build_tag()), ("", None), value)
+            self.assertIsNone(updates.rollback_steps("0.0.9", None, False, value)["previous_image"], value)
+
+    def test_the_shipped_stack_runs_a_released_version_and_never_pulls_on_its_own(self):
+        import re
+
+        import yaml
+        root = Path(__file__).resolve().parents[1]
+        service = yaml.safe_load((root / "compose.yaml").read_text(encoding="utf-8"))["services"]["nvr"]
+        name, _, tag = service["image"].rpartition(":")
+        self.assertEqual(name, updates.DEFAULT_IMAGE)
+        self.assertRegex(tag, r"^\d+\.\d+\.\d+$")  # Never "edge" or "latest": restarting the stack must not change the version
+        self.assertNotIn("pull_policy", service)
+        dockerfile = (root / "Dockerfile").read_text(encoding="utf-8")
+        self.assertIn('ARG NVR_BUILD_COMMIT=""', dockerfile)
+        self.assertIn("ENV NVR_BUILD_COMMIT=${NVR_BUILD_COMMIT}", dockerfile)
+        workflow = (root / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        self.assertIn('--build-arg NVR_BUILD_COMMIT="${{ github.sha }}"', workflow)
+        publish = yaml.safe_load(workflow)["jobs"]["publish"]
+        self.assertEqual(set(publish["needs"]), {"verify", "camera-browser-acceptance"})  # Not published when the browser journeys failed
+        self.assertIsNone(re.search(r"always\(\)|failure\(\)", str(publish.get("if", ""))))
 
     def test_an_upgrade_seen_at_startup_is_listed_with_its_migrations(self):
         with connect() as db:

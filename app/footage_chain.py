@@ -245,6 +245,134 @@ def sign_heads() -> int:
     return signed
 
 
+# --- keeping the chain from growing for ever (#500) ---------------------------------------------------------------------------------------
+#
+# Every recorded minute added a link when it was recorded and another when retention removed it, and a signature each minute, and nothing
+# was ever deleted: 0.77 GB a camera a year, in the one database file. What is kept now (the owner's decision on #500):
+#
+# * every link of footage still on disk, and of footage that was removed, for KEEP_DAYS after the removal;
+# * older than that, the links are replaced by a checkpoint: the newest signed link that everything before is old enough to drop. The link
+#   stays, with its signature, and the chain that remains verifies from it exactly as it verified from any signature before;
+# * signatures: each one for the last THIN_AFTER_DAYS, one an hour for anything older.
+#
+# An export carries its own extract of the chain inside its package, so an export made before its links were dropped still verifies offline.
+
+THIN_AFTER_DAYS = 30
+PRUNE_EVERY_SECONDS = 3600.0
+PRUNE_BATCH = 1000  # Rows deleted in one step
+PRUNE_SCAN = 20_000  # Links looked at in one step, in search of the next checkpoint
+PRUNE_AGAIN_SECONDS = 5.0  # After a step that dropped something: more may be left
+
+
+def keep_days() -> int:
+    """How long the links of removed footage are kept (NVR_FOOTAGE_CHAIN_KEEP_DAYS: 365 by default, 90 days to 10 years)."""
+    import os
+
+    try:
+        days = int(os.environ.get("NVR_FOOTAGE_CHAIN_KEEP_DAYS", "365"))
+    except ValueError:
+        days = 365
+    return max(90, min(days, 3650))
+
+
+def checkpoint(db: sqlite3.Connection, camera_id: str) -> sqlite3.Row | None:
+    """Where a camera's kept chain begins, or None when nothing has been dropped."""
+    return db.execute("SELECT * FROM footage_chain_checkpoints WHERE camera_id=?", (camera_id,)).fetchone()
+
+
+def _droppable_upto(db: sqlite3.Connection, camera_id: str, cutoff: str, after: int) -> int:
+    """The last link after ``after`` that is old enough to drop, counting on from there: ``after`` itself when none is. It stops at the
+    first link that must be kept, and after PRUNE_SCAN links, so a step's reading is bounded however long the chain has grown."""
+    last = after
+    for _ in range(PRUNE_SCAN // PRUNE_BATCH):
+        links = db.execute("SELECT seq,kind,segment_id,relative_path,created_at FROM footage_chain WHERE camera_id=? AND seq>? ORDER BY seq LIMIT ?",
+                           (camera_id, last, PRUNE_BATCH)).fetchall()
+        for link in links:
+            if link["created_at"] >= cutoff:
+                return last  # Written within the kept period
+            if link["kind"] == "segment":
+                if db.execute("SELECT 1 FROM recording_segments WHERE id=? AND relative_path=?", (link["segment_id"], link["relative_path"])).fetchone():
+                    return last  # Its footage is still on disk (held, or kept for an alarm): its link stays, and so does all that follows
+                removal = db.execute("SELECT created_at FROM footage_chain WHERE segment_id=? AND kind='removed' AND camera_id=? AND relative_path=? ORDER BY seq DESC LIMIT 1",
+                                     (link["segment_id"], camera_id, link["relative_path"])).fetchone()
+                if removal is not None and removal["created_at"] >= cutoff:
+                    return last  # Removed within the kept period
+            last = int(link["seq"])
+        if len(links) < PRUNE_BATCH:
+            break
+    return last
+
+
+def _thin_signatures(db: sqlite3.Connection, camera_id: str, now: datetime, keep_seq: int) -> int:
+    """Leave one signature an hour among those older than THIN_AFTER_DAYS (the last of each hour). The newest signature and the checkpoint's
+    are always kept. A link then sits in a stretch of up to an hour between two signed points, where it sat in a minute."""
+    old = (now - timedelta(days=THIN_AFTER_DAYS)).isoformat()
+    newest = db.execute("SELECT MAX(upto_seq) FROM footage_chain_signatures WHERE camera_id=?", (camera_id,)).fetchone()[0]
+    doomed = [row[0] for row in db.execute(
+        "SELECT upto_seq FROM footage_chain_signatures s WHERE camera_id=? AND signed_at<? AND upto_seq NOT IN (?,?) AND upto_seq<("
+        "SELECT MAX(upto_seq) FROM footage_chain_signatures h WHERE h.camera_id=s.camera_id AND h.signed_at<? AND substr(h.signed_at,1,13)=substr(s.signed_at,1,13)) LIMIT ?",
+        (camera_id, old, newest or 0, keep_seq, old, PRUNE_BATCH))]
+    if doomed:
+        db.execute(f"DELETE FROM footage_chain_signatures WHERE camera_id=? AND upto_seq IN ({','.join('?' * len(doomed))})", (camera_id, *doomed))
+    return len(doomed)
+
+
+def _drop_links(db: sqlite3.Connection, camera_id: str, before_seq: int) -> int:
+    dropped = db.execute("DELETE FROM footage_chain WHERE camera_id=? AND seq IN (SELECT seq FROM footage_chain WHERE camera_id=? AND seq<? ORDER BY seq LIMIT ?)",
+                         (camera_id, camera_id, before_seq, PRUNE_BATCH)).rowcount
+    db.execute("UPDATE footage_chain_checkpoints SET links_removed=links_removed+? WHERE camera_id=?", (dropped, camera_id))
+    return dropped
+
+
+def prune_camera(camera_id: str, now: datetime | None = None) -> dict[str, int]:
+    """Drop what is past the kept period from one camera's chain, a bounded amount: links before a new checkpoint, the signatures before
+    it, and all but one signature an hour among the old ones. Reads first; the write lock is taken only when there is something to drop."""
+    now = now or datetime.now(timezone.utc)
+    cutoff = (now - timedelta(days=keep_days())).isoformat()
+    done = {"links": 0, "signatures": 0}
+    with connect() as db:
+        before = checkpoint(db, camera_id)
+        kept_seq = int(before["seq"]) if before else 0
+        if kept_seq and db.execute("SELECT 1 FROM footage_chain WHERE camera_id=? AND seq<? LIMIT 1", (camera_id, kept_seq)).fetchone():
+            done["links"] = _drop_links(db, camera_id, kept_seq)  # Left before the checkpoint by an earlier, bounded step
+        else:
+            # Everything up to the checkpoint was old enough when it was made, so the look goes on from there.
+            droppable = _droppable_upto(db, camera_id, cutoff, kept_seq)
+            # The new checkpoint is a signed link: the newest signature at or before the last droppable link, valid as it stands now.
+            mark = db.execute("SELECT * FROM footage_chain_signatures WHERE camera_id=? AND upto_seq<=? AND upto_seq>? ORDER BY upto_seq DESC LIMIT 1",
+                              (camera_id, droppable, kept_seq)).fetchone() if droppable > kept_seq else None
+            if mark is not None and not _signature_error(db, camera_id, mark, _key(db)[1]):
+                at = db.execute("SELECT seq,link_hash,ends_at FROM footage_chain WHERE camera_id=? AND seq=?", (camera_id, mark["upto_seq"])).fetchone()
+                db.execute("BEGIN IMMEDIATE")
+                try:
+                    # The checkpoint in the same change as the first links dropped: the chain is never without its start.
+                    db.execute("INSERT INTO footage_chain_checkpoints(camera_id,seq,link_hash,kept_from) VALUES(?,?,?,?) ON CONFLICT(camera_id) DO UPDATE SET "
+                               "seq=excluded.seq,link_hash=excluded.link_hash,kept_from=excluded.kept_from,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')",
+                               (camera_id, at["seq"], at["link_hash"], at["ends_at"]))  # Footage after the checkpoint's has its links after it
+                    done["links"] = _drop_links(db, camera_id, int(at["seq"]))
+                except BaseException:
+                    db.execute("ROLLBACK")
+                    raise
+                db.execute("COMMIT")
+                kept_seq = int(at["seq"])
+        if kept_seq and db.execute("SELECT 1 FROM footage_chain_signatures WHERE camera_id=? AND upto_seq<? LIMIT 1", (camera_id, kept_seq)).fetchone():
+            done["signatures"] += db.execute("DELETE FROM footage_chain_signatures WHERE camera_id=? AND upto_seq IN (SELECT upto_seq FROM footage_chain_signatures WHERE camera_id=? AND upto_seq<? LIMIT ?)",
+                                             (camera_id, camera_id, kept_seq, PRUNE_BATCH)).rowcount
+        done["signatures"] += _thin_signatures(db, camera_id, now, kept_seq)
+    return done
+
+
+def prune(now: datetime | None = None) -> dict[str, int]:
+    """One bounded step for every camera with a chain. Returns what was dropped; a caller that sees anything dropped calls again."""
+    with connect() as db:
+        cameras = [row["camera_id"] for row in _heads(db)]
+    total = {"links": 0, "signatures": 0}
+    for camera_id in cameras:
+        done = prune_camera(camera_id, now)
+        total = {key: total[key] + done[key] for key in total}
+    return total
+
+
 def verify_signature(public_key_b64: str, camera_id: str, upto_seq: int, head_hash: str, signature_b64: str) -> bool:
     try:
         Ed25519PublicKey.from_public_bytes(base64.b64decode(public_key_b64)).verify(base64.b64decode(signature_b64), signed_message(camera_id, upto_seq, head_hash))
@@ -287,10 +415,16 @@ def _check_stretches(db: sqlite3.Connection, camera_id: str, seqs: list[int], in
     A camera's head is signed about once a minute, so a link sits in a short stretch between two signed points. Hashing that stretch
     from one valid signature to the next proves the link is what was signed, without reading the chain from the camera's first link."""
     checked_upto = 0
+    kept = checkpoint(db, camera_id)
     for seq in seqs:
         if seq <= checked_upto:
             continue
         before, covering = _signature_before(db, camera_id, seq), _signature_at_or_after(db, camera_id, seq)
+        if before is None and kept is not None and seq >= int(kept["seq"]):
+            # The kept chain begins at the checkpoint's signed link (#500): that signature is the point to check from.
+            before = db.execute("SELECT * FROM footage_chain_signatures WHERE camera_id=? AND upto_seq=?", (camera_id, kept["seq"])).fetchone()
+            if before is None:
+                return "the signature the kept chain begins at is missing"
         for signature in (before, covering):
             if signature is not None and (error := _signature_error(db, camera_id, signature, installation_key)):
                 return error
@@ -330,6 +464,10 @@ def verify(camera_id: str, start: datetime, end: datetime) -> dict[str, Any]:
         for row in db.execute("SELECT * FROM footage_chain WHERE camera_id=? AND starts_at<? AND starts_at>=? AND ends_at>?",
                               (camera_id, end.isoformat(), (start - LONGEST_LINK).isoformat(), start.isoformat())):
             links[int(row["seq"])] = dict(row)
+        kept = checkpoint(db, camera_id)
+        if kept is not None:
+            # Links before the checkpoint are on their way out (they are dropped a bounded number at a time): not part of the kept chain.
+            links = {seq: link for seq, link in links.items() if seq >= int(kept["seq"])}
         chain_error = _check_stretches(db, camera_id, sorted(links), installation_key)
         signature = _latest_signature(db, camera_id)
         signed_upto = 0
@@ -378,9 +516,12 @@ def verify(camera_id: str, start: datetime, end: datetime) -> dict[str, Any]:
             results.append({"segment_id": link["segment_id"], "starts_at": link["starts_at"], "ends_at": link["ends_at"], "status": "missing"})
     results.sort(key=lambda item: (item["starts_at"], item["segment_id"]))
     problems = [entry for entry in results if entry["status"] in PROBLEMS]
+    # Footage older than the kept chain: its links were dropped KEEP_DAYS after it was removed. That is said as such, and is never a problem.
+    before_kept_chain = kept is not None and start.isoformat() < kept["kept_from"]
     return {"camera_id": camera_id, "start": start.isoformat(), "end": end.isoformat(),
             "valid": chain_error is None and not problems, "chain_error": chain_error, "signed_upto": signed_upto,
-            "public_key": installation_key, "segments": results, "problems": problems}
+            "public_key": installation_key, "segments": results, "problems": problems,
+            "before_kept_chain": before_kept_chain, "kept_from": kept["kept_from"] if kept is not None else None}
 
 
 def extract(db: sqlite3.Connection, camera_id: str, segment_ids: Iterable[int]) -> dict[str, Any] | None:
@@ -447,6 +588,7 @@ class FootageChainManager:
     async def _run(self) -> None:
         loop = asyncio.get_running_loop()
         last_signed = 0.0
+        last_pruned = loop.time()  # Not at start-up: the first step is an hour in
         while True:
             try:
                 while await append_pending():
@@ -454,6 +596,13 @@ class FootageChainManager:
                 if loop.time() - last_signed >= self.sign_seconds:
                     await asyncio.to_thread(sign_heads)
                     last_signed = loop.time()
+                if loop.time() - last_pruned >= PRUNE_EVERY_SECONDS:
+                    dropped = await asyncio.to_thread(prune)
+                    if dropped["links"] or dropped["signatures"]:
+                        logger.info("Footage chain: %d links and %d signatures past the kept period were dropped", dropped["links"], dropped["signatures"])
+                        last_pruned = loop.time() - PRUNE_EVERY_SECONDS + PRUNE_AGAIN_SECONDS  # More may be left: a step is bounded
+                    else:
+                        last_pruned = loop.time()
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001 - tried again next poll
