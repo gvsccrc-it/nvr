@@ -17,7 +17,7 @@ from app import backup
 from app.application import create_app
 from app.credentials import decrypt, encrypt
 from app.store import connect, initialize
-from tests.test_support import TEST_PASSWORD, principal
+from tests.test_support import TEST_PASSWORD, principal, setup_code
 
 PASSPHRASE = "correct horse battery staple"
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -90,7 +90,7 @@ class BackupTests(BackupCase):
     def test_disabled_without_passphrase_and_never_writes_plaintext(self):
         os.environ.pop("NVR_BACKUP_PASSPHRASE")
         with TestClient(create_app(start_workers=False)) as client:
-            self.assertEqual(client.post("/api/setup/admin", json={"username": "keeper", "password": TEST_PASSWORD}).status_code, 201)
+            self.assertEqual(client.post("/api/setup/admin", json={"username": "keeper", "password": TEST_PASSWORD, "setup_code": setup_code()}).status_code, 201)
             state = client.get("/api/backups").json()
             self.assertFalse(state["enabled"])
             self.assertIn("NVR_BACKUP_PASSPHRASE", state["disabled_reason"])
@@ -124,7 +124,7 @@ class BackupTests(BackupCase):
             client.cookies.clear()
             with connect() as db:
                 db.execute("DELETE FROM users")
-            self.assertEqual(client.post("/api/setup/admin", json={"username": "keeper", "password": TEST_PASSWORD}).status_code, 201)
+            self.assertEqual(client.post("/api/setup/admin", json={"username": "keeper", "password": TEST_PASSWORD, "setup_code": setup_code()}).status_code, 201)
             anonymous = TestClient(client.app)  # no second lifespan: one backup manager only
             self.assertEqual(anonymous.post("/api/backups").status_code, 401)
             queued = client.post("/api/backups")

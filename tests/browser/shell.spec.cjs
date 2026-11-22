@@ -1,6 +1,9 @@
 // Real-browser journeys for the rebuilt interface's foundation (#89): first-run
 // setup, sign-in, role-gated navigation, operational status, branding and theme.
+const fs = require("node:fs");
+const path = require("node:path");
 const { test, expect, FIXTURE_PASSWORD, seedFixtures, signInNext } = require("./helpers.cjs");
+const { FIXTURE_DIRECTORY } = require("./fixture_environment.cjs");
 
 const NEXT = "/";
 const ADMIN = "camera-admin";
@@ -30,6 +33,16 @@ for (const width of [360, 1440]) {
     await page.getByLabel("Password", { exact: true }).fill(password);
     await page.getByLabel("Confirm password").focus();
     await page.keyboard.type(password);
+    // Without the one-time setup code nothing is sent; a wrong one is refused by the server (#542).
+    await page.keyboard.press("Enter");
+    await expect(page.getByText("Enter the setup code from the NVR's log.")).toBeVisible();
+    await page.keyboard.press("Tab");
+    await page.keyboard.type("AAAA-BBBB-CCCC");
+    await page.keyboard.press("Enter");
+    await expect(page.getByRole("alert")).toContainText("That is not the setup code");
+    // The installer reads the code where the NVR put it: its log, and a file beside the credential key.
+    const code = fs.readFileSync(path.join(FIXTURE_DIRECTORY, "setup-code"), "utf8").trim();
+    await page.getByLabel("Setup code").fill(code.toLowerCase().replaceAll("-", " "));  // Typed as people type: either case, spaces or dashes
     await page.keyboard.press("Enter");
     await expect(page.getByRole("navigation", { name: "Workspaces" })).toBeVisible();
     await expect(page.getByRole("link", { name: "Settings" })).toBeVisible();

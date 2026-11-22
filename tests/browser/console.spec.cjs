@@ -33,7 +33,9 @@ async function startSite(address, spec) {
     } catch { /* not yet */ }
     await new Promise(resolve => setTimeout(resolve, 200));
   }
-  const created = await fetch(`${url}/api/setup/admin`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username: "site-admin", password: "site-admin-password-1234" }) });
+  await fetch(`${url}/api/setup/status`);  // The site makes its one-time setup code when it is first asked (#542); read where it keeps it
+  const setupCode = fs.readFileSync(path.join(directory, "setup-code"), "utf8").trim();
+  const created = await fetch(`${url}/api/setup/admin`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username: "site-admin", password: "site-admin-password-1234", setup_code: setupCode }) });
   if (created.status !== 201) throw new Error(`The site could not be set up: ${created.status}`);
   const cookie = created.headers.getSetCookie().map(item => item.split(";")[0]).join("; ");
   const seeded = spawnSync("python", ["-m", "tests.fixtures.seed_site", JSON.stringify(spec)], { cwd: ROOT, env, encoding: "utf8", timeout: 60_000 });

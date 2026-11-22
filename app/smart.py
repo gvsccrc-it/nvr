@@ -29,12 +29,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from . import env_numbers
 from .incidents import sync_incident
 
 logger = logging.getLogger("nvr.smart")
 
 SMARTCTL_TIMEOUT_SECONDS = 30
-REFRESH_SECONDS = float(os.environ.get("NVR_SMART_INTERVAL_SECONDS", str(6 * 3600)))
+REFRESH_SECONDS = env_numbers.number("NVR_SMART_INTERVAL_SECONDS", 6 * 3600, 60, 7 * 86400)  # A mistyped value falls back; it never stops the module loading (#544)
 # ATA attributes whose raw value, when above zero, is an early sign of a failing surface or head.
 RAW_COUNT_ATTRIBUTES = {5: "reallocated sectors", 10: "spin retries", 187: "reported uncorrectable errors", 196: "reallocation events",
                         197: "sectors pending reallocation", 198: "offline uncorrectable sectors"}

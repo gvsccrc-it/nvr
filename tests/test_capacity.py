@@ -15,7 +15,7 @@ from app.application import create_app
 from app.credentials import encrypt
 from app.security import hash_password
 from app.store import connect
-from tests.test_support import TEST_PASSWORD
+from tests.test_support import TEST_PASSWORD, setup_code
 
 KEYS = ("NVR_DB_PATH", "NVR_CREDENTIAL_KEY_PATH", "NVR_RECORDINGS_PATH", "NVR_STORAGE_VOLUMES")
 
@@ -122,7 +122,7 @@ class CapacityApiTests(unittest.TestCase):
         context = TestClient(create_app(start_workers=False))
         self.client = context.__enter__()
         self.addCleanup(context.__exit__, None, None, None)
-        self.assertEqual(self.client.post("/api/setup/admin", json={"username": "keeper", "password": TEST_PASSWORD}).status_code, 201)
+        self.assertEqual(self.client.post("/api/setup/admin", json={"username": "keeper", "password": TEST_PASSWORD, "setup_code": setup_code()}).status_code, 201)
 
     def tearDown(self):
         for key, value in self.previous.items():

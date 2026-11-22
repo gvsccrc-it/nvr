@@ -23,7 +23,7 @@ from app.application import create_app
 from app.security import hash_password
 from app.store import connect as database
 from tests.fixtures.reverse_proxy import ReverseProxy
-from tests.test_support import TEST_PASSWORD
+from tests.test_support import TEST_PASSWORD, setup_code
 
 OPERATOR_PASSWORD = "operator-password-1234"
 ENVIRONMENT = ("NVR_TRUSTED_PROXIES", "NVR_TRUST_FORWARDED_FOR", "NVR_LOCAL_NETWORKS", "NVR_ALLOWED_ORIGINS", "NVR_PUBLIC_URL", "NVR_COOKIE_SECURE")
@@ -255,7 +255,7 @@ class ProxiedCase(NetworkCase):
         self.addCleanup(self.proxy.close)
         self.direct = self.local_client()
         self.addCleanup(self.direct.close)
-        setup = self.direct.post("/api/setup/admin", json={"username": "keeper", "password": TEST_PASSWORD})
+        setup = self.direct.post("/api/setup/admin", json={"username": "keeper", "password": TEST_PASSWORD, "setup_code": setup_code()})
         self.assertEqual(setup.status_code, 201, setup.text)
 
     def local_client(self) -> httpx.Client:

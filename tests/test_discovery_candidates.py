@@ -14,7 +14,7 @@ from app.discovery import DiscoveredDevice, DiscoveryResult
 from app.main import app
 from app.onvif_stream import CameraStreamSource
 from app.store import connect
-from tests.test_support import patch_camera_probe, TEST_CAMERA_PASSWORD, TEST_PASSWORD
+from tests.test_support import patch_camera_probe, TEST_CAMERA_PASSWORD, TEST_PASSWORD, setup_code
 
 
 class DiscoveryCandidateTests(unittest.TestCase):
@@ -29,7 +29,7 @@ class DiscoveryCandidateTests(unittest.TestCase):
         os.environ["NVR_COOKIE_SECURE"] = "false"
         self.context = TestClient(app)
         self.client = self.context.__enter__()
-        self.client.post("/api/setup/admin", json={"username": "discovery-admin", "password": TEST_PASSWORD})
+        self.client.post("/api/setup/admin", json={"username": "discovery-admin", "password": TEST_PASSWORD, "setup_code": setup_code()})
 
     def tearDown(self):
         self.context.__exit__(None, None, None)

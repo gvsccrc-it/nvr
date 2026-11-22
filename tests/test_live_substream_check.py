@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.onvif_stream import CameraStreamSource
-from tests.test_support import TEST_CAMERA_PASSWORD, TEST_PASSWORD, patch_camera_probe
+from tests.test_support import TEST_CAMERA_PASSWORD, TEST_PASSWORD, patch_camera_probe, setup_code
 
 SERVICE = "http://198.51.100.10/onvif/device_service"
 MAIN = CameraStreamSource(f"rtsp://fixture-user:{TEST_CAMERA_PASSWORD}@198.51.100.10:554/main", SERVICE)
@@ -37,7 +37,7 @@ class LiveSubstreamCheckTests(unittest.TestCase):
         os.environ["NVR_COOKIE_SECURE"] = "false"
         self.context = TestClient(app, raise_server_exceptions=False)  # A request that fails inside the server answers 500, as it would for a browser
         self.client = self.context.__enter__()
-        self.client.post("/api/setup/admin", json={"username": "substream-admin", "password": TEST_PASSWORD})
+        self.client.post("/api/setup/admin", json={"username": "substream-admin", "password": TEST_PASSWORD, "setup_code": setup_code()})
 
     def tearDown(self):
         self.context.__exit__(None, None, None)

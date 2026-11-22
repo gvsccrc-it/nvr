@@ -12,6 +12,14 @@ TEST_OIDC_SESSION_SECRET = token_urlsafe(32)
 TEST_CAMERA_PASSWORD = token_urlsafe(24)
 TEST_URL_TOKEN = token_urlsafe(18)
 
+
+def setup_code() -> str:
+    """The one-time code first-time setup needs (#542), as the installer reads it from the NVR's log: here, from where the NVR keeps it
+    for the database and secrets folder the test has set up."""
+    from app import setup_code as code
+
+    return code.expected() or ""
+
 # RFC 5737 TEST-NET-2 addresses are documentation-only and never routed.
 TEST_CAMERA_IP = "198.51.100.25"
 TEST_CAMERA_IP_A = "198.51.100.10"

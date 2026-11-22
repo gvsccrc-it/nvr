@@ -94,7 +94,7 @@ export function useSignIn() {
 export function useCreateAdministrator() {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: (credentials: { username: string; password: string }) =>
+    mutationFn: (credentials: { username: string; password: string; setup_code: string }) =>
       api<Me>("/api/setup/admin", { method: "POST", body: credentials, quietUnauthorized: true }),
     onSuccess: () => client.invalidateQueries(),
   });

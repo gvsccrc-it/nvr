@@ -29,6 +29,7 @@ from xml.sax.saxutils import escape
 
 import httpx
 
+from . import env_numbers
 from .onvif_profiles import MediaProfile, parse_profiles
 from .onvif_soap import declares_dtd, local as _local, read_capped
 
@@ -47,7 +48,7 @@ PASSWORD_DIGEST = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-usern
 BASE64_BINARY = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-soap-message-security-1.0#Base64Binary"
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 DEFAULT_PORTS = (80, 8000, 8080, 8899)
-TIMEOUT = httpx.Timeout(float(os.environ.get("NVR_ONVIF_TIMEOUT_SECONDS", "8")), connect=3.0)
+TIMEOUT = httpx.Timeout(env_numbers.number("NVR_ONVIF_TIMEOUT_SECONDS", 8, 1, 120), connect=3.0)
 AUTH_ORDER = ("none", "digest", "wsse", "digest+wsse")
 
 SERVICE_NAMESPACES = {

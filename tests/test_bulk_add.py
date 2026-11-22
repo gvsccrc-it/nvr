@@ -17,7 +17,7 @@ from fastapi.testclient import TestClient
 from app import bulk_add
 from app.application import create_app
 from app.security import hash_password
-from tests.test_support import TEST_PASSWORD
+from tests.test_support import TEST_PASSWORD, setup_code
 
 _ENV = ("NVR_DB_PATH", "NVR_RECORDINGS_PATH", "NVR_CREDENTIAL_KEY_PATH", "NVR_COOKIE_SECURE")
 PASSWORD = "S3cret-Passw0rd!-for-camera"
@@ -63,7 +63,7 @@ class JobTests(unittest.TestCase):
         self.app = create_app(start_workers=False)  # The runner is driven by the tests, not by its own loop
         self.context = TestClient(self.app)
         self.client = self.context.__enter__()
-        self.client.post("/api/setup/admin", json={"username": "bulk-admin", "password": TEST_PASSWORD})
+        self.client.post("/api/setup/admin", json={"username": "bulk-admin", "password": TEST_PASSWORD, "setup_code": setup_code()})
         self.added: list = []
 
         async def fake_add(payload, recorders, **kwargs):

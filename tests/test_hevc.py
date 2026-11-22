@@ -22,7 +22,7 @@ from app.application import create_app
 from app.credentials import encrypt
 from app.live_hub import Fragmenter, LiveStream, codec_string, hevc_codec
 from app.store import connect
-from tests.test_support import TEST_PASSWORD
+from tests.test_support import TEST_PASSWORD, setup_code
 
 FFMPEG = shutil.which("ffmpeg")
 HAS_X265 = bool(FFMPEG) and "libx265" in subprocess.run([FFMPEG, "-hide_banner", "-encoders"], capture_output=True, text=True).stdout
@@ -238,7 +238,7 @@ class HevcLiveTests(unittest.TestCase):
         self.context = TestClient(self.app)
         self.client = self.context.__enter__()
         wait_for_the_startup_probe(self.app)
-        self.assertEqual(self.client.post("/api/setup/admin", json={"username": "keeper", "password": TEST_PASSWORD}).status_code, 201)
+        self.assertEqual(self.client.post("/api/setup/admin", json={"username": "keeper", "password": TEST_PASSWORD, "setup_code": setup_code()}).status_code, 201)
         self.add_camera("cam", "Yard", feed=True)
 
     def tearDown(self):
@@ -463,7 +463,7 @@ class HevcPlaybackTests(unittest.TestCase):
         self.context = TestClient(self.app)
         self.client = self.context.__enter__()
         wait_for_the_startup_probe(self.app)
-        self.assertEqual(self.client.post("/api/setup/admin", json={"username": "keeper", "password": TEST_PASSWORD}).status_code, 201)
+        self.assertEqual(self.client.post("/api/setup/admin", json={"username": "keeper", "password": TEST_PASSWORD, "setup_code": setup_code()}).status_code, 201)
         self.file = root / "recordings" / "cam" / "hevc.mp4"
         subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=s=320x240:r=10", "-t", "2", "-an", "-c:v", "libx265", "-tag:v", "hvc1",
                         "-x265-params", "log-level=none", "-pix_fmt", "yuv420p", "-y", str(self.file)], check=True, timeout=60)

@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock
 from fastapi.testclient import TestClient
 
 from app.main import app
-from tests.test_support import patch_camera_probe, TEST_PASSWORD
+from tests.test_support import patch_camera_probe, TEST_PASSWORD, setup_code
 from app.migrations import m0001_baseline
 from app.store import connect, initialize
 
@@ -29,7 +29,7 @@ class CameraArchiveTests(unittest.TestCase):
         initialize()
         self.context = TestClient(app)
         self.client = self.context.__enter__()
-        self.client.post("/api/setup/admin", json={"username": "archive-admin", "password": TEST_PASSWORD})
+        self.client.post("/api/setup/admin", json={"username": "archive-admin", "password": TEST_PASSWORD, "setup_code": setup_code()})
         self.camera_id = self.add_camera()
         self.recordings = Path(os.environ["NVR_RECORDINGS_PATH"])
 

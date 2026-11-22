@@ -16,7 +16,7 @@ from app.migrations import latest_version
 from app.security import hash_password
 from app.store import connect
 from tests.fixtures.release_feed import ReleaseFeed, release
-from tests.test_support import TEST_PASSWORD
+from tests.test_support import TEST_PASSWORD, setup_code
 
 PASSPHRASE = "correct horse battery staple"
 KEYS = ("NVR_DB_PATH", "NVR_CREDENTIAL_KEY_PATH", "NVR_RECORDINGS_PATH", "NVR_BACKUP_PATH", "NVR_CONTROL_DIR", "NVR_BACKUP_PASSPHRASE", "NVR_UPDATE_FEED_URL", "NVR_UPDATE_CHECK",
@@ -63,7 +63,7 @@ class UpdateApiTests(unittest.TestCase):
         context = TestClient(create_app(start_workers=False))
         self.client = context.__enter__()
         self.addCleanup(context.__exit__, None, None, None)
-        self.assertEqual(self.client.post("/api/setup/admin", json={"username": "keeper", "password": TEST_PASSWORD}).status_code, 201)
+        self.assertEqual(self.client.post("/api/setup/admin", json={"username": "keeper", "password": TEST_PASSWORD, "setup_code": setup_code()}).status_code, 201)
 
     def tearDown(self):
         for key, value in self.previous.items():

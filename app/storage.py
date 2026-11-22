@@ -8,7 +8,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from . import headroom, volume_marker
+from . import env_numbers, headroom, volume_marker
 from .recording import recordings_path
 from .store import connect
 
@@ -206,7 +206,7 @@ def storage_status(max_age: float = 0.0) -> dict[str, object]:
     with connect() as db:
         cameras = db.execute("SELECT c.id,c.name,c.recording_status,c.last_error,g.storage_volume_id FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id").fetchall()
     result=[]
-    minimum_free=int(os.environ.get("NVR_STORAGE_PRESSURE_FREE_BYTES","1073741824"))
+    minimum_free=env_numbers.whole_number("NVR_STORAGE_PRESSURE_FREE_BYTES", 1 << 30, 64 << 20, 1 << 40)
     for name, relative in volumes.items():
         try:
             path=volume_path(name)

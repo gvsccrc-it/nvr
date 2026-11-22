@@ -391,6 +391,21 @@ def restore(db: sqlite3.Connection, camera_id: str, check: str) -> bool:
     return cursor.rowcount > 0
 
 
+def listening() -> dict[str, Any]:
+    """Where the NVR's own interface is served (#541). It speaks plain HTTP; HTTPS comes from a proxy or tunnel in front. Served on every
+    address of the machine, it is also reachable, unencrypted, from every network the machine is on, the camera network included: a
+    standing warning on the hardening page, with those networks named, until ``NVR_LISTEN_HOST`` names one address."""
+    from . import network
+    from .entrypoint import every_address, listen_host
+
+    try:
+        host = listen_host()
+    except SystemExit:  # (Start-up refuses an invalid value; a test or a tool that builds the report with one is told "every address")
+        host = "0.0.0.0"
+    exposed = every_address(host)
+    return {"host": host, "every_address": exposed, "networks": network.interface_networks() if exposed else []}
+
+
 def report(db: sqlite3.Connection, now: datetime | None = None) -> dict[str, Any]:
     """The findings still showing, those acknowledged, and what the checks cover and when they last ran."""
     now = now or _now()
@@ -406,6 +421,7 @@ def report(db: sqlite3.Connection, now: datetime | None = None) -> dict[str, Any
     anchor = settings["last_run_at"] or settings["scheduled_from"]
     configured = networks(db)
     return {
+        "listening": listening(),
         "as_of": now.isoformat(), "last_run_at": settings["last_run_at"], "last_run_kind": settings["last_run_kind"],
         "next_run_at": (_parse(anchor) + SCHEDULE).isoformat() if anchor else None,
         "camera_networks": [str(network) for network in configured], "network_check": bool(configured), "probes_enabled": bool(settings["probes_enabled"]),

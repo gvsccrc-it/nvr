@@ -19,7 +19,7 @@ from app.credentials import encrypt
 from app.live_hub import Fragmenter, LiveHub, codec_string, summarise_starts
 from app.principal import COOKIE_NAME
 from app.store import connect
-from tests.test_support import TEST_PASSWORD
+from tests.test_support import TEST_PASSWORD, setup_code
 
 RTSP = os.environ.get("NVR_RTSP_TEST_URL")
 FFMPEG = shutil.which("ffmpeg")
@@ -60,7 +60,7 @@ class LiveStreamTests(unittest.TestCase):
         self.app = create_app(start_workers=False)
         self.context = TestClient(self.app)
         self.client = self.context.__enter__()
-        self.assertEqual(self.client.post("/api/setup/admin", json={"username": "keeper", "password": TEST_PASSWORD}).status_code, 201)
+        self.assertEqual(self.client.post("/api/setup/admin", json={"username": "keeper", "password": TEST_PASSWORD, "setup_code": setup_code()}).status_code, 201)
         with connect() as db:
             db.execute("INSERT INTO cameras(id,name,stream_url_ciphertext,recording_mode,video_codec) VALUES('cam','Lobby',?,'motion','h264')", (encrypt(RTSP),))
 

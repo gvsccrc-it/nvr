@@ -17,24 +17,26 @@ export function SetupPage() {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
+  const [code, setCode] = useState("");
   const [touched, setTouched] = useState(false);
 
   const usernameError = touched && !USERNAME.test(username) ? "3–128 letters, numbers or . _ @ -" : null;
   const passwordError = touched ? passwordProblem(password) : null;
   const confirmError = touched && confirm !== password ? "The passwords do not match." : null;
+  const codeError = touched && !code.trim() ? "Enter the setup code from the NVR's log." : null;
 
   function submit(event: FormEvent) {
     event.preventDefault();
     setTouched(true);
-    if (!USERNAME.test(username) || passwordProblem(password) || confirm !== password) return;
-    create.mutate({ username, password });
+    if (!USERNAME.test(username) || passwordProblem(password) || confirm !== password || !code.trim()) return;
+    create.mutate({ username, password, setup_code: code.trim() });
   }
 
   const error = create.error instanceof ApiError ? create.error.detail : create.error ? "Setup failed. Try again." : null;
   return (
     <AuthScreen title="Create the administrator account">
       <p className="auth-lead">
-        This one-time step creates the emergency local administrator. Do this on a trusted network; the setup page closes as soon as the account exists.
+        This one-time step creates the emergency local administrator. It needs the setup code the NVR printed in its log when it started; the setup page closes as soon as the account exists.
       </p>
       <form className="auth-form" onSubmit={submit} noValidate>
         <div className="field">
@@ -51,6 +53,11 @@ export function SetupPage() {
           <label htmlFor="setup-confirm">Confirm password</label>
           <input id="setup-confirm" type="password" autoComplete="new-password" value={confirm} onChange={event => setConfirm(event.target.value)} aria-invalid={!!confirmError} aria-describedby="setup-confirm-error" />
           {confirmError ? <span id="setup-confirm-error" className="error">{confirmError}</span> : null}
+        </div>
+        <div className="field">
+          <label htmlFor="setup-code">Setup code</label>
+          <input id="setup-code" autoComplete="off" autoCapitalize="characters" spellCheck={false} value={code} onChange={event => setCode(event.target.value)} aria-invalid={!!codeError} aria-describedby="setup-code-hint" />
+          <span id="setup-code-hint" className={codeError ? "error" : "hint"}>{codeError ?? <>On the server, run <code>docker compose logs nvr</code> and look for "setup code". It proves you are the person installing this NVR.</>}</span>
         </div>
         {error ? <p className="notice" data-tone="bad" role="alert">{error}</p> : null}
         <button className="button auth-wide" data-variant="primary" type="submit" disabled={create.isPending}>

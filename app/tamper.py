@@ -24,13 +24,13 @@ import asyncio
 import json
 import logging
 import math
-import os
 import shutil
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable
 
+from . import env_numbers
 from .incidents import sync_incident
 from .store import connect
 
@@ -42,8 +42,8 @@ FRAME_BYTES = FRAME_WIDTH * FRAME_HEIGHT
 LEARN_SAMPLES = 5
 ADOPT_RATE = 0.08  # How much of each unchanged sample the reference takes on.
 CLEAR_SAMPLES = 2  # Consecutive unchanged samples that end a detection.
-MAX_SAMPLE_GAP = timedelta(seconds=max(4 * float(os.environ.get("NVR_TAMPER_SAMPLE_SECONDS", "15")), 90))  # Longer without a sample and a pending change starts over.
-SAMPLE_SECONDS = float(os.environ.get("NVR_TAMPER_SAMPLE_SECONDS", "15"))
+SAMPLE_SECONDS = env_numbers.number("NVR_TAMPER_SAMPLE_SECONDS", 15, 1, 3600)  # Never 0: that would take away the pause between passes (#544)
+MAX_SAMPLE_GAP = timedelta(seconds=max(4 * SAMPLE_SECONDS, 90))  # Longer without a sample and a pending change starts over.
 GRAB_TIMEOUT_SECONDS = 20
 STREAM_PROTOCOLS: str | None = None  # Camera protocols only; the tests widen it to read generated files.
 CONCURRENT_GRABS = 2
