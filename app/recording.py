@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -11,6 +12,7 @@ import shutil
 import time
 import sqlite3
 import uuid
+from typing import Any
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
@@ -276,10 +278,45 @@ async def _write_camera(sql: str, parameters: tuple[object, ...]) -> None:
     await asyncio.to_thread(write)
 
 
+RESTARTS_AT_ONCE = 4  # Recordings restarted for changed settings at the same time: a group's volume change touches every camera in it
+RESTART_SPACING_SECONDS = 1.0  # Each of them then waits this long before the next takes its place
+
+
+def _digest(ciphertext: bytes | None) -> str:
+    """What an encrypted setting holds, as a digest: saving the same address again makes a new ciphertext, and that is not a change."""
+    if not ciphertext:
+        return ""
+    try:
+        return hashlib.sha256(decrypt(ciphertext).encode()).hexdigest()
+    except Exception:  # noqa: BLE001 - unreadable: compared as it is stored
+        return hashlib.sha256(bytes(ciphertext)).hexdigest()
+
+
+def recording_inputs(db: sqlite3.Connection, camera_id: str, mode: str) -> tuple[object, ...] | None:
+    """Everything a running recording was started with and never reads again: FFmpeg's arguments, the camera's address and login, the
+    motion settings and the volume it writes to. A recording whose inputs have changed has to be started again to follow them (#466)."""
+    row = db.execute(
+        "SELECT c.stream_url_ciphertext,c.audio_enabled,c.motion_service_url,c.motion_credentials_ciphertext,c.motion_pre_roll_seconds,c.motion_post_roll_seconds,"
+        "c.motion_fallback_enabled,c.motion_zones_json,c.motion_sensitivity,g.storage_volume_id FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id WHERE c.id=?",
+        (camera_id,)).fetchone()
+    if row is None:
+        return None
+    shared = (_digest(row["stream_url_ciphertext"]), bool(row["audio_enabled"]), row["storage_volume_id"] or "default")
+    if mode != "motion":
+        return shared
+    return (*shared, row["motion_service_url"] or "", _digest(row["motion_credentials_ciphertext"]), row["motion_pre_roll_seconds"], row["motion_post_roll_seconds"],
+            bool(row["motion_fallback_enabled"]), row["motion_zones_json"], row["motion_sensitivity"])
+
+
 class RecordingManager:
     def __init__(self) -> None:
         self.tasks: dict[str, asyncio.Task[None]] = {}
         self.task_modes: dict[str, str] = {}
+        self.task_inputs: dict[str, tuple[object, ...] | None] = {}  # What each running recording was started with (``recording_inputs``)
+        self._restart_slots = asyncio.Semaphore(RESTARTS_AT_ONCE)
+        # One sync of a camera at a time. Two at once (a settings route's request and the five-second pass) could each stop the recording
+        # and each start one: the first of the two new recordings was then lost track of, and ran beside the second until the worker stopped.
+        self._sync_locks: dict[str, asyncio.Lock] = {}
         self.scheduler_task: asyncio.Task[None] | None = None
         self.retention_task: asyncio.Task[None] | None = None
         self.headroom_task: asyncio.Task[None] | None = None
@@ -352,29 +389,78 @@ class RecordingManager:
     async def remove(self, camera_id: str) -> None:
         task = self.tasks.pop(camera_id, None)
         self.task_modes.pop(camera_id, None)
+        self.task_inputs.pop(camera_id, None)
         if task and not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
 
-    async def sync_camera(self, camera_id: str, force_restart: bool = False) -> None:
+    def _wanted(self, camera_id: str) -> tuple[str, dict[str, Any], sqlite3.Row | None, tuple[object, ...] | None]:
+        """The mode the camera should be recorded in now, and what such a recording would be started with."""
         with connect() as db:
             policy = effective_policy(db, camera_id, datetime.now(timezone.utc))
             row = db.execute("SELECT enabled,recording_enabled,recording_status,archived_at FROM cameras WHERE id=?", (camera_id,)).fetchone()
-        desired = policy["mode"] if row and row["enabled"] and row["recording_enabled"] and not row["archived_at"] else "disabled"
+            desired = policy["mode"] if row and row["enabled"] and row["recording_enabled"] and not row["archived_at"] else "disabled"
+            inputs = recording_inputs(db, camera_id, desired) if desired in {"motion", "continuous"} else None
+        return desired, policy, row, inputs
+
+    def _settled(self, camera_id: str, desired: str, inputs: tuple[object, ...] | None, force_restart: bool) -> tuple[bool, bool]:
+        """Whether the camera's task is already what is wanted, and whether it is a running recording whose settings have changed."""
         task = self.tasks.get(camera_id)
-        if task is not None and self.task_modes.get(camera_id) == desired:
-            failed = task.done() and not task.cancelled() and task.exception() is not None
-            if not failed and (not task.done() or not force_restart):
+        if task is None or self.task_modes.get(camera_id) != desired:
+            return False, False
+        failed = task.done() and not task.cancelled() and task.exception() is not None
+        changed = not task.done() and self.task_inputs.get(camera_id) != inputs
+        return not failed and not changed and (not task.done() or not force_restart), changed
+
+    async def sync_camera(self, camera_id: str, force_restart: bool = False) -> None:
+        """Start, stop or restart a camera's recording to match its settings and schedule.
+
+        A recording that is running in the right mode is left alone unless what it was started with has changed (audio, the address or login,
+        the motion settings, the volume): then it is started again, whether or not the caller asked, because the running FFmpeg would
+        otherwise keep its old arguments until the stream next dropped (#466). ``force_restart`` restarts nothing by itself: a schedule
+        save for a group asks it of every camera, and must not cost each of them a gap. Recordings restarted for changed settings go a few
+        at a time."""
+        async with self._sync_locks.setdefault(camera_id, asyncio.Lock()):
+            desired, policy, row, inputs = self._wanted(camera_id)
+            settled, changed = self._settled(camera_id, desired, inputs, force_restart)
+            if settled:
                 return
+            if not changed:
+                await self._replace(camera_id, desired, policy, row, inputs)
+                return
+            async with self._restart_slots:
+                desired, policy, row, inputs = self._wanted(camera_id)  # Read again: it may have changed once more while this waited its turn
+                await self._replace(camera_id, desired, policy, row, inputs)
+                await asyncio.to_thread(self._note_settings_restart, camera_id)
+                await asyncio.sleep(RESTART_SPACING_SECONDS)
+
+    async def _replace(self, camera_id: str, desired: str, policy: dict[str, Any], row: sqlite3.Row | None, inputs: tuple[object, ...] | None) -> None:
         await self.remove(camera_id)
         if desired in {"motion", "continuous"} and not self.stopping:
             self.task_modes[camera_id] = desired
+            self.task_inputs[camera_id] = inputs
             self.tasks[camera_id] = asyncio.create_task(self._run(camera_id, desired), name=f"record-{camera_id}")
         elif row and row["enabled"] and row["recording_enabled"] and policy["scheduled"]:
             if row["recording_status"] != "scheduled_idle":
                 await self._status(camera_id, "scheduled_idle")
         elif row and not row["archived_at"] and row["recording_status"] != "stopped":
             await self._status(camera_id, "stopped")
+
+    @staticmethod
+    def _note_settings_restart(camera_id: str) -> None:
+        """The few seconds without footage while a recording starts again are a gap with a reason of their own. The coverage check that
+        runs every five seconds closes it when footage is being written again."""
+        now = datetime.now(timezone.utc).isoformat()
+        with connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                db.execute("UPDATE coverage_intervals SET ends_at=? WHERE camera_id=? AND ends_at IS NULL", (now, camera_id))
+                db.execute("INSERT INTO coverage_intervals(camera_id,coverage_kind,reason,reason_code,starts_at,checked_at) VALUES(?,?,?,?,?,?)",
+                           (camera_id, "uncertain", "The recording was started again to apply changed settings", "settings_restart", now, now))
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            db.execute("COMMIT")
 
     async def _schedule_loop(self) -> None:
         while not self.stopping:

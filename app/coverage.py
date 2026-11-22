@@ -23,6 +23,7 @@ REASONS = {
     "outside_schedule": "Outside schedule",
     "recording_disabled": "Recording disabled",
     "worker_restart": "Recorder restarting",
+    "settings_restart": "Restarted for changed settings",
     "no_motion": "No motion",
     "failover_standby": "Standby (the primary records)",
     "failover_yield": "Held for the standby",
