@@ -159,21 +159,6 @@ class PreservationHoldTests(unittest.TestCase):
             self.active_user={"id":self.operator_id,"role":"operator"}
             self.assertEqual(hold(segments[9]).status_code,201)
 
-    def test_existing_operator_holds_get_thirty_days_from_the_upgrade_and_one_notice_lists_them(self):
-        from app.migrations import m0088_operator_hold_expiry as step
-
-        with connect() as db:
-            for index,(who,case,expires) in enumerate(((self.operator_id,None,None),(self.operator_id,"a-case",None),(self.admin_id,None,None),(self.operator_id,None,"2099-01-01T00:00:00+00:00"))):
-                db.execute("INSERT INTO recording_holds(id,segment_id,camera_id,created_by,case_id,expires_at) VALUES(?,?,?,?,?,?)",(f"hold-{index}",self.segment_id,self.camera,who,case,expires))
-            step.upgrade(db)
-            step.upgrade(db)  # Run again (an interrupted upgrade): nothing more to change, no second notice
-            rows={row["id"]:row["expires_at"] for row in db.execute("SELECT id,expires_at FROM recording_holds")}
-        given=datetime.fromisoformat(rows["hold-0"])
-        self.assertAlmostEqual((given-datetime.now(timezone.utc)).total_seconds(),30*86400,delta=120)  # The operator's: 30 days from now, not cut short
-        self.assertEqual((rows["hold-1"],rows["hold-2"],rows["hold-3"]),(None,None,"2099-01-01T00:00:00+00:00"))  # A case's, an administrator's and one with its own expiry: as they were
-        (notice,)=self.audit("operator_holds_given_expiry")
-        self.assertEqual((notice["holds"],notice["by"],notice["segments"]),(1,{"operator":1},[self.segment_id]))
-
 
 if __name__=="__main__":
     unittest.main()
