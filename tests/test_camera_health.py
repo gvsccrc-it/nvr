@@ -114,7 +114,7 @@ class ReportTests(HealthCase):
         asked = len(camera.requests)
         self.assertEqual(self.sample(NOW + timedelta(seconds=30)), 0)
         self.assertEqual(len(camera.requests), asked)
-        self.assertGreaterEqual(self.sample(NOW + timedelta(seconds=camera_health.SAMPLE_SECONDS + 60)), 1)
+        self.assertGreaterEqual(self.sample(NOW + timedelta(seconds=camera_health.sample_seconds(self.d1) + 60)), 1)  # Its own interval: 450-750 s (#477)
         self.assertGreater(len(camera.requests), asked)
 
 
