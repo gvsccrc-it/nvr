@@ -17,7 +17,7 @@ from app.store import connect
 from app import track_privacy
 from app.health import recording_health
 from app.scheduling import effective_policy
-from app.preservation import delete_segment as delete_preserved_segment, get_segment_hold, preserve_segment, release_segment_hold
+from app.preservation import HoldLimit, delete_segment as delete_preserved_segment, extend_segment_hold, get_segment_hold, preserve_segment, release_segment_hold
 from app.audit import record as audit_record
 
 router = APIRouter()
@@ -345,15 +345,29 @@ def preserve_camera_segment(camera_id: str, segment_id: int, payload: HoldReques
     if payload.expires_in_days is not None and user["role"]!="administrator":
         raise HTTPException(status_code=403,detail="Only administrators can set a hold expiry")
     try:
-        return preserve_segment(camera_id,segment_id,int(user["id"]),payload.expires_in_days)
+        # An operator's hold expires after 30 days and counts towards their share of the volume (#491); an administrator's is as they set it.
+        return preserve_segment(camera_id,segment_id,int(user["id"]),payload.expires_in_days,operator=user["role"]!="administrator")
     except LookupError as exc:
         raise HTTPException(status_code=404,detail=str(exc)) from exc
+    except HoldLimit as exc:
+        raise HTTPException(status_code=409,detail=str(exc)) from exc
     except FileExistsError as exc:
         raise HTTPException(status_code=409,detail=str(exc)) from exc
     except FileNotFoundError as exc:
         raise HTTPException(status_code=410,detail=str(exc)) from exc
     except OSError as exc:
         raise HTTPException(status_code=503,detail="Assigned storage volume is unavailable") from exc
+
+
+@router.patch("/api/cameras/{camera_id}/segments/{segment_id}/hold")
+def extend_camera_segment_hold(camera_id: str, segment_id: int, payload: HoldRequest, user: Administrator) -> dict[str, object]:
+    """Give a hold a new expiry, counted from now, or none (``expires_in_days`` null: kept until released). Administrators only."""
+    try:
+        return extend_segment_hold(camera_id,segment_id,int(user["id"]),payload.expires_in_days)
+    except LookupError as exc:
+        raise HTTPException(status_code=404,detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=409,detail=str(exc)) from exc
 
 
 @router.delete("/api/cameras/{camera_id}/segments/{segment_id}/hold",status_code=status.HTTP_204_NO_CONTENT)
