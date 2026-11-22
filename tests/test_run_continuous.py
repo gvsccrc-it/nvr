@@ -137,7 +137,10 @@ class RunContinuousTests(unittest.TestCase):
         """FFmpeg is up but nothing has been finalised for far longer than two segments: the fault start is recorded and recording carries on."""
         from app.store import connect
 
+        from app.storage import camera_recordings_dir
+
         camera_id = self.camera()
+        camera_recordings_dir(camera_id)  # The volume is in use (it has its marker) before it holds footage whose file is not there (#479)
         long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
         with connect() as db:
             db.execute("INSERT INTO recording_segments(camera_id,relative_path,starts_at,ends_at,size_bytes) VALUES(?,?,?,?,100)",
