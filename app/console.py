@@ -96,7 +96,6 @@ class SiteLink:
     cameras: list[dict[str, Any]] = field(default_factory=list)
     cameras_at: float = 0.0
     failed_at: float = 0.0  # time.monotonic() of the failure that marked it down
-    slow: int = 0  # Requests in a row that timed out waiting for the answer
     probing: bool = False
 
     @property
@@ -114,16 +113,8 @@ class SiteLink:
         self.last_error = reason
         self.last_checked_at = _now_iso()
 
-    def took_too_long(self) -> None:
-        """One request waited too long for its answer. That request fails; the site is taken as down, for everyone, only when several in
-        a row have, with no answer in between: one heavy search used to take the site's live video away from every viewer (#499)."""
-        self.slow += 1
-        if self.slow >= SLOW_IN_A_ROW:
-            self.failed("ReadTimeout")
-
     def answered(self, refused: bool = False) -> None:
         self.down = False
-        self.slow = 0
         self.refused = refused
         self.last_contact_at = self.last_checked_at = _now_iso()
         self.last_error = "The site refused the console's token" if refused else None
@@ -169,7 +160,7 @@ class Registry:
                     link.name, link.allow_private = row["name"], bool(row["allow_private"])  # A rename keeps what is known about the site
                     if link.down and not row["last_error"] and row["last_contact_at"] and row["last_contact_at"] > (link.last_checked_at or ""):
                         # Another process (the background worker's health check) has reached the site since it failed here (#499).
-                        link.down, link.slow, link.last_error, link.last_contact_at = False, 0, None, row["last_contact_at"]
+                        link.down, link.last_error, link.last_contact_at = False, None, row["last_contact_at"]
                     kept[row["id"]] = link
                     continue
                 try:
@@ -233,8 +224,13 @@ async def call(link: SiteLink, method: str, path: str, *, params: Any = None, bo
         finally:
             await response.aclose()
     except _SLOW as exc:
-        link.took_too_long()
-        raise SiteDown("The site took too long to answer") from exc
+        # No answer in time. A hung site and a site that is only slow on this one question look the same from here, so the site is taken
+        # as down, as before, and asked again at once in the background with a light question: a site that is alive answers that in
+        # moments and is back for everyone, where one heavy search used to take its live video away until somebody pressed "check" (#499).
+        link.failed(type(exc).__name__)
+        if not probe:
+            _try_again_soon(link, at_once=True)
+        raise SiteDown(link.last_error or "No answer") from exc
     except httpx.HTTPError as exc:
         link.failed(type(exc).__name__ or "No answer")
         raise SiteDown(link.last_error or "No answer") from exc
@@ -245,17 +241,16 @@ async def call(link: SiteLink, method: str, path: str, *, params: Any = None, bo
     return response
 
 
-SLOW_IN_A_ROW = 3
 _SLOW = (httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout)
 _probes: set[asyncio.Task[None]] = set()
 
 
-def _try_again_soon(link: SiteLink) -> None:
+def _try_again_soon(link: SiteLink, at_once: bool = False) -> None:
     """A site that is down is asked again, in the background, once it has been down for a few seconds: the request that found it down is
     refused at once, as before, and costs nothing more. Under the supervisor the health check that used to be the only thing to try a
     down site runs in another process, so in the web process a site that failed one request stayed refused until an administrator
     pressed "check" or the server restarted (#499)."""
-    if link.probing or not link.enabled or time.monotonic() - link.failed_at < RECHECK_SECONDS:
+    if link.probing or not link.enabled or (not at_once and time.monotonic() - link.failed_at < RECHECK_SECONDS):
         return
     link.probing = True
 

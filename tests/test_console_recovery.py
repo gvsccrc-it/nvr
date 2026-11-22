@@ -93,28 +93,31 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(requests, 2, "the request that found it down, and one background try")
         self.assertEqual(state, "unreachable")
 
-    def test_one_slow_answer_fails_that_request_only(self):
+    def test_a_site_that_was_slow_on_one_question_is_back_within_moments(self):
         async def scenario(link):
             self.site.mode = "slow"
             slow = await self.ask(link)
-            self.site.mode = "ok"
-            return slow, link.available, await self.ask(link), link.slow
+            state = link.state
+            self.site.mode = "ok"  # It was the question that was slow, not the site
+            await asyncio.sleep(0.02)  # The background check that was started at once has answered
+            return slow, state, link.available, await self.ask(link)
 
-        slow, available, after, count = self.run_scenario(scenario)
-        self.assertEqual(slow, "The site took too long to answer")
-        self.assertTrue(available, "the site is still there for everyone else")
-        self.assertEqual((after, count), ("answered", 0))
+        slow, state, available, after = self.run_scenario(scenario)
+        self.assertEqual((slow, state), ("ReadTimeout", "unreachable"), "that request fails, and says so")
+        self.assertTrue(available, "with nobody pressing check and without the five-second wait")
+        self.assertEqual(after, "answered")
 
-    def test_a_site_that_never_answers_is_taken_as_down_after_a_few_tries(self):
+    def test_a_site_that_never_answers_costs_one_wait_and_one_background_try(self):
         async def scenario(link):
             self.site.mode = "slow"
-            results = [await self.ask(link) for _ in range(console.SLOW_IN_A_ROW + 2)]
+            results = [await self.ask(link) for _ in range(5)]
+            await asyncio.sleep(0.02)
             return results, self.site.requests, link.state
 
         results, requests, state = self.run_scenario(scenario)
-        self.assertEqual(requests, console.SLOW_IN_A_ROW, "after that, requests are refused without waiting")
+        self.assertEqual(results, ["ReadTimeout"] * 5)
+        self.assertEqual(requests, 2, "the request that found out and the check that followed it; the rest are refused without waiting")
         self.assertEqual(state, "unreachable")
-        self.assertEqual(results[-1], "ReadTimeout")
 
     def test_a_busy_site_is_still_taken_as_down_at_once(self):
         async def scenario(link):
