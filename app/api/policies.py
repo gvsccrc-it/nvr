@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
 import sqlite3
 import uuid
@@ -290,6 +291,32 @@ def set_volume_headroom(volume_id: str, payload: HeadroomRequest, admin: Adminis
     with connect() as db:
         record(db, int(admin["id"]), "storage_headroom_changed", "storage_volume", volume_id, headroom_bytes=payload.headroom_bytes, previous=previous)
         return {"volume_id": volume_id, **headroom.status(db, volume_id, usage.total if usage else None, usage.free if usage else None, configured_volumes())}
+
+
+@router.post("/api/storage/{volume_id}/new-disk")
+def use_new_disk(volume_id: str, admin: Administrator) -> dict[str, object]:
+    """"This is a new, empty disk": the administrator replaced a recordings disk on purpose. The disk mounted now becomes the volume, and the
+    rows of the footage that was on the old one are removed. Only for a volume the NVR is refusing to use, and only from a browser (#479)."""
+    from app import volume_marker
+
+    if admin.token_id is not None:
+        raise HTTPException(status_code=403, detail="Replace a recordings disk from a browser session, not an API token")
+    if volume_id not in configured_volumes():
+        raise HTTPException(status_code=404, detail="Storage volume not found")
+    try:
+        path = volume_path(volume_id)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail="The volume's folder cannot be used") from exc
+    if not path.is_dir() or (configured_volumes()[volume_id] and not os.path.ismount(path)):
+        raise HTTPException(status_code=409, detail="No disk is mounted for this volume: mount the new disk first")
+    volume_marker.forget()
+    found = volume_marker.state(volume_id, path)
+    if found == volume_marker.PRESENT:
+        raise HTTPException(status_code=409, detail="This volume is the disk the NVR already records to: there is nothing to replace")
+    removed = volume_marker.adopt(volume_id, path, clear_footage=True)
+    with connect() as db:
+        record(db, int(admin["id"]), "storage_disk_replaced", "storage_volume", volume_id, was=found, footage_rows_removed=removed)
+    return {"volume_id": volume_id, "footage_rows_removed": removed}
 
 
 @router.get("/api/camera-groups/{group_id}/storage-volume")

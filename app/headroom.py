@@ -69,6 +69,7 @@ def keep_headroom(now: datetime | None = None) -> dict[str, dict[str, int]]:
     """One pass over every available volume: delete the oldest removable footage until each has its headroom free (or nothing removable is left)."""
     from .alarms import resolved_kept_since
     from .retention import remove_segment
+    from . import volume_marker
     from .storage import configured_volumes, volume_path
     from .tiering import discard_objects
 
@@ -80,6 +81,10 @@ def keep_headroom(now: datetime | None = None) -> dict[str, dict[str, int]]:
             path = volume_path(volume_id)
             if volume_id != "default" and not os.path.ismount(path):
                 continue  # Not mounted: what is measured here would be the disk under the empty folder, and its footage is not there to remove (#338)
+            if not volume_marker.verified(volume_id, path):
+                # The same for any volume, the default one included, whose folder is there without its disk (#479): nothing is removed.
+                results[volume_id] = {"removed_segments": 0, "removed_bytes": 0, "short_bytes": 0, "waiting_for_storage": 1}
+                continue
             usage = shutil.disk_usage(path)
         except (OSError, ValueError):
             continue

@@ -668,6 +668,7 @@ def reconcile_after_restore() -> dict[str, int] | None:
         # Recordings are not mounted: do not mistake that for lost footage. Try again next start.
         logger.warning("Recordings root %s is unavailable; post-restore reconciliation deferred", recordings_path())
         return None
+    _adopt_volumes_after_restore()
     marked = checked = skipped_volumes = 0
     stamp = _now()
     with connect() as db:
@@ -691,6 +692,24 @@ def reconcile_after_restore() -> dict[str, int] | None:
     result = {"checked": checked, "marked_unavailable": marked, "skipped_unavailable_storage": skipped_volumes}
     logger.info("Post-restore footage reconciliation: %s", result)
     return result
+
+
+def _adopt_volumes_after_restore() -> None:
+    """A restore is the administrator's own act, often onto another machine: the disks mounted now are this installation's volumes from here
+    on, whatever marker the restored database remembers (#479). The reconciliation that follows marks the footage they do not hold."""
+    import os
+
+    from . import volume_marker
+    from .storage import configured_volumes, volume_path
+
+    for volume_id, relative in configured_volumes().items():
+        try:
+            path = volume_path(volume_id)
+            if path.is_dir() and (not relative or os.path.ismount(path)) and not volume_marker.verified(volume_id, path):
+                volume_marker.adopt(volume_id, path, clear_footage=False)
+                logger.info("Recordings volume %s was taken as this installation's after the restore", volume_id)
+        except (OSError, ValueError, sqlite3.Error):
+            logger.warning("Recordings volume %s could not be checked after the restore", volume_id)
 
 
 def _installation_running(database: Path) -> bool:

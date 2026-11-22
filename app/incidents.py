@@ -165,7 +165,12 @@ def list_incidents(db: sqlite3.Connection, state: str | None = None, limit: int 
 def sync_storage_incidents(db: sqlite3.Connection, volumes: list[dict[str, Any]]) -> None:
     """Group an unhealthy recording volume into one incident with its affected cameras."""
     observed: set[str] = set()
-    unhealthy_states = {"pressure", "missing", "read_only", "unavailable", "slow", "unconfigured"}
+    unhealthy_states = {"pressure", "missing", "read_only", "unavailable", "slow", "unconfigured", "wrong_disk", "disk_not_mounted"}
+    explained = {  # States a person cannot act on from one word (#479)
+        "disk_not_mounted": "the disk it recorded to is not mounted (the folder is there but the footage is not). Nothing is recorded to it and none of its footage is removed until it is back: "
+                            "check that the disk is connected and mounted, or, if it was replaced on purpose, say so in Settings > Recording & storage",
+        "wrong_disk": "the disk mounted there belongs to another NVR. Nothing is recorded to it: mount the right disk, or, if this disk is meant to replace it, say so in Settings > Recording & storage",
+    }
     for volume in volumes:
         volume_id = str(volume["id"])
         key = f"storage:{volume_id}"
@@ -177,7 +182,8 @@ def sync_storage_incidents(db: sqlite3.Connection, volumes: list[dict[str, Any]]
             incident_key=key,
             camera_id=None,
             fault_type="storage",
-            summary=f"Recording storage {volume_id} is {state}; {len(affected)} camera(s) are assigned",
+            summary=(f"Recording storage {volume_id}: {explained[state]}; {len(affected)} camera(s) are assigned" if state in explained
+                     else f"Recording storage {volume_id} is {state}; {len(affected)} camera(s) are assigned"),
             active=state in unhealthy_states and bool(affected),
             details={"volume_id": volume_id, "volume_state": state, "affected_cameras": affected},
         )

@@ -8,7 +8,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from . import headroom
+from . import headroom, volume_marker
 from .recording import recordings_path
 from .store import connect
 
@@ -63,6 +63,9 @@ def camera_recordings_dir(camera_id: str) -> Path:
         raise OSError("Assigned recording volume is missing")
     if volume_id != "default" and not os.path.ismount(path):
         raise OSError("Assigned recording volume is not mounted")
+    found = volume_marker.state(volume_id, path)
+    if found != volume_marker.PRESENT:  # An empty folder where the disk should be: recording into it would fill the disk underneath (#479)
+        raise OSError(f"Recording volume {volume_id} cannot be used: {volume_marker.explain(found)}")
     return path / camera_id
 
 
@@ -87,6 +90,8 @@ def _hot_file_path(relative_path: str) -> Path:
         raise OSError("Recorded file does not belong to a configured storage volume")
     _,name,base=max(matches)
     if name!="default" and (not base.is_dir() or not os.path.ismount(base)):
+        raise StorageUnavailable("Recorded file storage volume is unavailable")
+    if not volume_marker.verified(name, base):  # The default volume too: its folder exists even when its disk is not mounted (#479)
         raise StorageUnavailable("Recorded file storage volume is unavailable")
     return candidate
 
@@ -212,12 +217,13 @@ def storage_status(max_age: float = 0.0) -> dict[str, object]:
             capacity=usage.total if usage else None
             mount_expected=bool(relative)
             mounted=exists and (os.path.ismount(path) if mount_expected else True)
-            state="missing" if not exists or not mounted else "read_only" if not writable else "slow" if write_latency is not None and write_latency>250 else "pressure" if free is not None and free<minimum_free else "healthy"
+            marker=volume_marker.state(name,path) if exists and mounted else volume_marker.PRESENT
+            state="missing" if not exists or not mounted else "wrong_disk" if marker==volume_marker.WRONG_DISK else "disk_not_mounted" if marker==volume_marker.UNMARKED else "read_only" if not writable else "slow" if write_latency is not None and write_latency>250 else "pressure" if free is not None and free<minimum_free else "healthy"
         except (OSError,ValueError):
             path=recordings_path()/relative
             exists=path.is_dir(); mounted=False; writable=False; write_latency=None; free=None; capacity=None; state="unavailable"
         assigned=[dict(id=camera["id"],name=camera["name"],recording_status=camera["recording_status"],last_error=camera["last_error"]) for camera in cameras if (camera["storage_volume_id"] or "default")==name]
-        at_risk=state in {"pressure","missing","read_only","unavailable","slow"} and bool(assigned)
+        at_risk=state in {"pressure","missing","read_only","unavailable","slow","wrong_disk","disk_not_mounted"} and bool(assigned)
         with connect() as db:
             headroom_status=headroom.status(db,name,capacity,free,volumes)
         result.append({"id":name,"headroom":headroom_status,"relative_path":relative,"exists":exists,"mounted":mounted,"writable":writable,"write_latency_ms":write_latency,"capacity_bytes":capacity,"free_bytes":free,"state":state,"retention_at_risk":at_risk,"cameras":assigned})

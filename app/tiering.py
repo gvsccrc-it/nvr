@@ -572,11 +572,24 @@ def run_once(now: datetime | None = None, limit: int = BATCH, opener: Callable[[
     for segment_id in interrupted:
         count(move_segment(segment_id, now, opener))
     for policy in policies:
+        if not _volume_present(policy["volume_id"]):
+            count("waiting_for_storage")  # Its disk is not mounted: there is nothing there to move (#479)
+            continue
         with connect() as db:
             chosen = candidates(db, policy, now, limit)
         for segment_id in chosen:
             count(move_segment(segment_id, now, opener))
     return outcomes
+
+
+def _volume_present(volume_id: str) -> bool:
+    from . import volume_marker
+    from .storage import volume_path
+
+    try:
+        return volume_marker.verified(volume_id, volume_path(volume_id))
+    except (OSError, ValueError):
+        return False
 
 
 class TieringManager:
