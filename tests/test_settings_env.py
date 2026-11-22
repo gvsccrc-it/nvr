@@ -106,7 +106,7 @@ class NumbersTests(unittest.TestCase):
     def test_the_settings_read_when_they_are_used_fall_back_too(self):
         from app import forecast
 
-        for value, expected in (("abc", 1 << 30), ("0", 64 << 20), ("-1", 64 << 20), ("2147483648", 2147483648)):
+        for value, expected in (("abc", 1 << 30), ("0", 0), ("-1", 0), ("2147483648", 2147483648)):  # 0 is a choice: no reserve
             with patch.dict(os.environ, {"NVR_STORAGE_PRESSURE_FREE_BYTES": value}):
                 self.assertEqual(forecast.reserve_bytes(), expected)
         with patch.dict(os.environ, {"NVR_ONVIF_TIMEOUT_SECONDS": "soon"}):

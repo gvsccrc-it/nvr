@@ -38,7 +38,7 @@ TOLERANCE = 0.005  # A forecast within half a percent of the policy is the polic
 def reserve_bytes() -> int:
     from .env_numbers import whole_number
 
-    return whole_number("NVR_STORAGE_PRESSURE_FREE_BYTES", 1 << 30, 64 << 20, 1 << 40)
+    return whole_number("NVR_STORAGE_PRESSURE_FREE_BYTES", 1 << 30, 0, 1 << 40)
 
 
 def water_level(rates: list[float], policies: list[float], budget: float) -> float | None:

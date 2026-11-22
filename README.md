@@ -70,7 +70,7 @@ The `nvr-data` volume stores the database and account/session state. `nvr-secret
 | `NVR_MS_LOGIN_URL` / `NVR_MS_GRAPH_URL` | Microsoft's public cloud | The sign-in and Graph addresses for sending mail through Microsoft 365, for a national cloud |
 | `NVR_SEGMENT_SECONDS` | `60` | Length of each recorded segment, 10 to 3600 seconds |
 | `NVR_MOTION_BUFFER_PATH` | `/tmp/nvr-motion-buffer` | Where motion-only cameras keep the seconds before an event until it is confirmed |
-| `NVR_STORAGE_PRESSURE_FREE_BYTES` | `1073741824` | Free space below which a volume reports storage pressure (64 MiB to 1 TiB) |
+| `NVR_STORAGE_PRESSURE_FREE_BYTES` | `1073741824` | Free space below which a volume reports storage pressure (0, for no reserve, to 1 TiB) |
 | `NVR_TIER_CACHE_PATH` / `NVR_TIER_CACHE_BYTES` | beside the database / 2 GiB | Where footage fetched back from a cold tier is cached, and how much (at least 64 MiB) |
 | `NVR_FOOTAGE_CHAIN_KEEP_DAYS` | `365` | How long the signed-footage chain keeps the links of removed footage, 90 to 3650 days ([signed footage](docs/signed-footage.md)) |
 | `NVR_DB_LOG_LIMIT_MB` | `128` | The size the database's write-ahead log is brought back to once it can be reset, 16 to 4096 |
