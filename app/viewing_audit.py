@@ -18,6 +18,9 @@ from .store import connect, has_row
 logger = logging.getLogger("nvr.viewing_audit")
 
 PLAYBACK_GAP = timedelta(minutes=2)
+# A playback session already extended this recently is not written again (#461): a sixteen-camera playback asks for segments many times
+# a second, and each write took the database's one write lock. Its end can be this much earlier than the last segment asked for.
+TOUCH_EVERY = timedelta(seconds=30)
 HEARTBEAT_SECONDS = 30
 RETENTION_DAYS = (7, 3650)
 Kind = Literal["live", "playback", "export", "download", "snapshot"]
@@ -60,10 +63,14 @@ def end(db: sqlite3.Connection, session_id: int) -> None:
 def touch_playback(db: sqlite3.Connection, user_id: int, camera_id: str) -> None:
     """A recording was requested: extend this person's playback session on the camera, or start one."""
     now = datetime.now(timezone.utc)
-    updated = db.execute(
-        "UPDATE viewing_audit SET ended_at=?,last_seen_at=? WHERE id=(SELECT id FROM viewing_audit WHERE user_id=? AND camera_id=? AND kind='playback' "
-        "AND ended_at>? ORDER BY id DESC LIMIT 1)", (stamp(now), stamp(now), user_id, camera_id, stamp(now - PLAYBACK_GAP)))
-    if updated.rowcount:
+    # Read first, through the index on person, camera and end (#461): most requests find their session extended moments ago and write
+    # nothing, so they never take the write lock (#280).
+    open_session = db.execute("SELECT id,ended_at FROM viewing_audit WHERE user_id=? AND camera_id=? AND kind='playback' AND ended_at>? "
+                              "ORDER BY id DESC LIMIT 1", (user_id, camera_id, stamp(now - PLAYBACK_GAP))).fetchone()
+    if open_session is not None:
+        if open_session["ended_at"] > stamp(now - TOUCH_EVERY):
+            return
+        db.execute("UPDATE viewing_audit SET ended_at=?,last_seen_at=? WHERE id=?", (stamp(now), stamp(now), open_session["id"]))
         return
     session_id = begin(db, user_id, camera_id, "playback")
     db.execute("UPDATE viewing_audit SET ended_at=started_at WHERE id=?", (session_id,))
