@@ -72,8 +72,8 @@ class CostTests(HeadroomCase):
         result = headroom.keep_headroom(NOW)["default"]
         self.assertEqual(result["removed_segments"], 100)
         with connect() as db:
-            oldest = db.execute("SELECT MIN(relative_path) FROM recording_segments").fetchone()[0]
-        self.assertTrue(oldest.endswith("segment-0000100.mp4"), oldest)
+            left = sorted(row[0].rsplit("/", 1)[1] for row in db.execute("SELECT relative_path FROM recording_segments"))  # By name: the paths begin with the camera
+        self.assertEqual((len(left), left[0]), (1900, "segment-0000100.mp4"))
 
     def test_a_long_run_of_held_footage_at_the_front_does_not_use_up_the_pass(self):
         self.many(1000)
