@@ -51,3 +51,10 @@ The state of each camera that has it on is also a metric: `nvr_camera_tamper_sta
 - A frame that cannot be had (the camera is unreachable) is not tampering: that is the recording health's to report.
 - It looks at one frame at a time every 15 seconds (`NVR_TAMPER_SAMPLE_SECONDS` changes it), so a change is confirmed at the first sample after the configured time has passed.
 - A moving crowd or a large vehicle parked in front of the camera for longer than the configured time can read as a moved or covered camera. Raise the time, lower the sensitivity, or re-learn.
+
+## With many cameras, or some offline
+
+A pass takes one picture from each camera, two at a time, so each camera is really sampled every "cameras x about one second, plus 15 seconds", not every 15 seconds: about 3.5 minutes at 200 cameras. Detection still works at that pace. A change has to be seen in two samples at least the set time apart, and a pending change is only dropped when a camera has gone unsampled for more than twice the real sampling period (or 90 seconds, if that is more): time when nobody was watching, such as a restart, does not count towards a change lasting.
+
+- A camera that gives no picture is tried again after longer and longer (up to ten minutes) while it stays that way, so offline cameras do not slow every pass for the others. It is sampled every pass again as soon as it answers.
+- While each camera is being sampled less often than once a minute, an incident says so, with the real period, and recovers when the pace does. A covered or moved camera is reported that much later.

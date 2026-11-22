@@ -258,6 +258,109 @@ class DetectionTests(TamperCase):
         self.assertEqual(self.incidents(self.d2), [])
 
 
+class SlowSamplingTests(TamperCase):
+    """#467: once a pass over the cameras took longer than 90 seconds, a covered camera was never reported."""
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(setattr, tamper, "_measured_period", None)
+
+    def spaced(self, frames: list[bytes], seconds: int) -> list[str]:
+        """Feed frames ``seconds`` apart: what each camera gets when a whole pass takes that long."""
+        states = []
+        for frame in frames:
+            async def grab(_camera: str, frame: bytes = frame) -> bytes:
+                return frame
+            asyncio.run(tamper.TamperManager(grabber=grab).sample_all(self.at))
+            self.at += timedelta(seconds=seconds)
+            with connect() as db:
+                states.append(db.execute("SELECT state FROM tamper_settings WHERE camera_id=?", (self.camera,)).fetchone()["state"])
+        return states
+
+    def test_a_camera_covered_throughout_is_reported_however_slow_the_passes_are(self):
+        self.enable()
+        self.learn()
+        for period in (100, 200):  # Both longer than the 90 seconds that used to start the count again every time
+            with self.subTest(period=period):
+                with connect() as db:
+                    db.execute("UPDATE tamper_settings SET state='ok',candidate=NULL,candidate_since=NULL")
+                    db.execute("DELETE FROM incidents")
+                tamper._measured_period = float(period)  # As the sampler measures it: one pass's start to the next
+                states = self.spaced([FRAMES["black"][0]] * 4, period)
+                self.assertEqual(states[1], "covered", states)  # At the second covered sample: it has lasted more than a minute
+                self.assertEqual(len(self.incidents(active=True)), 1)
+
+    def test_a_gap_much_longer_than_the_real_pace_still_starts_a_pending_change_over(self):
+        self.enable()
+        self.learn()
+        self.assertEqual(tamper.allowed_gap(), tamper.MAX_SAMPLE_GAP)  # Not measured yet: the fixed 90 seconds, as before
+        tamper._measured_period = 100.0
+        self.assertEqual(tamper.allowed_gap(), timedelta(seconds=215))  # Twice the real period and one interval
+        self.assertEqual(self.spaced([FRAMES["black"][0]], 30), ["ok"])  # One covered sample: pending
+        self.at += timedelta(minutes=30)  # The worker was down for half an hour: nobody was watching
+        self.assertEqual(self.spaced([FRAMES["black"][0]], 30), ["ok"])  # The count begins again here
+        self.assertEqual(self.incidents(active=True), [])
+
+    def test_a_camera_that_gives_no_picture_is_tried_less_and_less_often_by_the_running_loop(self):
+        self.enable()
+        asked: list[float] = []
+
+        async def scenario() -> None:
+            loop = asyncio.get_running_loop()
+
+            async def nothing(_camera: str) -> None:
+                asked.append(loop.time())
+                return None
+
+            manager = tamper.TamperManager(grabber=nothing, interval=0.05)
+            manager._patient = True  # As the running loop asks
+            for _ in range(40):
+                await manager.sample_all()
+                await asyncio.sleep(0.05)
+            misses, _ = manager._unreachable[self.camera]
+            self.assertEqual(misses, len(asked))
+            # And the moment it answers it is sampled every pass again.
+            async def picture(_camera: str) -> bytes:
+                return FRAMES["normal"][0]
+            manager.grabber = picture
+            manager._unreachable[self.camera] = (misses, 0.0)
+            self.assertEqual(await manager.sample_all(), 1)
+            self.assertNotIn(self.camera, manager._unreachable)
+
+        asyncio.run(scenario())
+        self.assertLess(len(asked), 12)  # Forty passes, a handful of tries: the first two, then after 2, 4, 8, ... seconds (never under a second)
+        self.assertGreaterEqual(len(asked), 3)
+        # A pass asked for directly (a test, a tool) still tries every camera every time.
+        direct: list[int] = []
+
+        async def nothing(_camera: str) -> None:
+            direct.append(1)
+            return None
+
+        manager = tamper.TamperManager(grabber=nothing)
+        for _ in range(5):
+            asyncio.run(manager.sample_all())
+        self.assertEqual(len(direct), 5)
+        self.assertEqual(tamper.UNREACHABLE_WAIT_MAX, 600)
+
+    def test_an_incident_says_when_sampling_is_slower_than_intended_and_recovers(self):
+        manager = tamper.TamperManager()
+
+        def slow() -> list[dict]:
+            with connect() as db:
+                return [dict(row) for row in db.execute("SELECT * FROM incidents WHERE incident_key=?", (tamper.SLOW_KEY,))]
+
+        manager._report_pace(20.0)
+        self.assertEqual(slow(), [])
+        manager._report_pace(205.0)
+        manager._report_pace(210.0)  # Still slow: not written again
+        (incident,) = slow()
+        self.assertEqual((incident["fault_type"], incident["fault_active"]), ("tamper_sampling_slow", 1))
+        self.assertIn("every 205 seconds", incident["summary"])
+        manager._report_pace(20.0)
+        self.assertEqual(slow()[0]["fault_active"], 0)
+
+
 class ReferenceTests(TamperCase):
     def test_relearning_after_a_deliberate_move_clears_the_incident_and_the_new_view_is_normal(self):
         self.enable()
