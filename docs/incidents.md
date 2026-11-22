@@ -1,6 +1,10 @@
 # Incident tracking
 
-The authenticated `GET /api/incidents` endpoint lists active, acknowledged, and recovered incidents, newest observations first. Add `?state=active`, `?state=acknowledged`, or `?state=recovered` to filter the list. Entries include stable IDs, first/last observation times, recurrence counts, current fault state, affected camera/resource details, and an event history.
+The authenticated `GET /api/incidents` endpoint lists active, acknowledged, and recovered incidents, newest observations first. Add `?state=active`, `?state=acknowledged`, or `?state=recovered` to filter the list. Entries include stable IDs, first/last observation times, recurrence counts, current fault state, affected camera/resource details, and the incident's five newest events (`events`, oldest first) with `events_total`, every event it has had. An operator limited to some cameras sees only those cameras' incidents, never the system's.
+
+`GET /api/incidents/{incident_id}` gives one incident with its whole kept history, 500 events a page, newest page first and each page oldest first; pass the answer's `next` as `?before=` for the page before, until `next` is null. The same people can read it as can see the incident in the list.
+
+Incident history is kept for the alarm history period (`alarm_settings.history_days`, 90 days by default; Settings > Alarms). An incident that is active or acknowledged is never removed, however old. A recovered incident goes, with its events, once it has been recovered for longer than the period. Events older than the period are removed from the incidents that stay, and counted: `events_removed` says how many, `events_removed_before` up to when. The daily retention pass does this, a batch at a time (#516).
 
 Operators and administrators may acknowledge an active incident with `POST /api/incidents/{incident_id}/acknowledge`. Acknowledgement records the actor in incident history and changes the displayed state to `acknowledged`; it does not change `fault_active` or suppress continued observations. Recovered incidents cannot be acknowledged. Repeated observations update the existing record, while a fault that returns after recovery reuses its stable incident ID, clears the old acknowledgement, increments the recurrence count, and adds a recurrence event.
 
