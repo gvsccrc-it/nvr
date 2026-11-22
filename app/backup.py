@@ -276,6 +276,10 @@ def create_backup(kind: str, *, run_id: str | None = None, database: Path | None
                 raise BackupError(f"Could not write the backup: {exc.strerror or exc}") from exc
             raise
     prune()
+    if kind != "pre_migration":  # Not in the middle of an upgrade, whose own connection is open
+        from .store import shrink_log
+
+        shrink_log()  # The copy held the write-ahead log open for as long as it took (#493)
     return {"file_name": name, "size_bytes": final_path.stat().st_size, "created_at": created.isoformat(), "run_id": run_id}
 
 

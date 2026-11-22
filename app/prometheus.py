@@ -187,6 +187,21 @@ def _backup(out: _Output) -> None:
     out.sample("nvr_backup_stale", int(bool(status["stale"])))
 
 
+def _database(out: _Output) -> None:
+    from .store import database_path, log_bytes, log_limit_bytes
+
+    try:
+        size = database_path().stat().st_size
+    except OSError:
+        size = 0
+    out.family("nvr_database_bytes", "gauge", "The size of the database file.")
+    out.sample("nvr_database_bytes", size)
+    out.family("nvr_database_log_bytes", "gauge", "The size of the database's write-ahead log file.")
+    out.sample("nvr_database_log_bytes", log_bytes())
+    out.family("nvr_database_log_limit_bytes", "gauge", "The size the write-ahead log file is brought back to once it can be reset.")
+    out.sample("nvr_database_log_limit_bytes", log_limit_bytes())
+
+
 def render(supervised: bool) -> str:
     """The Prometheus text exposition (format 0.0.4) of the NVR's state now."""
     out = _Output()
@@ -207,5 +222,6 @@ def render(supervised: bool) -> str:
     with connect() as db:
         _disks(out, db, scrub)
     _backup(out)
+    _database(out)
     logforward.describe(out)
     return "\n".join(out.lines) + "\n"

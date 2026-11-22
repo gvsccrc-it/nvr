@@ -91,5 +91,6 @@ Both yield a `Principal` (`id`, `username`, `role`, and for API tokens `scopes`/
 ## Database
 
 - `app.store.connect()` opens the SQLite database named by `NVR_DB_PATH` in autocommit mode, with foreign keys enforced and a 10 second busy timeout. The database runs in WAL mode, set when migrations are applied, so separate processes can read while one writes.
+- The write-ahead log file (`nvr.sqlite3-wal`) is brought back to at most `NVR_DB_LOG_LIMIT_MB` (128 by default) whenever it can be reset, and emptied after the nightly check and after each backup (`store.shrink_log`): a long read holds it open and it grows meanwhile. Its size is in `/metrics` (`nvr_database_log_bytes`).
 - Keep write transactions short. Use explicit `BEGIN IMMEDIATE … COMMIT` when several statements must apply together.
 - Schema changes are made only through versioned migrations in `app.migrations` (see the README's upgrade section). No module creates or alters tables at runtime.
