@@ -8,6 +8,7 @@ import json
 import errno
 import os
 import resource
+import time
 from datetime import datetime, timezone
 from unittest import mock
 
@@ -20,6 +21,16 @@ from tests import test_camera_archive
 
 def open_files() -> int:
     return len(os.listdir("/proc/self/fd"))
+
+
+def settles_at(most: int, seconds: float = 10.0) -> int:
+    """The number of open files once it is at most ``most``, or what it still is after ``seconds``. The application under test runs its
+    background loops in this process (the self-test opens the database, probes each volume with a temporary file), so one reading can
+    catch a handful of files that are open for a moment and are nothing to do with the deletion; files the deletion left open stay open."""
+    deadline = time.monotonic() + seconds
+    while open_files() > most and time.monotonic() < deadline:
+        time.sleep(0.05)
+    return open_files()
 
 
 class FootageDeleteCase(test_camera_archive.CameraArchiveTests):
@@ -60,7 +71,7 @@ class BatchTests(FootageDeleteCase):
         deleted = self.delete()
         self.assertEqual(deleted.status_code, 204, deleted.text)
         self.assertEqual(self.left(), (0, 0))
-        self.assertLessEqual(open_files(), before + 2)
+        self.assertLessEqual(settles_at(before + 2), before + 2)
         with connect() as db:
             audit = db.execute("SELECT details_json FROM audit_log WHERE action='delete_camera_footage'").fetchone()[0]
         self.assertEqual(json.loads(audit), {"segments_deleted": 700})
@@ -133,7 +144,7 @@ class FailureTests(FootageDeleteCase):
             with mock.patch.object(retention, "_exclusive_locks", locks):
                 refused = self.delete()
         self.assertEqual(refused.status_code, 503, refused.text)
-        self.assertEqual(open_files(), before, "every file opened for the delete was closed again")
+        self.assertLessEqual(settles_at(before), before, "every file opened for the delete was closed again")
         self.assertEqual(self.left(), (50, 50))  # The first batch went whole; nothing of the second did, rows or files
         again = self.delete()
         self.assertEqual(again.status_code, 204, again.text)
