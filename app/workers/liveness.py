@@ -70,6 +70,41 @@ def pulse(name: str) -> None:
     os.replace(temporary, path)
 
 
+START_LIMIT_SECONDS = float(os.environ.get("NVR_WORKER_START_SECONDS", "300"))  # How long a worker may take to finish starting
+
+
+def _starting_path(name: str) -> Path:
+    from app.workers import control_directory
+
+    return control_directory() / f"{name}.starting"
+
+
+def mark_starting(name: str) -> None:
+    """Say "this process is still starting": its first pulse comes only once its start-up has finished, and a start that has to wait for the
+    database, or walk a large recordings disk, can take longer than the 30 s after which a silent worker is taken for hung (#494)."""
+    try:
+        path = _starting_path(name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(str(os.getpid()), encoding="ascii")
+    except OSError:
+        logger.warning("%s worker could not write its start-up file", name)
+
+
+def mark_started(name: str) -> None:
+    try:
+        _starting_path(name).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def starting(name: str, pid: int | None) -> bool:
+    """Whether the worker with this process id has said it is starting and has not yet said it has started."""
+    try:
+        return pid is not None and _starting_path(name).read_text(encoding="ascii").strip() == str(pid)
+    except (OSError, UnicodeError):
+        return False
+
+
 def pulse_fresh(name: str, pid: int | None, now: float | None = None) -> bool:
     """Whether the worker with this process id has pulsed within ``STALE_AFTER``."""
     path = pulse_path(name)

@@ -21,6 +21,8 @@ The record is cleared each time the NVR starts. If the file is still damaged, it
 
 A busy database ("database is locked") is not damage and is reported differently.
 
+**The files beside the database.** `nvr.sqlite3-wal` is the write-ahead log: recent changes that are not yet in the main file. It is part of the database, so always copy or move it together with `nvr.sqlite3` (and `nvr.sqlite3-shm`). It can grow while a long read is running (the nightly check, a backup) and is brought back to at most 128 MB afterwards (`NVR_DB_LOG_LIMIT_MB`); the nightly self-test logs its size before and after.
+
 ## Why it happens
 
 SQLite files are damaged by what is under them, not by the NVR: a disk or virtual-disk fault, a host crash or power loss, a snapshot, clone or backup of a running VM taken without freezing the guest, a full host volume, or network storage. On Hyper-V, a checkpoint that is left in place makes the VM write to a growing differencing disk, which is slower and riskier than a normal disk. After a recovery, find the cause, or it will happen again.

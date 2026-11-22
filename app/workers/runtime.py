@@ -27,9 +27,14 @@ async def run(name: str, service: Service) -> None:
     loop = asyncio.get_running_loop()
     for signum in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(signum, stop.set)
+    began = loop.time()
+    liveness.mark_starting(name)  # Until the first pulse, the supervisor allows the start-up limit, not the 30 s of a running worker (#494)
     await service.start()
     server = await control.serve(name, service.handle)
     heartbeat = asyncio.create_task(liveness.heartbeat_forever(name), name=f"{name}-heartbeat")
+    await asyncio.sleep(0)  # The first pulse is written before the start-up file goes
+    liveness.mark_started(name)
+    logging.getLogger(f"nvr.{name}").info("The %s worker started in %.1f s", name, loop.time() - began)
     lag = asyncio.create_task(liveness.watch_loop_lag(name), name=f"{name}-loop-lag")
     try:
         await stop.wait()

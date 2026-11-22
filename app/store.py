@@ -42,7 +42,42 @@ def connect() -> sqlite3.Connection:
     db.execute("PRAGMA foreign_keys = ON")
     db.execute("PRAGMA busy_timeout = 10000")
     db.execute(f"PRAGMA synchronous = {_synchronous()}")
+    db.execute(f"PRAGMA journal_size_limit = {log_limit_bytes()}")
     return db
+
+
+def log_limit_bytes() -> int:
+    """The most the write-ahead log file is left at once it can be reset (NVR_DB_LOG_LIMIT_MB, 128 by default, 16 to 4096). With no limit
+    the file kept its largest-ever size: a long read (the nightly check, a backup) holds the log open, it grows with every write
+    meanwhile, and nothing made it smaller again while any process had the database open, which is always (#493)."""
+    try:
+        megabytes = int(os.environ.get("NVR_DB_LOG_LIMIT_MB", "128"))
+    except ValueError:
+        megabytes = 128
+    return max(16, min(megabytes, 4096)) << 20
+
+
+def log_bytes() -> int:
+    """The size of the write-ahead log file now."""
+    try:
+        return database_path().with_name(database_path().name + "-wal").stat().st_size
+    except OSError:
+        return 0
+
+
+def shrink_log() -> tuple[int, int]:
+    """Move everything in the write-ahead log into the database and empty the log file, if nothing is reading it; returns the file's size
+    before and after. Run after the long reads (the nightly check, a backup). Never raises for a busy database: the log is left as it is."""
+    before = log_bytes()
+    try:
+        db = sqlite3.connect(database_path(), timeout=2, isolation_level=None)
+        try:
+            db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        finally:
+            db.close()
+    except sqlite3.Error:
+        pass
+    return before, log_bytes()
 
 
 def has_row(db: sqlite3.Connection, sql: str, params: tuple[object, ...] = ()) -> bool:
