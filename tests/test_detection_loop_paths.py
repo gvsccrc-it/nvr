@@ -83,13 +83,18 @@ class LoopPathTests(SceneTestCase):
                 await asyncio.sleep(0)
         return during
 
-    def test_a_camera_kept_waiting_for_the_inference_slot_is_marked_delayed_but_not_late_while_warming_up(self):
+    def delayed_coverage(self) -> int:
+        with connect() as db:
+            return db.execute("SELECT COUNT(*) FROM ai_coverage WHERE camera_id=? AND state='delayed'", (self.camera_id,)).fetchone()[0]
+
+    def test_a_camera_kept_waiting_for_the_inference_slot_while_warming_up_is_neither_late_nor_delayed(self):
         self.record_states()
         self.analysed_at(4.0)
         late: list[str] = []
         self.run_loop(lambda manager: setattr(manager.capacity, "note_late", late.append), frames=3, during=self.hold_the_slot_before(0, 1.3))
-        self.assertIn(("delayed", "Inference was delayed while CPU capacity was occupied"), self.states())
         self.assertEqual(late, [])  # The first frames wait behind other cameras' model start-up: not a sign of too little capacity
+        self.assertNotIn("delayed", [state for state, _ in self.states()])
+        self.assertEqual(self.delayed_coverage(), 0)
         self.assertGreater(self.tracks(), 0)  # The frame was still analysed after the wait
 
     def test_after_warming_up_a_camera_kept_waiting_is_counted_as_late(self):
@@ -99,7 +104,15 @@ class LoopPathTests(SceneTestCase):
         self.run_loop(lambda manager: setattr(manager.capacity, "note_late", late.append), frames=detection.WARM_UP_FRAMES + 2,
                       during=self.hold_the_slot_before(detection.WARM_UP_FRAMES, 1.3))
         self.assertEqual(late, [self.camera_id])
-        self.assertIn(("delayed", "Inference was delayed while CPU capacity was occupied"), self.states())
+        # One late frame is counted for the capacity controller at once, but the camera is recorded as delayed only when it stays late (#511).
+        self.assertNotIn("delayed", [state for state, _ in self.states()])
+        self.assertEqual(self.delayed_coverage(), 0)
+
+    def test_a_camera_that_stays_late_is_recorded_as_delayed(self):
+        self.analysed_at(4.0)
+        with patch.object(detection, "LATE_FOR_SECONDS", 0.0):
+            self.run_loop(lambda manager: None, frames=detection.WARM_UP_FRAMES + 2, during=self.hold_the_slot_before(detection.WARM_UP_FRAMES, 1.3))
+        self.assertEqual(self.delayed_coverage(), 1)
 
     # --- the face watch ----------------------------------------------------------------------------------------------------------------
 
