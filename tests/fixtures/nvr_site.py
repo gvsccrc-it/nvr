@@ -12,7 +12,6 @@ import time
 from pathlib import Path
 
 import httpx
-from tests.test_support import setup_code
 
 ROOT = Path(__file__).resolve().parents[2]
 PASSWORD = "site-admin-password-1234"
@@ -71,7 +70,11 @@ class NvrSite:
     def admin(self) -> httpx.Client:
         if self._admin is None:
             client = httpx.Client(base_url=self.url, timeout=10)
-            created = client.post("/api/setup/admin", json={"username": f"{self.name}-admin", "password": PASSWORD, "setup_code": setup_code()})
+            # The site is its own process with its own files: its one-time setup code (#542) is made when it is first asked whether setup is
+            # needed, and kept beside its credential key, where an installer would find it.
+            client.get("/api/setup/status")
+            code = (self.base / "setup-code").read_text(encoding="utf-8").strip()
+            created = client.post("/api/setup/admin", json={"username": f"{self.name}-admin", "password": PASSWORD, "setup_code": code})
             assert created.status_code == 201, created.text
             self._admin = client
         return self._admin
