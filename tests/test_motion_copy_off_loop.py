@@ -8,6 +8,7 @@ disk, and the loop is watched to keep turning."""
 from __future__ import annotations
 
 import asyncio
+import gc
 import os
 import shutil
 import tempfile
@@ -44,7 +45,15 @@ def longest_stall(work) -> float:
             await ticker
         return longest
 
-    return asyncio.run(body())
+    # The garbage collector is run first and kept off while this is measured, as tests/loop_stall.py does: a collection of what earlier
+    # tests left behind pauses the whole process, not the loop alone, and was counted as a stall (0.29 s on a CI runner, once the modules
+    # that run before this one changed).
+    gc.collect()
+    gc.disable()
+    try:
+        return asyncio.run(body())
+    finally:
+        gc.enable()
 
 
 class MotionCopyOffLoopTests(unittest.TestCase):
