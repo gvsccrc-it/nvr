@@ -14,7 +14,7 @@ The age is separate from retention: retention still deletes footage when its pol
 ## How a move goes
 
 1. Pick the oldest eligible segments (older than the age, not being recorded, not already moved), a few at a time, one at a time, rate limited.
-2. **Skip** a segment that is **held** or is in a **queued or running export**; both stay hot until released. A segment whose footage no longer matches its signed chain is **never moved** (it is shown in the tier's last error and left alone).
+2. **Skip** a segment that is **held** or is in a **queued or running export**; both stay hot until released. They are left out when the pass picks its segments, so any number of them at the front never stops the footage behind them from moving. A segment whose **file is missing** from its volume is remembered, looked for again an hour later, and counted in the tier's status (`missing_files`); it does not hold up the others either. A segment whose footage no longer matches its signed chain is **never moved** (it is shown in the tier's last error and left alone).
 3. Hash the hot file, **copy** it to the tier (to a partial file or a signed upload), **read the copy back** and check its SHA-256 and size against the original. A bucket also refuses an upload whose body is not the file the request was signed for.
 4. Check again that the segment is not held or exported, then switch its row to the tier. It keeps its id and path, which is what the signed chain, holds, exports and cases refer to.
 5. Delete the hot file, unless someone is playing it; a later pass removes it once it is released.

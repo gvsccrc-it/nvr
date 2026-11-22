@@ -377,6 +377,65 @@ class LocalTierTests(TierCase):
         self.assertIsNone(self.row(two))
 
 
+class FrontOfTheQueueTests(TierCase):
+    """#485: twenty held or missing segments at the front stopped all tiering for a volume."""
+
+    def setUp(self):
+        super().setUp()
+        tier = self.local_tier()
+        self.policy(tier)
+        # Sixty segments past the policy's age, oldest first.
+        self.segments = [self.segment(self.d1, age_days=100 - index)[0] for index in range(60)]
+
+    def moved(self) -> set[int]:
+        with connect() as db:
+            return {row[0] for row in db.execute("SELECT id FROM recording_segments WHERE tier_id IS NOT NULL")}
+
+    def test_held_segments_at_the_front_do_not_stop_the_ones_behind_and_move_once_released(self):
+        held = self.segments[:20]
+        with connect() as db:
+            for segment_id in held:
+                db.execute("INSERT INTO recording_holds(id,segment_id,camera_id) VALUES(?,?,?)", (str(uuid.uuid4()), segment_id, self.d1))
+        first = tiering.run_once()
+        self.assertEqual(first, {"moved": 20, "held": 20})  # A bounded pass, spent on what can move; the held ones are counted, not picked
+        self.assertEqual(self.moved(), set(self.segments[20:40]))
+        self.assertEqual(tiering.run_once(), {"moved": 20, "held": 20})
+        self.assertEqual(self.moved(), set(self.segments[20:]))
+        self.assertEqual(tiering.run_once(), {"held": 20})  # Only the held ones are left: nothing to do
+        with connect() as db:
+            db.execute("UPDATE recording_holds SET released_at=?", (datetime.now(timezone.utc).isoformat(),))
+        self.assertEqual(tiering.run_once(), {"moved": 20})
+        self.assertEqual(self.moved(), set(self.segments))
+
+    def test_segments_whose_file_is_missing_are_remembered_reported_and_tried_again_later(self):
+        from app.recording import recordings_path as root
+
+        missing = self.segments[:20]
+        kept: dict[int, bytes] = {}
+        with connect() as db:
+            for segment_id in missing:
+                path = root() / db.execute("SELECT relative_path FROM recording_segments WHERE id=?", (segment_id,)).fetchone()[0]
+                kept[segment_id] = path.read_bytes()
+                path.unlink()
+        now = datetime.now(timezone.utc)
+        self.assertEqual(tiering.run_once(now), {"missing": 20})
+        self.assertEqual(tiering.run_once(now + timedelta(minutes=1)), {"moved": 20})  # Not picked again: the ones behind move
+        self.assertEqual(tiering.run_once(now + timedelta(minutes=10)), {"moved": 20})
+        self.assertEqual(self.moved(), set(self.segments[20:]))
+        status = self.admin.get("/api/admin/tiering").json()
+        self.assertEqual([tier["missing_files"] for tier in status["tiers"]], [20])  # Reported
+        # An hour on they are looked for again; one whose file has come back (its disk was away) moves, the rest wait another hour.
+        back = missing[0]
+        with connect() as db:
+            path = root() / db.execute("SELECT relative_path FROM recording_segments WHERE id=?", (back,)).fetchone()[0]
+        path.write_bytes(kept[back])
+        later = now + tiering.MISSING_RETRY + timedelta(minutes=1)
+        self.assertEqual(tiering.run_once(later), {"moved": 1, "missing": 19})
+        self.assertIn(back, self.moved())
+        self.assertEqual(self.admin.get("/api/admin/tiering").json()["tiers"][0]["missing_files"], 19)
+        self.assertEqual(tiering.run_once(later + timedelta(minutes=1)), {})
+
+
 class ObjectStoreTierTests(TierCase):
     def test_old_footage_moves_to_a_bucket_and_plays_back_through_the_server(self):
         segment_id, payload = self.segment(self.d1, 40)
