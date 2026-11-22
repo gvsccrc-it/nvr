@@ -79,6 +79,8 @@ class Occupancy(BaseModel):
     zone: Zone | None = None
     limit: int = Field(ge=1, le=1000)
     for_seconds: int = Field(default=10, ge=1, le=3600)
+    # While a stretch goes on, a note on its alarm and a notification this often (#513). Off unless set; never more often than every 15 minutes.
+    remind_minutes: int | None = Field(default=None, ge=15, le=1440)
 
 
 class Face(BaseModel):

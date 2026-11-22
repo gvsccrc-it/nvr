@@ -42,6 +42,7 @@ import logging
 import math
 import sqlite3
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -386,27 +387,125 @@ def _camera_groups(db: sqlite3.Connection, camera_id: str) -> set[str]:
     return {row[0] for row in db.execute(CAMERA_GROUPS_SQL, (camera_id, camera_id))}
 
 
-def _occupancy_moments(db: sqlite3.Connection, rules: list[Rule], after_id: int, up_to_id: int) -> list[tuple[Rule, str, datetime]]:
-    """Where an occupancy rule's count has stayed over its limit, on the cameras that had new detections in this pass."""
+class _Counting:
+    """One occupancy rule's running count on one camera (``occupancy.Stretch``), with what it was built for and when it was last fed."""
+    __slots__ = ("fingerprint", "stretch", "fed_at")
+
+    def __init__(self, fingerprint: str, stretch: occupancy.Stretch) -> None:
+        self.fingerprint, self.stretch, self.fed_at = fingerprint, stretch, time.monotonic()
+
+
+_counting: dict[tuple[str, str, str], _Counting] = {}  # (database file, rule, camera): kept in memory, rebuilt from the stored detections after a restart
+
+
+def _open_stretch(db: sqlite3.Connection, rule_id: str, camera_id: str) -> sqlite3.Row | None:
+    """The rule's last occupancy event on the camera, if its stretch has not been recorded as ended."""
+    row = db.execute("SELECT id,occurred_at,ended_at FROM rule_events WHERE rule_id=? AND camera_id=? AND condition_type='occupancy' ORDER BY occurred_at DESC LIMIT 1",
+                     (rule_id, camera_id)).fetchone()
+    return row if row is not None and row["ended_at"] is None else None
+
+
+def _begin_counting(db: sqlite3.Connection, rule: Rule, camera_id: str, latest: datetime, up_to_id: int) -> tuple[occupancy.Stretch, list[tuple[str, datetime]]]:
+    """A count started from the stored detections of the rule's set time (the worker has restarted, the rule was edited, or the camera
+    has had nothing for longer than that). A stretch the rule already reported and never saw end is carried on, not reported again."""
+    stretch = occupancy.Stretch(rule.condition)
+    start, _ = occupancy.window_for(rule.condition, latest)
+    rows, stretch.newest = occupancy.rows_since(db, camera_id, rule.classes, start.isoformat(), None, up_to_id)
+    stretch.add(rows)
+    first = min(stretch.by_second, default=None)
+    events = stretch.advance(int(latest.timestamp()))
+    if _open_stretch(db, rule.id, camera_id) is None:
+        return stretch, events
+    if stretch.streak_start is not None and first is not None and stretch.streak_start <= first:
+        # Over the limit for as far back as was read: the stretch that was reported is still going.
+        stretch.issued = stretch.streak_start
+        stretch.reminded = stretch.settled
+        return stretch, [event for event in events if event[0] != "over"]
+    return stretch, [("ended", latest), *events]  # It dropped back while nobody was counting
+
+
+def _occupancy_events(db: sqlite3.Connection, database: str, rules: list[Rule], after_id: int, up_to_id: int) -> list[tuple[Rule, str, str, datetime]]:
+    """What each occupancy rule's count has come to on the cameras that had new detections in this pass: (rule, camera, what, when), where
+    what is "over" (a stretch has lasted the set time), "reminder" or "ended". A camera with nothing new is not read at all (#513)."""
     watching = [rule for rule in rules if rule.condition_type == "occupancy"]
     if not watching:
+        _counting.clear()
         return []
-    newest = {row["camera_id"]: _parse(row["newest"]) for row in db.execute(
-        "SELECT camera_id,MAX(detected_at) AS newest FROM ai_detections WHERE id>? AND id<=? GROUP BY camera_id", (after_id, up_to_id))}
-    moments = []
-    for camera_id, latest in newest.items():
+    newest = {row["camera_id"]: (_parse(row["newest"]), row["oldest"]) for row in db.execute(
+        "SELECT camera_id,MAX(detected_at) AS newest,MIN(detected_at) AS oldest FROM ai_detections WHERE id>? AND id<=? GROUP BY camera_id", (after_id, up_to_id))}
+    events: list[tuple[Rule, str, str, datetime]] = []
+    for camera_id, (latest, oldest) in newest.items():
         groups = _camera_groups(db, camera_id)
         for rule in watching:
             if not rule.watches_camera(camera_id, groups):
                 continue
+            key = (database, rule.id, camera_id)
             try:
-                start, end = occupancy.window_for(rule.condition, latest)
-                for at in occupancy.exceedances(occupancy.window_rows(db, camera_id, rule.classes, start, end), rule.condition):
-                    if at >= rule.active_from and rule.scheduled(at):
-                        moments.append((rule, camera_id, at))
+                fingerprint = _fingerprint(rule) + json.dumps(sorted(rule.classes))
+                counting = _counting.get(key)
+                start, _ = occupancy.window_for(rule.condition, latest)
+                # Started again when what it has no longer follows on: nothing for longer than the set time, or detections stored out of
+                # the order they happened (footage analysed late), which a running count cannot take in.
+                if (counting is None or counting.fingerprint != fingerprint or counting.stretch.newest is None or _parse(counting.stretch.newest[0]) < start
+                        or oldest < counting.stretch.newest[0]):
+                    stretch, found = _begin_counting(db, rule, camera_id, latest, up_to_id)
+                    counting = _counting[key] = _Counting(fingerprint, stretch)
+                else:
+                    rows, counting.stretch.newest = occupancy.rows_since(db, camera_id, rule.classes, counting.stretch.newest[0], counting.stretch.newest, up_to_id)
+                    counting.stretch.add(rows)
+                    found = counting.stretch.advance(int(latest.timestamp()))
+                counting.fed_at = time.monotonic()
+                events.extend((rule, camera_id, what, at) for what, at in found)
             except Exception:  # noqa: BLE001 - one unreadable rule must not stop the others
                 logger.exception("Rule %s could not be evaluated; it is skipped", rule.id)
-    return moments
+                _counting.pop(key, None)
+    return events
+
+
+def _forget_counts(database: str) -> None:
+    for key in [key for key in _counting if key[0] == database]:
+        del _counting[key]
+
+
+def _occupancy_gone_quiet(database: str, rules: list[Rule] | None) -> list[tuple[Rule, str, str, datetime]]:
+    """Reported stretches on cameras that have had no detection at all for ``occupancy.END_QUIET`` seconds: they have ended. In memory
+    only; ``rules`` is None when the caller has not loaded them (nothing new was stored), and then they are found by id."""
+    quiet = [(key, counting) for key, counting in _counting.items() if key[0] == database and time.monotonic() - counting.fed_at > occupancy.END_QUIET]
+    events = []
+    for key, counting in quiet:
+        del _counting[key]
+        for what, at in counting.stretch.quiet():
+            rule = next((rule for rule in rules or () if rule.id == key[1]), None)
+            events.append((rule if rule is not None else key[1], key[2], what, at))
+    return events  # type: ignore[return-value]
+
+
+def _record_occupancy(db: sqlite3.Connection, rule: Rule | str, camera_id: str, what: str, at: datetime) -> None:
+    """Write one thing an occupancy count came to, inside the caller's transaction."""
+    from . import alarms
+
+    rule_id = rule if isinstance(rule, str) else rule.id
+    if what == "over":
+        if isinstance(rule, str) or at < rule.active_from or not rule.scheduled(at):
+            return
+        cooldown = max(rule.cooldown, occupancy.MIN_COOLDOWN)
+        if db.execute("SELECT 1 FROM rule_events WHERE rule_id=? AND camera_id=? AND occurred_at>? AND occurred_at<? LIMIT 1",
+                      (rule.id, camera_id, (at - cooldown).isoformat(), (at + cooldown).isoformat())).fetchone():
+            return
+        event_id = str(uuid.uuid4())
+        box = json.dumps(rule.condition.get("zone") or occupancy.FULL_FRAME, separators=(",", ":"))
+        if db.execute("INSERT OR IGNORE INTO rule_events(id,rule_id,rule_name,camera_id,track_id,detection_id,label,condition_type,occurred_at,box_json) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                      (event_id, rule.id, rule.name, camera_id, f"occupancy-{rule.id}-{int(at.timestamp())}", None, "occupancy", "occupancy", at.isoformat(), box)).rowcount:
+            create_alarm(db, event_id)
+        return
+    stretch = _open_stretch(db, rule_id, camera_id)
+    if stretch is None:
+        return  # Its report was held back (the rule's quiet time, or its schedule): there is no alarm to add to
+    if what == "ended":
+        db.execute("UPDATE rule_events SET ended_at=? WHERE id=?", (at.isoformat(), stretch["id"]))
+        alarms.stretch_ended(db, stretch["id"], at)
+    elif what == "reminder" and not isinstance(rule, str):
+        alarms.remind(db, stretch["id"], at, _parse(stretch["occurred_at"]))
 
 
 def _replay_occupancy(rule: Rule, start: datetime, end: datetime) -> list[dict[str, Any]]:
@@ -438,11 +537,22 @@ def process_pending(batch_size: int = BATCH_SIZE) -> int:
     with connect() as db:
         cursor = db.execute("SELECT last_detection_id FROM rules_cursor WHERE singleton_id=1").fetchone()[0]
         fresh = db.execute("SELECT id,track_id FROM ai_detections WHERE id>? ORDER BY id LIMIT ?", (cursor, batch_size)).fetchall()
+        database = str(db.execute("PRAGMA database_list").fetchone()[2])  # Followers and occupancy counts are kept per database file
         if not fresh:
+            # Nothing new to evaluate. A crowd that has left a camera altogether stores nothing either: its stretch is ended here (#513).
+            quiet = _occupancy_gone_quiet(database, None)
+            if quiet:
+                db.execute("BEGIN IMMEDIATE")
+                try:
+                    for rule, camera_id, what, at in quiet:
+                        _record_occupancy(db, rule, camera_id, what, at)
+                except BaseException:
+                    db.execute("ROLLBACK")
+                    raise
+                db.execute("COMMIT")
             return 0
         rules = load_rules(db)
         pending: list[tuple[Rule, sqlite3.Row, list[PathPoint]]] = []
-        database = str(db.execute("PRAGMA database_list").fetchone()[2])  # Followers are kept per database file
         for track_id in dict.fromkeys(row["track_id"] for row in fresh) if rules else ():
             track = db.execute("SELECT id,camera_id,label FROM ai_tracks WHERE id=?", (track_id,)).fetchone()
             if track is None:
@@ -455,12 +565,14 @@ def process_pending(batch_size: int = BATCH_SIZE) -> int:
             for rule, moments in _track_moments(db, database, track, watching):
                 pending.append((rule, track, moments))
 
-        occupied = _occupancy_moments(db, rules, cursor, fresh[-1]["id"])
+        occupied = _occupancy_events(db, database, rules, cursor, fresh[-1]["id"])
+        occupied += _occupancy_gone_quiet(database, rules)
 
         db.execute("BEGIN IMMEDIATE")
         try:
             if db.execute("SELECT last_detection_id FROM rules_cursor WHERE singleton_id=1").fetchone()[0] != cursor:
                 db.execute("ROLLBACK")
+                _forget_counts(database)
                 return 0  # another pass already took this batch
             for rule, track, moments in pending:
                 def cooled(at: datetime, rule: Rule = rule, camera_id: str = track["camera_id"]) -> bool:
@@ -479,19 +591,12 @@ def process_pending(batch_size: int = BATCH_SIZE) -> int:
                     ).rowcount
                     if inserted:
                         create_alarm(db, event_id)
-            for rule, camera_id, at in occupied:
-                cooldown = max(rule.cooldown, occupancy.MIN_COOLDOWN)
-                if db.execute("SELECT 1 FROM rule_events WHERE rule_id=? AND camera_id=? AND occurred_at>? AND occurred_at<? LIMIT 1",
-                              (rule.id, camera_id, (at - cooldown).isoformat(), (at + cooldown).isoformat())).fetchone():
-                    continue
-                event_id = str(uuid.uuid4())
-                box = json.dumps(rule.condition.get("zone") or occupancy.FULL_FRAME, separators=(",", ":"))
-                if db.execute("INSERT OR IGNORE INTO rule_events(id,rule_id,rule_name,camera_id,track_id,detection_id,label,condition_type,occurred_at,box_json) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                               (event_id, rule.id, rule.name, camera_id, f"occupancy-{rule.id}-{int(at.timestamp())}", None, "occupancy", "occupancy", at.isoformat(), box)).rowcount:
-                    create_alarm(db, event_id)
+            for rule, camera_id, what, at in occupied:
+                _record_occupancy(db, rule, camera_id, what, at)
             db.execute("UPDATE rules_cursor SET last_detection_id=? WHERE singleton_id=1", (fresh[-1]["id"],))
         except BaseException:
             db.execute("ROLLBACK")
+            _forget_counts(database)  # What the counts came to was not written: they start again from what is stored
             raise
         db.execute("COMMIT")
     return len(fresh)

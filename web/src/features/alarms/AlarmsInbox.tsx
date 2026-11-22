@@ -184,7 +184,9 @@ function AlarmDetailView({ id, onBack, onNavigate }: { id: string; onBack: () =>
         <ol className="plain-list">
           {data.history.map(entry => (
             <li key={`${entry.occurred_at}-${entry.action}`}>{ACTION_LABEL[entry.action] ?? entry.action}{entry.actor ? ` by ${entry.actor}` : ""} · {when(entry.occurred_at)}
-              {typeof entry.details.assigned_to === "string" ? ` · to ${entry.details.assigned_to}` : ""}</li>
+              {typeof entry.details.assigned_to === "string" ? ` · to ${entry.details.assigned_to}` : ""}
+              {entry.action === "ended" && typeof entry.details.ended_at === "string" ? ` · at ${when(entry.details.ended_at)}` : ""}
+              {entry.action === "reminded" && typeof entry.details.minutes === "number" ? ` · after ${entry.details.minutes} minutes` : ""}</li>
           ))}
         </ol>
       </section>

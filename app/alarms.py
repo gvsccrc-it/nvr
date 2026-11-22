@@ -101,6 +101,28 @@ def create_alarm(db: sqlite3.Connection, rule_event_id: str) -> str:
     return alarm_id
 
 
+def stretch_ended(db: sqlite3.Connection, rule_event_id: str, at: datetime) -> None:
+    """An occupancy alarm's count has dropped back: the alarm records when (#513). Inside the caller's transaction; nothing is sent."""
+    alarm = db.execute("SELECT id FROM alarms WHERE rule_event_id=?", (rule_event_id,)).fetchone()
+    if alarm is not None:
+        _record(db, alarm["id"], None, "ended", {"ended_at": at.astimezone(timezone.utc).isoformat()})
+        db.execute("UPDATE alarms SET updated_at=? WHERE id=?", (_now(), alarm["id"]))
+
+
+def remind(db: sqlite3.Connection, rule_event_id: str, at: datetime, since: datetime) -> None:
+    """An occupancy stretch is still going after the rule's reminder interval: a note on its alarm and a notification to the devices that
+    want it. Not a new alarm, and nothing for an alarm that has been resolved or was raised during maintenance."""
+    from .push import queue_reminder
+
+    alarm = db.execute("SELECT id,state,maintenance_window_id FROM alarms WHERE rule_event_id=?", (rule_event_id,)).fetchone()
+    if alarm is None or alarm["state"] == "resolved" or alarm["maintenance_window_id"] is not None:
+        return
+    minutes = max(1, round((at - since).total_seconds() / 60))
+    _record(db, alarm["id"], None, "reminded", {"at": at.astimezone(timezone.utc).isoformat(), "minutes": minutes})
+    db.execute("UPDATE alarms SET updated_at=? WHERE id=?", (_now(), alarm["id"]))
+    queue_reminder(db, alarm["id"], f"Still over the limit after {minutes} minute{'' if minutes == 1 else 's'}")
+
+
 def _open_alarm(db: sqlite3.Connection, alarm_id: str) -> sqlite3.Row:
     alarm = db.execute("SELECT * FROM alarms WHERE id=?", (alarm_id,)).fetchone()
     if alarm is None:

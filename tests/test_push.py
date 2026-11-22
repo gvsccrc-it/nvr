@@ -174,6 +174,33 @@ class PushTests(SceneTestCase):
         self.assertEqual(thumbnail.headers["content-type"], "image/jpeg")
         self.assertEqual(self.client.get("/api/push/preferences").json()["devices"][0]["device_label"], "phone")
 
+    def test_a_reminder_sends_the_alarms_notification_again_and_is_a_note_not_a_new_alarm(self):
+        # #513: an occupancy stretch that goes on can remind. The reminder goes to the devices that want the alarm, on the same alarm.
+        from datetime import datetime, timedelta
+
+        from app import alarms
+
+        self.subscribe()
+        alarm_id = self.raise_alarm()
+        self.record_scene_footage()
+        self.assertEqual(push.deliver_due(), ["sent"])
+        with connect() as db:
+            event = db.execute("SELECT rule_event_id,occurred_at FROM alarms WHERE id=?", (alarm_id,)).fetchone()
+            raised = datetime.fromisoformat(event["occurred_at"])
+            alarms.remind(db, event["rule_event_id"], raised + timedelta(minutes=30), raised)
+        self.assertEqual(push.deliver_due(), ["sent"])
+        self.assertEqual(len(self.service.requests), 2)
+        message = self.device.decrypt(self.service.requests[1]["body"])
+        self.assertEqual((message["alarm_id"], message["body"]), (alarm_id, "Still over the limit after 30 minutes"))
+        detail = self.client.get(f"/api/alarms/{alarm_id}").json()
+        self.assertEqual([entry["action"] for entry in detail["history"]], ["created", "reminded"])
+        self.assertEqual(len(self.client.get("/api/alarms").json()["alarms"]), 1)
+        # A resolved alarm is not reminded about.
+        self.assertEqual(self.client.post(f"/api/alarms/{alarm_id}/resolve", json={"note": "Seen to"}).status_code, 200)
+        with connect() as db:
+            alarms.remind(db, event["rule_event_id"], raised + timedelta(minutes=60), raised)
+        self.assertEqual(push.deliver_due(), [])
+
     def test_a_fresh_alarm_has_a_thumbnail_before_its_recording_is_indexed(self):
         # Recorded segments are indexed when they close, up to a minute after the alarm; the
         # object's first analysed frame stands in until then.
