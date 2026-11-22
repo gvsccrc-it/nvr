@@ -32,6 +32,8 @@ class TalkSettingsRequest(BaseModel):
     enabled: bool
     roles: list[Literal["administrator", "operator"]] = Field(default_factory=lambda: ["administrator"], max_length=len(talk.ROLES))
     record_audio: bool = False
+    # Answer a request for Basic sign-in over plain RTSP (#476). Left out, it stays as it is.
+    allow_unprotected_sign_in: bool | None = None
 
 
 def _camera_row(camera_id: str, user: Principal):
@@ -49,7 +51,7 @@ def _visible_camera(db, camera_id: str, user: Principal):
 def _view(user: Principal, config: dict[str, object], camera_id: str) -> dict[str, object]:
     out: dict[str, object] = {"enabled": config["enabled"], "allowed": _may(user, config), "talking": talk.talkers.holder(camera_id)}
     if user.is_administrator:
-        out |= {"roles": config["roles"], "record_audio": config["record_audio"]}
+        out |= {"roles": config["roles"], "record_audio": config["record_audio"], "allow_unprotected_sign_in": config["allow_basic"]}
     return out
 
 
@@ -87,10 +89,16 @@ def put_talk(camera_id: str, payload: TalkSettingsRequest, user: Administrator) 
         db.execute("BEGIN IMMEDIATE")
         try:
             _visible_camera(db, camera_id, user)
-            db.execute("INSERT INTO camera_talk(camera_id,enabled,roles_json,record_audio) VALUES(?,?,?,?) ON CONFLICT(camera_id) DO UPDATE SET "
-                       "enabled=excluded.enabled,roles_json=excluded.roles_json,record_audio=excluded.record_audio,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')",
-                       (camera_id, int(payload.enabled), json.dumps(roles), int(payload.record_audio)))
-            record(db, user.id, "camera_talk_changed", "camera", camera_id, enabled=payload.enabled, roles=roles, record_audio=payload.record_audio)
+            was = bool(talk.settings(db, camera_id)["allow_basic"])
+            allow_basic = was if payload.allow_unprotected_sign_in is None else payload.allow_unprotected_sign_in
+            db.execute("INSERT INTO camera_talk(camera_id,enabled,roles_json,record_audio,allow_basic) VALUES(?,?,?,?,?) ON CONFLICT(camera_id) DO UPDATE SET "
+                       "enabled=excluded.enabled,roles_json=excluded.roles_json,record_audio=excluded.record_audio,allow_basic=excluded.allow_basic,"
+                       "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')",
+                       (camera_id, int(payload.enabled), json.dumps(roles), int(payload.record_audio), int(allow_basic)))
+            record(db, user.id, "camera_talk_changed", "camera", camera_id, enabled=payload.enabled, roles=roles, record_audio=payload.record_audio,
+                   allow_unprotected_sign_in=allow_basic)
+            if allow_basic != was:  # Its own row in the security log: this lets the camera's password go unprotected (#476)
+                record(db, user.id, "camera_talk_unprotected_sign_in_allowed" if allow_basic else "camera_talk_unprotected_sign_in_refused", "camera", camera_id)
             db.execute("COMMIT")
         except BaseException:
             db.execute("ROLLBACK")
@@ -178,7 +186,7 @@ async def talk_stream(websocket: WebSocket, camera_id: str) -> None:
         try:
             url = decrypt(row["stream_url_ciphertext"])
             safe_stream_url(url)
-            backchannel = talk.RtspBackchannel(url)
+            backchannel = talk.RtspBackchannel(url, allow_basic=bool(config["allow_basic"]))
             track = await backchannel.connect()
             codec = track.codec
         except talk.BackchannelUnsupported as exc:

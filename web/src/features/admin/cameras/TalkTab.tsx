@@ -6,11 +6,11 @@ import { TabFooter } from "../TabFooter";
 import { failureText, useTabDraft } from "../tabDraft";
 
 type Role = "administrator" | "operator";
-interface TalkSettings { enabled: boolean; roles: Role[]; record_audio: boolean }
+interface TalkSettings { enabled: boolean; roles: Role[]; record_audio: boolean; allow_unprotected_sign_in: boolean }
 interface TalkSession { id: string; username: string; started_at: string; seconds: number | null; ended_reason: string | null; has_audio: boolean }
 
 const ROLE_LABEL: Record<Role, string> = { administrator: "Administrators", operator: "Operators" };
-const DEFAULTS: TalkSettings = { enabled: false, roles: ["administrator"], record_audio: false };
+const DEFAULTS: TalkSettings = { enabled: false, roles: ["administrator"], record_audio: false, allow_unprotected_sign_in: false };
 const REASON: Record<string, string> = {
   released: "Let go", idle: "Went quiet", limit: "Reached the time limit", unsupported: "Camera has no usable speaker", camera_failed: "Camera stopped answering", bad_audio: "Bad audio",
 };
@@ -28,7 +28,7 @@ export function TalkTab({ camera, admin }: { camera: Camera; admin: boolean }) {
     editable: admin,
     save: async (draft, saved) => {
       try {
-        const next = await api<TalkSettings>(base, { method: "PUT", body: { enabled: draft.enabled, roles: draft.roles, record_audio: draft.record_audio } });
+        const next = await api<TalkSettings>(base, { method: "PUT", body: { enabled: draft.enabled, roles: draft.roles, record_audio: draft.record_audio, allow_unprotected_sign_in: draft.allow_unprotected_sign_in } });
         client.setQueryData(queryKey, next);
         void client.invalidateQueries({ queryKey: ["talk"] });
         return { ok: true, base: { ...DEFAULTS, ...next }, outcome: { tone: "good", text: next.enabled ? "Saved. Talk is on for this camera." : "Saved. Talk is off for this camera." } };
@@ -61,6 +61,14 @@ export function TalkTab({ camera, admin }: { camera: Camera; admin: boolean }) {
             </fieldset>
             <label className="field field-check"><input type="checkbox" checked={draft.record_audio} onChange={event => tab.change({ record_audio: event.target.checked })} /><span>Keep the audio of each talk (30 days)</span></label>
             <p className="muted field-hint">Off by default: only who talked, when and for how long is kept.</p>
+            <label className="field field-check">
+              <input type="checkbox" checked={draft.allow_unprotected_sign_in} onChange={event => tab.change({ allow_unprotected_sign_in: event.target.checked })} />
+              <span>Allow unprotected sign-in for two-way audio</span>
+            </label>
+            <p className="muted field-hint">
+              Off by default. Only for an older camera that can do nothing else: when it asks, its password is sent merely encoded (Basic sign-in over plain RTSP), and anything
+              answering at its address could read it. The change is in the security log, and the camera is listed on the hardening page while this is on.
+            </p>
           </>
         ) : null}
       </fieldset>
