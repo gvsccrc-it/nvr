@@ -65,10 +65,11 @@ class Case(unittest.TestCase):
 
 class ListTests(Case):
     def test_an_incident_with_ten_thousand_events_is_listed_with_its_newest_few(self):
-        self.incident("flapping", "c1", events=10_000)
+        flapping = self.incident("flapping", "c1", events=10_000)
         response = self.client().get("/api/incidents?state=active")
         self.assertLess(len(response.content), 5_000)  # Was about 1 MB
-        incident = response.json()["incidents"][0]
+        # By its id: the app the test starts can raise incidents of its own (in CI, one with a single event came first)
+        incident = next(item for item in response.json()["incidents"] if item["id"] == flapping)
         self.assertEqual(incident["events_total"], 10_000)
         self.assertEqual([event["details"]["n"] for event in incident["events"]], [9995, 9996, 9997, 9998, 9999])  # Newest, oldest first
 
@@ -152,7 +153,7 @@ class PruneTests(Case):
         self.assertEqual((view["events_total"], view["events_removed"]), (5_000, 4_000))
         self.assertIsNotNone(view["events_removed_before"])
         self.assertEqual(len(view["events"]), 500)
-        listed = self.client().get("/api/incidents").json()["incidents"][0]
+        listed = next(item for item in self.client().get("/api/incidents").json()["incidents"] if item["id"] == flapping)
         self.assertEqual(listed["events_total"], 5_000)
 
     def test_a_pass_with_nothing_due_takes_no_write_lock(self):
