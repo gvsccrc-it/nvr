@@ -265,13 +265,37 @@ def delete_archived_camera_footage(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+# The most recordings one answer lists for a range of dates (#497). A range of years used to return every recording of the camera in one
+# answer built in memory, each with two queries for its hold. Past this, the answer carries ``next``: ask again with it as ``after``.
+SEGMENT_PAGE = 1000
+_SEGMENT_FIELDS = "s.id,s.starts_at,s.ends_at,s.size_bytes,s.unavailable_at,s.unavailable_reason"
+
+
+def _active_holds(db, segment_ids: list[int]) -> dict[int, tuple[int, str | None]]:
+    """The newest active hold of each of these recordings, in one query: its id and when it expires."""
+    if not segment_ids:
+        return {}
+    found: dict[int, tuple[int, str | None, str]] = {}
+    for start in range(0, len(segment_ids), 500):
+        part = segment_ids[start:start + 500]
+        for row in db.execute(
+                f"SELECT segment_id,id,expires_at,created_at FROM recording_holds WHERE segment_id IN ({','.join('?' * len(part))}) AND released_at IS NULL "
+                "AND (expires_at IS NULL OR expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now'))", part):
+            kept = found.get(row["segment_id"])
+            if kept is None or (row["created_at"], row["id"]) > (kept[2], kept[0]):
+                found[row["segment_id"]] = (row["id"], row["expires_at"], row["created_at"])
+    return {segment_id: (hold[0], hold[1]) for segment_id, hold in found.items()}
+
+
 @router.get("/api/cameras/{camera_id}/segments")
 def list_camera_segments(
     camera_id: str,
     _: CurrentUser,
     start: datetime | None = Query(default=None, alias="from"),
     end: datetime | None = Query(default=None, alias="to"),
+    after: str | None = Query(default=None, max_length=80, description="The ``next`` of the previous answer, for the rest of a long range"),
 ) -> dict[str, object]:
+    following: str | None = None
     with connect() as db:
         camera = db.execute("SELECT id, recording_status FROM cameras WHERE id=?", (camera_id,)).fetchone()
         if not camera:
@@ -279,20 +303,29 @@ def list_camera_segments(
         if (start is None) != (end is None):
             raise HTTPException(status_code=422, detail="Provide both from and to, or neither")
         if start is None or end is None:
-            rows = db.execute(
-                "SELECT s.id,s.starts_at,s.ends_at,s.size_bytes,s.unavailable_at,s.unavailable_reason,(SELECT h.id FROM recording_holds h WHERE h.segment_id=s.id AND h.released_at IS NULL AND (h.expires_at IS NULL OR h.expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now')) ORDER BY h.created_at DESC LIMIT 1) AS hold_id,(SELECT h.expires_at FROM recording_holds h WHERE h.segment_id=s.id AND h.released_at IS NULL AND (h.expires_at IS NULL OR h.expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now')) ORDER BY h.created_at DESC LIMIT 1) AS hold_expires_at FROM recording_segments s WHERE camera_id=? ORDER BY starts_at DESC LIMIT 500",
-                (camera_id,),
-            ).fetchall()
+            if after is not None:
+                raise HTTPException(status_code=422, detail="after goes with from and to")
+            rows = db.execute(f"SELECT {_SEGMENT_FIELDS} FROM recording_segments s WHERE camera_id=? ORDER BY starts_at DESC LIMIT 500", (camera_id,)).fetchall()
         else:
             if start.tzinfo is None or end.tzinfo is None or end <= start:
                 raise HTTPException(status_code=422, detail="from and to must be timezone-aware and form a positive interval")
-            rows = db.execute(
-                "SELECT s.id,s.starts_at,s.ends_at,s.size_bytes,s.unavailable_at,s.unavailable_reason,(SELECT h.id FROM recording_holds h WHERE h.segment_id=s.id AND h.released_at IS NULL AND (h.expires_at IS NULL OR h.expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now')) ORDER BY h.created_at DESC LIMIT 1) AS hold_id,(SELECT h.expires_at FROM recording_holds h WHERE h.segment_id=s.id AND h.released_at IS NULL AND (h.expires_at IS NULL OR h.expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now')) ORDER BY h.created_at DESC LIMIT 1) AS hold_expires_at FROM recording_segments s "
-                "WHERE camera_id=? AND starts_at<? AND ends_at>? ORDER BY starts_at",
-                (camera_id, end.astimezone(timezone.utc).isoformat(), start.astimezone(timezone.utc).isoformat()),
-            ).fetchall()
+            where, values = "camera_id=? AND starts_at<? AND ends_at>?", [camera_id, end.astimezone(timezone.utc).isoformat(), start.astimezone(timezone.utc).isoformat()]
+            if after is not None:
+                # The cursor is the start and id of the last recording of the previous page: carry on just after it, in the same order
+                moment, _, last_id = after.rpartition("|")
+                if not moment or not last_id.isdigit():
+                    raise HTTPException(status_code=422, detail="after must be the next of a previous answer")
+                where += " AND (starts_at>? OR (starts_at=? AND s.id>?))"
+                values += [moment, moment, int(last_id)]
+            rows = db.execute(f"SELECT {_SEGMENT_FIELDS} FROM recording_segments s WHERE {where} ORDER BY starts_at,s.id LIMIT ?",
+                              (*values, SEGMENT_PAGE + 1)).fetchall()
+            if len(rows) > SEGMENT_PAGE:
+                rows = rows[:SEGMENT_PAGE]
+                following = f"{rows[-1]['starts_at']}|{rows[-1]['id']}"
+        holds = _active_holds(db, [row["id"] for row in rows])
     segments = [
-        {"id": row["id"], "starts_at": row["starts_at"], "ends_at": row["ends_at"], "size_bytes": row["size_bytes"], "preserved":row["hold_id"] is not None,"hold_expires_at":row["hold_expires_at"],
+        {"id": row["id"], "starts_at": row["starts_at"], "ends_at": row["ends_at"], "size_bytes": row["size_bytes"], "preserved": row["id"] in holds,
+         "hold_expires_at": holds[row["id"]][1] if row["id"] in holds else None,
          "available": row["unavailable_at"] is None, "unavailable_reason": row["unavailable_reason"],
          "media_url": f"/api/cameras/{camera_id}/segments/{row['id']}/media" if row["unavailable_at"] is None else None}
         for row in rows
@@ -303,6 +336,7 @@ def list_camera_segments(
         "availability": "available" if any(segment["available"] for segment in segments) else "unavailable" if segments else "none",
         "reason": None if segments else "No indexed footage covers this interval",
         "segments": segments,
+        "next": following,  # More recordings in this range: ask again with this as ``after`` (#497). None when this is all of them.
     }
 
 
