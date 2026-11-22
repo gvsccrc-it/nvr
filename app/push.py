@@ -322,6 +322,24 @@ def _finish(delivery: sqlite3.Row, status_code: int | None, error: str | None) -
         return "retrying"
 
 
+PRUNE_EVERY_SECONDS = 3600.0
+_pruned_at = float("-inf")
+
+
+def prune_deliveries(*, force: bool = False) -> int:
+    """Remove finished deliveries older than a week, at most once an hour, and only when there are any: it used to be a delete at the end of
+    every two-second pass, which took the database's write lock and read every finished row even with nothing to remove (#525)."""
+    global _pruned_at
+    if not force and time.monotonic() - _pruned_at < PRUNE_EVERY_SECONDS:
+        return 0
+    _pruned_at = time.monotonic()
+    old = ((_now() - KEEP_DELIVERIES).isoformat(),)
+    with connect() as db:
+        if not has_row(db, "SELECT 1 FROM push_deliveries WHERE status IN ('sent','failed') AND created_at<? LIMIT 1", old):
+            return 0
+        return db.execute("DELETE FROM push_deliveries WHERE status IN ('sent','failed') AND created_at<?", old).rowcount
+
+
 def deliver_due(client: httpx.Client | None = None, limit: int = 50) -> list[str]:
     """Send queued notifications that are due; return each outcome."""
     outcomes: list[str] = []
@@ -360,8 +378,7 @@ def deliver_due(client: httpx.Client | None = None, limit: int = 50) -> list[str
                 outcomes.append(_finish(delivery, None, f"invalid: {str(exc)[:180]}"))
             except httpx.HTTPError as exc:
                 outcomes.append(_finish(delivery, None, str(exc)[:200] or exc.__class__.__name__))
-        with connect() as db:
-            db.execute("DELETE FROM push_deliveries WHERE status IN ('sent','failed') AND created_at<?", ((_now() - KEEP_DELIVERIES).isoformat(),))
+        prune_deliveries()
     finally:
         if owned:
             client.close()
