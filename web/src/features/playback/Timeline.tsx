@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
+import { memo, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
 import type { Camera, DisplaySettings, TimelineCamera } from "@/api/types";
 import { formatSiteDate, formatSiteDateTime, formatSiteTime, sameSiteDay, siteOffsetMs } from "@/lib/zonedTime";
 import { playbackClock } from "./clock";
@@ -43,7 +43,9 @@ export function Timeline({ settings, range, cameraIds, cameras, timeline, loadin
   const exportMarks = usePlaybackStore(store => store.marks);
   const { setWindow } = usePlaybackStore.getState();
   const window = stored ?? range;
-  const time = useClockTime();
+  // The clock is not read here. It ticks ten times a second while playing, and reading it re-rendered every mark of every camera on
+  // each tick: a day of 16 cameras is 23,000 marks, about 1.8 s of work for every second played (#532). Only the cursor and the
+  // slider's value follow the clock, each in a small component of its own.
   const tracks = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(600);
   const dragging = useRef(false);
@@ -112,7 +114,6 @@ export function Timeline({ settings, range, cameraIds, cameras, timeline, loadin
   const step = tickStep(window, width);
   const marks = ticks(window, step, siteOffsetMs(window.start, settings.time_zone));
   const multiDay = !sameSiteDay(window.start, window.end, settings.time_zone);
-  const cursor = percent(time, window);
   const span = window.end - window.start;
   const marked = exportMarks.in !== null || exportMarks.out !== null
     ? visibleSpan(Math.min(exportMarks.in ?? range.start, exportMarks.out ?? range.end), Math.max(exportMarks.in ?? range.start, exportMarks.out ?? range.end), window)
@@ -123,9 +124,9 @@ export function Timeline({ settings, range, cameraIds, cameras, timeline, loadin
     <section id="playback-timeline" className="timeline" aria-label="Timeline" data-window-start={Math.round(window.start)} data-window-end={Math.round(window.end)}
              data-mark-in={exportMarks.in === null ? undefined : Math.round(exportMarks.in)} data-mark-out={exportMarks.out === null ? undefined : Math.round(exportMarks.out)}>
       <div className="timeline-tools">
-        <button type="button" className="button" onClick={() => apply(zoom(window, range, 0.5, Math.max(window.start, Math.min(window.end, time))))}
+        <button type="button" className="button" onClick={() => apply(zoom(window, range, 0.5, Math.max(window.start, Math.min(window.end, playbackClock.time()))))}
                 disabled={span <= 10_000}>Zoom in</button>
-        <button type="button" className="button" onClick={() => apply(zoom(window, range, 2, time))} disabled={!stored}>Zoom out</button>
+        <button type="button" className="button" onClick={() => apply(zoom(window, range, 2, playbackClock.time()))} disabled={!stored}>Zoom out</button>
         <button type="button" className="button" onClick={() => setWindow(null)} disabled={!stored}>Fit range</button>
         <button type="button" className="button icon-button" aria-label="Pan earlier" onClick={() => apply(pan(window, range, -span / 2))}
                 disabled={window.start <= range.start}>◀</button>
@@ -152,16 +153,16 @@ export function Timeline({ settings, range, cameraIds, cameras, timeline, loadin
         <div className="timeline-row timeline-ruler-row">
           <span className="timeline-label muted">{multiDay ? "" : formatSiteDate(window.start, settings)}</span>
           <div ref={tracks} className="timeline-ruler" role="slider" tabIndex={0} aria-label="Playback position"
-               aria-valuemin={range.start} aria-valuemax={range.end} aria-valuenow={Math.round(time)}
-               aria-valuetext={formatSiteDateTime(time, settings)}
+               aria-valuemin={range.start} aria-valuemax={range.end}
                onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={() => (dragging.current = false)} onKeyDown={onRulerKey}>
+            <SliderValue slider={tracks} settings={settings} />
             {marks.map(mark => (
               <span key={mark} className="timeline-tick" style={{ left: `${percent(mark, window)}%` }}>
                 {formatSiteTime(mark, settings, step < 60_000)}
               </span>
             ))}
             {marked ? <span className="timeline-range" data-testid="export-range" style={rangeStyle} /> : null}
-            <span className="timeline-cursor-head" style={{ left: `${cursor}%` }} hidden={cursor < 0 || cursor > 100} />
+            <Cursor className="timeline-cursor-head" window={window} />
           </div>
         </div>
         {cameraIds.filter(id => cameras.has(id)).map(id => {
@@ -176,7 +177,7 @@ export function Timeline({ settings, range, cameraIds, cameras, timeline, loadin
               <div className="timeline-track" onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={() => (dragging.current = false)}>
                 {row ? <Track row={row} window={window} settings={settings} /> : null}
                 {marked ? <span className="timeline-range" style={rangeStyle} /> : null}
-                <span className="timeline-cursor" style={{ left: `${cursor}%` }} hidden={cursor < 0 || cursor > 100} />
+                <Cursor className="timeline-cursor" window={window} />
               </div>
             </div>
           );
@@ -186,7 +187,31 @@ export function Timeline({ settings, range, cameraIds, cameras, timeline, loadin
   );
 }
 
-function Track({ row, window, settings }: { row: TimelineCamera; window: TimeWindow; settings: DisplaySettings }) {
+/** The playback position on a row or on the ruler: the one thing on the timeline that moves with the clock. */
+function Cursor({ className, window }: { className: string; window: TimeWindow }) {
+  const position = percent(useClockTime(), window);
+  return <span className={className} style={{ left: `${position}%` }} hidden={position < 0 || position > 100} />;
+}
+
+/** The slider's value for assistive technology, set on the ruler itself as the clock moves, without rendering the ruler again. */
+function SliderValue({ slider, settings }: { slider: { current: HTMLDivElement | null }; settings: DisplaySettings }) {
+  const time = useClockTime();
+  useLayoutEffect(() => {
+    slider.current?.setAttribute("aria-valuenow", String(Math.round(time)));
+    slider.current?.setAttribute("aria-valuetext", formatSiteDateTime(time, settings));
+  }, [slider, time, settings]);
+  return null;
+}
+
+/** How many times a camera's marks have been drawn, for the browser journey that checks they are not redrawn as the clock ticks. */
+const drawn = globalThis as unknown as { __timelineTracksDrawn?: number };
+
+/**
+ * A camera's marks. Drawn again only when its row, the visible window or the display settings change: never for the clock.
+ * The window is compared by its two ends, since the object is made anew whenever the range is.
+ */
+const Track = memo(function Track({ row, window, settings }: { row: TimelineCamera; window: TimeWindow; settings: DisplaySettings }) {
+  drawn.__timelineTracksDrawn = (drawn.__timelineTracksDrawn ?? 0) + 1;
   const at = (iso: string) => Date.parse(iso);
   const describe = (start: number, end: number) => `${formatSiteTime(start, settings, true)} – ${formatSiteTime(end, settings, true)}`;
   return (
@@ -237,4 +262,4 @@ function Track({ row, window, settings }: { row: TimelineCamera; window: TimeWin
       })}
     </>
   );
-}
+}, (before, after) => before.row === after.row && before.settings === after.settings && before.window.start === after.window.start && before.window.end === after.window.end);
