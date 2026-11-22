@@ -32,6 +32,7 @@ On the wall:
 - Each view shows for its dwell time, then the next. A caption names the view.
 - An alarm from a pop-in rule replaces the view with the alarm's camera and its neighbours. It stays for the dwell time (at least 20 seconds), then the rotation resumes. Further alarms queue and show in turn.
 - The wall's session can only watch: cameras, shared views, live video and alarm pop-ins. Anything else is refused, and the main interface does not open with it. A person signed in on the same browser keeps their own access.
+- **A wall looks after itself.** If the NVR cannot be reached when the wall starts (the display computer started first after a power cut), it shows "Waiting for the NVR…" and tries again, after 2 seconds, then 4, then 8, up to every half minute, and enters the wall once the NVR answers. It asks for a token only when the NVR says the session is not valid. Every minute it checks its session and fetches the shared views again, so a view an administrator changes reaches a running wall within a minute. When the NVR has been upgraded, the wall reloads itself to the new interface at its next check, but not while an alarm is showing.
 
 ## API
 
@@ -42,7 +43,7 @@ On the wall:
 | `GET` | `/api/live/alarm-pop-ins?after=<cursor>` | signed in | `{cursor, alarms}`: pop-in alarms after the cursor, oldest first. Without `after`, returns the current cursor and no alarms |
 | `GET`/`PUT` | `/api/me/preferences` | signed in | `live_alarm_pop_in` alongside `theme`. Fields left out keep their value |
 | `POST` | `/api/wall/session` | anyone with a token | `{token}`. Signs a wall in: `403` unless the token's scopes are exactly `read` and `media` |
-| `GET` | `/api/wall/session` | the wall | `{name, scopes}` of the wall's token, or `401` |
+| `GET` | `/api/wall/session` | the wall | `{name, scopes, interface}`: the wall's token, and a name for the build of the interface the server gives out (it changes when the interface does); or `401` |
 | `DELETE` | `/api/wall/session` | the wall | Sign the wall out |
 
 Rules carry `pop_into_live` in `/api/rules`.

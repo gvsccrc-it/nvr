@@ -37,6 +37,17 @@ def _page() -> FileResponse:
     return FileResponse(page, media_type="text/html", headers={**SECURITY_HEADERS, "Cache-Control": "no-cache"})
 
 
+def interface_version() -> str:
+    """Which build of the browser interface this server gives out: a short digest of its page, which names every hashed asset, so it
+    changes whenever the interface does. "" when the interface has not been built. A page left open across an upgrade (a video wall)
+    compares this with what it saw when it loaded, and reloads itself."""
+    page = DIST_DIRECTORY / "index.html"
+    try:
+        return hashlib.sha256(page.read_bytes()).hexdigest()[:16]
+    except OSError:
+        return ""
+
+
 @router.get("/next", include_in_schema=False)
 @router.get("/next/{path:path}", include_in_schema=False)
 def preview_redirect(request: Request, path: str = "") -> RedirectResponse:
@@ -52,7 +63,7 @@ def service_worker() -> Response:
     page, worker = DIST_DIRECTORY / "index.html", DIST_DIRECTORY / "sw.js"
     if not page.is_file() or not worker.is_file():
         raise HTTPException(status_code=503, detail="The web interface has not been built")
-    version = hashlib.sha256(page.read_bytes()).hexdigest()[:16]
+    version = interface_version()
     return Response(worker.read_text(encoding="utf-8").replace("__VERSION__", version), media_type="text/javascript; charset=utf-8",
                     headers={**SECURITY_HEADERS, "Cache-Control": "no-cache"})
 

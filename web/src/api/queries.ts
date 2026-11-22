@@ -215,13 +215,19 @@ export const viewKeys = {
   workspace: ["live", "workspace"] as const,
 };
 
-export function useLiveViews() {
+/**
+ * The saved views. `refreshMs` fetches them again that often, for a screen nobody touches (a video wall): a view an administrator
+ * changed reaches it, and a fetch that failed is tried again, sooner, without a reload.
+ */
+export function useLiveViews(refreshMs?: number) {
   return useQuery({
     queryKey: viewKeys.views,
     queryFn: async ({ signal }) => {
       const result = await api<{ layouts: SavedView[]; shared_views: SavedView[] }>("/api/live/views", { signal });
       return [...result.shared_views, ...result.layouts];
     },
+    refetchInterval: refreshMs ? query => (query.state.status === "error" ? Math.min(refreshMs, 5_000) : refreshMs) : false,
+    refetchIntervalInBackground: Boolean(refreshMs),
   });
 }
 

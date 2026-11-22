@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from app import live_alarms
 from app.clock import stamp
+from app.api.web_interface import interface_version
 from app.api_tokens import TokenRejected, authenticate, token_scopes
 from app.principal import WALL_COOKIE_NAME, WALL_SCOPES, Administrator, CurrentUser, secure_cookie, wall_principal
 from app.security import token_digest
@@ -97,4 +98,5 @@ def wall_sign_out(request: Request, response: Response) -> Response:
 
 
 def _wall_view(name: str) -> dict[str, object]:
-    return {"name": name, "scopes": ["read", "media"]}
+    # "interface" lets a wall left running across an upgrade see that the server now gives out a newer interface, and reload (#535)
+    return {"name": name, "scopes": ["read", "media"], "interface": interface_version()}
