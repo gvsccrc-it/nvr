@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field, model_validator
 from app import accounts, auth_limits as limits, mfa, network, webauthn
 from app.api.identity import signed_in
 from app.audit import record
-from app.principal import COOKIE_NAME, Administrator, CurrentUser, Principal
+from app.principal import COOKIE_NAME, Administrator, AdministratorSession, CurrentUser, Principal
 from app.security import hash_password, password_problem, token_digest, verify_password
 from app.store import connect
 
@@ -582,7 +582,7 @@ def get_security_policy(_: Administrator) -> dict[str, object]:
 
 
 @router.put("/api/admin/security")
-def put_security_policy(payload: PolicyRequest, admin: Administrator) -> dict[str, object]:
+def put_security_policy(payload: PolicyRequest, admin: AdministratorSession) -> dict[str, object]:
     with connect() as db:
         before, remote_before = mfa.policy(db), mfa.remote_required(db)
         policy = before if payload.mfa_policy is None else payload.mfa_policy
@@ -615,7 +615,7 @@ class DisabledRequest(BaseModel):
 
 
 @router.put("/api/admin/users/{user_id}/disabled")
-def set_user_disabled(user_id: int, payload: DisabledRequest, admin: Administrator) -> dict[str, object]:
+def set_user_disabled(user_id: int, payload: DisabledRequest, admin: AdministratorSession) -> dict[str, object]:
     """Disable a person: their sessions, device sign-ins and alarm notifications end, their API tokens are revoked, and they cannot sign in
     until enabled again. Nobody disables themselves, so an administrator always remains. Audited."""
     if user_id == admin.id:
@@ -628,7 +628,7 @@ def set_user_disabled(user_id: int, payload: DisabledRequest, admin: Administrat
 
 
 @router.delete("/api/admin/users/{user_id}/mfa", status_code=status.HTTP_204_NO_CONTENT)
-def reset_user_factors(user_id: int, admin: Administrator) -> Response:
+def reset_user_factors(user_id: int, admin: AdministratorSession) -> Response:
     """Remove every second factor of someone who lost theirs, and end their sessions. Audited."""
     if user_id == admin.id:
         raise HTTPException(status_code=409, detail="Manage your own second factors from the account menu")

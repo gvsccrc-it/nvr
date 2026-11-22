@@ -10,7 +10,7 @@ from fastapi import APIRouter, HTTPException, Response, status
 from pydantic import BaseModel, Field, field_validator
 
 from app.audit import record
-from app.principal import Administrator
+from app.principal import Administrator, AdministratorSession
 from app.store import connect
 
 router = APIRouter()
@@ -89,7 +89,7 @@ def list_grants(_: Administrator) -> dict[str, object]:
 
 
 @router.put("/api/admin/access-grants")
-def replace_grants(payload: SubjectGrants, admin: Administrator) -> dict[str, object]:
+def replace_grants(payload: SubjectGrants, admin: AdministratorSession) -> dict[str, object]:
     """Replace everything one operator (or Entra role) is granted, in one audited step. No grants means no cameras."""
     with connect() as db:
         db.execute("BEGIN IMMEDIATE")
@@ -148,7 +148,7 @@ def replace_grants(payload: SubjectGrants, admin: Administrator) -> dict[str, ob
 
 
 @router.delete("/api/admin/access-grants/{grant_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_grant(grant_id: int, admin: Administrator) -> Response:
+def delete_grant(grant_id: int, admin: AdministratorSession) -> Response:
     with connect() as db:
         db.execute("BEGIN IMMEDIATE")
         try:
