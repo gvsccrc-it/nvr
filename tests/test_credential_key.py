@@ -141,6 +141,59 @@ class CredentialKeyTests(unittest.TestCase):
         credentials.report_at_start()
         self.assertEqual(incident()["fault_active"], 0)
 
+    def test_an_installation_with_only_api_tokens_does_not_get_a_new_key_either(self):
+        # #473: tokens are kept as a digest made with the key, not as "..._ciphertext". A database with tokens and nothing encrypted got a
+        # new key without a word, and every token and video-wall sign-in stopped working.
+        from app import api_tokens
+
+        digest = api_tokens._digest("nvr_a-token-secret")  # Makes the key, as creating the first token does
+        with connect() as db:
+            db.execute("INSERT INTO api_tokens(id,name,secret_digest,scopes_json) VALUES('t1','Wall',?,'[\"read\"]')", (digest,))
+        original = self.key.read_bytes()
+        self.key.unlink()
+
+        def incident():
+            with connect() as db:
+                return db.execute("SELECT fault_active FROM incidents WHERE incident_key='credential_key'").fetchone()
+
+        with self.assertLogs("nvr.credentials", level="ERROR") as logged:
+            self.assertTrue(credentials.missing())
+            with self.assertRaises(credentials.CredentialKeyMissing):
+                api_tokens._digest("nvr_a-token-secret")
+            credentials.report_at_start()
+        self.assertFalse(self.key.exists())  # No new key was written
+        self.assertIn("API tokens", logged.output[0])
+        self.assertEqual(incident()["fault_active"], 1)
+        self.key.write_bytes(original)  # The original is put back: the token matches its stored digest again
+        self.assertEqual(api_tokens._digest("nvr_a-token-secret"), digest)
+        credentials.report_at_start()
+        self.assertEqual(incident()["fault_active"], 0)
+
+    def test_every_use_of_a_key_derived_from_the_credential_key_is_listed_with_what_it_keeps(self):
+        import re
+
+        root = Path(__file__).resolve().parents[1] / "app"
+        used = set()
+        for path in root.rglob("*.py"):
+            used.update(re.findall(r'derived_key\("([^"]+)"\)', path.read_text(encoding="utf-8")))
+        # A new use must say here whether something stored depends on it, or the key could be replaced under it unnoticed.
+        self.assertEqual(used, set(credentials.DERIVED_USES))
+        with connect() as db:
+            for kept in credentials.DERIVED_USES.values():
+                if kept is not None:
+                    self.assertIn(kept[1], {row[1] for row in db.execute(f"PRAGMA table_info({kept[0]})")}, kept)
+
+    def test_an_empty_database_still_gets_its_first_key(self):
+        self.assertFalse(self.key.exists())
+        self.assertFalse(credentials.missing())
+        credentials.derived_key("api-token")  # The first token on a new installation
+        self.assertTrue(self.key.exists())
+        with connect() as db:  # A token row with no digest in it (half made) holds nothing that depends on the key
+            db.execute("INSERT INTO api_tokens(id,name,secret_digest,scopes_json) VALUES('t0','Empty','','[]')")
+        self.key.unlink()
+        credentials._said.clear()
+        self.assertFalse(credentials.missing())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -578,6 +578,9 @@ class RecordingManager:
             viewing_audit.close_orphans(db)  # What a crash left open, once it has gone quiet; at start alone, a full restart's own were too fresh to close
             viewing_audit.prune(db)
             security_log.prune(db)
+        from . import talk
+
+        talk.clear_old_recordings()  # Kept talk audio goes after 30 days whether or not anyone talks again (#478)
 
     async def _storage_loop(self) -> None:
         while not self.stopping:

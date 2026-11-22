@@ -85,6 +85,17 @@ def _read_or_create(path: Path) -> bytes:
 _said: set[str] = set()
 
 
+# Everything derived from the credential key through ``derived_key``, by purpose: where a stored value that depends on it is kept (table,
+# column), or None, with the reason, where nothing stored is lost with the key. The key is not replaced while any of the stored ones
+# exists (#473): API tokens are kept as a keyed digest, not as "..._ciphertext", so a database holding only tokens (and video walls, which
+# sign in with them) used to get a new key without a word, and every token stopped working. A test keeps this list and the code the same.
+DERIVED_USES: dict[str, tuple[str, str] | None] = {
+    "api-token": ("api_tokens", "secret_digest"),
+    "push-thumbnail": None,  # Signs picture links that live two hours: nothing kept
+    "security-log-username": None,  # Groups repeated tries of one unknown name in the log; old rows merely stop matching new ones
+}
+
+
 def _stored_secrets_exist() -> bool:
     """Whether the database already holds something encrypted with a credential key. Read-only, and never the reason a key cannot be made:
     a database that is not there yet, or cannot be read, counts as holding nothing.
@@ -106,6 +117,9 @@ def _stored_secrets_exist() -> bool:
             for column in [row[1] for row in db.execute(f'PRAGMA table_info("{table}")') if str(row[1]).endswith("_ciphertext")]:
                 if db.execute(f'SELECT 1 FROM "{table}" WHERE CAST(substr("{column}",1,5) AS TEXT)=\'gAAAA\' LIMIT 1').fetchone():
                     return True
+        for kept in DERIVED_USES.values():  # Values that are not encrypted with the key but made from it
+            if kept is not None and kept[0] in tables and db.execute(f'SELECT 1 FROM "{kept[0]}" WHERE "{kept[1]}" IS NOT NULL AND "{kept[1]}"<>\'\' LIMIT 1').fetchone():
+                return True
         return False
     except sqlite3.Error:
         return False
@@ -116,9 +130,9 @@ def _stored_secrets_exist() -> bool:
 def _say_once(path: Path) -> None:
     if str(path) not in _said:
         _said.add(str(path))
-        logger.error("THE CREDENTIAL KEY FILE %s IS MISSING, and this installation already has stored camera passwords and addresses encrypted "
-                     "with it. No new key was made. Stop the NVR and put the original key file back (see docs/database-recovery.md); until "
-                     "then cameras cannot be reached and settings that hold a secret cannot be saved.", path)
+        logger.error("THE CREDENTIAL KEY FILE %s IS MISSING, and this installation already has camera passwords, addresses or API tokens that depend "
+                     "on it. No new key was made. Stop the NVR and put the original key file back (see docs/database-recovery.md); until "
+                     "then cameras cannot be reached, API tokens and video walls cannot sign in, and settings that hold a secret cannot be saved.", path)
 
 
 def missing() -> bool:
