@@ -33,6 +33,7 @@ logger = logging.getLogger("nvr.storage")
 
 MARKER_NAME = ".nvr-volume.json"
 CACHE_SECONDS = 5.0  # How long an answer is reused: playback asks once per segment
+MARK_BUSY_MILLISECONDS = 200
 PROOF_SAMPLES = 25  # The newest and the oldest this many footage rows are looked for on the disk
 PRESENT, UNMARKED, WRONG_DISK = "present", "unmarked", "wrong_disk"
 
@@ -103,6 +104,9 @@ def _expected(db: sqlite3.Connection, volume_id: str) -> str | None:
 def _mark(volume_id: str, path: Path, volumes: dict[str, str], *, replace: bool = False) -> None:
     """Agree an id with the database and write it to the volume. Two processes at a first start end with the same id: the database's."""
     with connect() as db:
+        # A short wait for the write lock, never the usual ten seconds: this can be reached from inside a request that itself holds the
+        # lock on another connection (adding a clip to a case checks its footage's files), and waiting on it there waited on oneself.
+        db.execute(f"PRAGMA busy_timeout = {MARK_BUSY_MILLISECONDS}")
         db.execute("INSERT OR IGNORE INTO storage_volumes(id,relative_path) VALUES(?,?)", (volume_id, volumes[volume_id]))
         if replace:
             db.execute("UPDATE storage_volumes SET marker_id=? WHERE id=?", (uuid.uuid4().hex, volume_id))
@@ -133,7 +137,10 @@ def _evaluate(volume_id: str, path: Path) -> str:
             return PRESENT
         return WRONG_DISK if on_disk else UNMARKED
     if path.is_dir():
-        _mark(volume_id, path, volumes)  # A first use, or footage that proves the disk
+        try:
+            _mark(volume_id, path, volumes)  # A first use, or footage that proves the disk
+        except sqlite3.Error:
+            pass  # The database is being written by someone else: the volume is present all the same, and is marked at a later look
     return PRESENT
 
 
