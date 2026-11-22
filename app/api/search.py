@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from fastapi import APIRouter, HTTPException, Query, Response
 
 from app import console
-from app import clip, privacy, search, semantic, similar, track_privacy
+from app import clip, privacy, search, semantic, similar, track_pictures, track_privacy
 from app.attributes import DIRECTIONS, PALETTE, VEHICLE_TYPES
 from app.principal import CurrentUser, requires_scope
 from app.store import connect
@@ -196,15 +196,19 @@ async def track_thumbnail(track_id: str, user: CurrentUser) -> Response:
     """The frame an object was first analysed in, with the camera's privacy masks drawn over it; if a mask cannot be drawn, no picture."""
     def read():
         with connect() as db:
-            row = db.execute("SELECT t.camera_id,k.jpeg,k.captured_at FROM ai_tracks t JOIN track_keyframes k ON k.track_id=t.id WHERE t.id=?", (track_id,)).fetchone()
+            row = db.execute("SELECT t.camera_id,k.jpeg,k.relative_path,k.captured_at FROM ai_tracks t JOIN track_keyframes k ON k.track_id=t.id WHERE t.id=?", (track_id,)).fetchone()
             if row is None or not user.access.can_see(row["camera_id"]):
                 raise HTTPException(status_code=404, detail="Thumbnail not found")
             zones = privacy.server_zones(db, row["camera_id"], datetime.fromisoformat(row["captured_at"]))
-        return row, zones
+        # The picture is a file on the recordings volume (#512), read here and never served as it is: the masks are drawn below.
+        jpeg = track_pictures.read(row)
+        if jpeg is None:
+            raise HTTPException(status_code=404, detail="Thumbnail not found")
+        return jpeg, zones
 
-    row, zones = await asyncio.to_thread(read)
+    jpeg, zones = await asyncio.to_thread(read)
     try:
-        picture = await privacy.mask_jpeg(bytes(row["jpeg"]), zones)
+        picture = await privacy.mask_jpeg(jpeg, zones)
     except Exception:  # noqa: BLE001 - never the unmasked picture
         raise HTTPException(status_code=503, detail="The privacy mask could not be applied to this picture") from None
     return Response(picture, media_type="image/jpeg", headers={"Cache-Control": "private, no-store"})

@@ -87,6 +87,9 @@ def measure(db: sqlite3.Connection, now: datetime) -> list[dict[str, Any]]:
         "SELECT s.camera_id,COALESCE(SUM(s.size_bytes),0) AS held FROM recording_segments s WHERE s.unavailable_at IS NULL AND EXISTS("
         "SELECT 1 FROM recording_holds h WHERE h.segment_id=s.id AND h.released_at IS NULL AND (h.expires_at IS NULL OR h.expires_at>?)) GROUP BY s.camera_id",
         (now.astimezone(timezone.utc).isoformat(),))}
+    from . import track_pictures
+
+    pictures = track_pictures.totals(db)  # Each object's first picture is a file in its camera's folder (#512): footage's space, removed with it
     volume_ids = {row["id"]: row["storage_volume_id"] for row in db.execute("SELECT c.id,g.storage_volume_id FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id")}
     cameras = []
     for camera in db.execute("SELECT id,name,archived_at FROM cameras ORDER BY name,id").fetchall():
@@ -100,7 +103,8 @@ def measure(db: sqlite3.Connection, now: datetime) -> list[dict[str, Any]]:
         collecting = camera["archived_at"] is not None or span < MIN_HISTORY
         cameras.append({
             "id": camera["id"], "name": camera["name"], "volume_id": volume_ids.get(camera["id"]) or "default", "policy_days": policy, "policy_source": source,
-            "stored_bytes": int(total["stored"]) if total else 0, "held_bytes": int(held.get(camera["id"], 0)), "age_days": min(policy, history.total_seconds() / 86400),
+            "stored_bytes": (int(total["stored"]) if total else 0) + pictures.get(camera["id"], {}).get("bytes", 0),
+            "pictures_bytes": pictures.get(camera["id"], {}).get("bytes", 0), "held_bytes": int(held.get(camera["id"], 0)), "age_days": min(policy, history.total_seconds() / 86400),
             "write_bytes_per_day": 0.0 if collecting else recent.get(camera["id"], 0) / (span.total_seconds() / 86400), "collecting": collecting, "archived": camera["archived_at"] is not None,
         })
     return cameras
@@ -154,7 +158,7 @@ def forecast(db: sqlite3.Connection, now: datetime | None = None, usage: Callabl
         for volume_id in ids:
             disk_of[volume_id] = {"key": key, "level": level, "until": until, "budget": budget, "active": active, "rates": rates, "policies": policies}
     for camera in measured:
-        entry = {key: camera[key] for key in ("id", "name", "volume_id", "policy_days", "policy_source", "stored_bytes")}
+        entry = {key: camera[key] for key in ("id", "name", "volume_id", "policy_days", "policy_source", "stored_bytes", "pictures_bytes")}
         entry.update(write_bytes_per_day=round(camera["write_bytes_per_day"]), age_days=round(camera["age_days"], 2))
         context = disk_of.get(camera["volume_id"])
         if camera["archived"] or camera["collecting"] or context is None or camera["write_bytes_per_day"] == 0:
