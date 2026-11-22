@@ -48,7 +48,9 @@ class CaseCase(GrantCase):
         """A recorded interval with its file on disk (a segment whose file has gone cannot be held)."""
         segment = super().add_segment(camera_id, minutes)
         with connect() as db:
-            path = recording_file_path(db.execute("SELECT relative_path FROM recording_segments WHERE id=?", (segment,)).fetchone()[0])
+            # Where the file goes, not where it is found: until its file exists the footage is a row with nothing on the disk, which the
+            # NVR takes for a disk that is not mounted (#479).
+            path = recordings_path() / db.execute("SELECT relative_path FROM recording_segments WHERE id=?", (segment,)).fetchone()[0]
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"footage")
         return segment
