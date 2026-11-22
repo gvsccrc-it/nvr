@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 
 import httpx
+from tests.test_support import setup_code
 
 ROOT = Path(__file__).resolve().parents[2]
 PASSWORD = "site-admin-password-1234"
@@ -70,7 +71,7 @@ class NvrSite:
     def admin(self) -> httpx.Client:
         if self._admin is None:
             client = httpx.Client(base_url=self.url, timeout=10)
-            created = client.post("/api/setup/admin", json={"username": f"{self.name}-admin", "password": PASSWORD})
+            created = client.post("/api/setup/admin", json={"username": f"{self.name}-admin", "password": PASSWORD, "setup_code": setup_code()})
             assert created.status_code == 201, created.text
             self._admin = client
         return self._admin

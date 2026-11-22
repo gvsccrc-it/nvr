@@ -95,7 +95,15 @@ A number that cannot be read (`30s` for `30`) or is outside its limits never sto
 
 **Container logs.** Every service's log is bounded in the Compose files: the NVR keeps at most five files of 20 MB (100 MB), each tunnel three of 10 MB. Without that, Docker keeps every line for ever on the system disk. To keep more, raise `max-size` or `max-file` under `logging:` in `compose.yaml`; to send logs elsewhere as well, see `NVR_LOG_FORWARD_URL`. The web server's access log holds only the requests that failed (status 400 and above), not a line for every request.
 
-Do not expose the initial HTTP setup screen to untrusted networks. Place it behind the workplace VPN or approved gateway, then use HTTPS and enable secure cookies.
+**First-time setup needs a one-time code.** While no account exists the NVR makes a random setup code each time it starts, prints it once in its log, and keeps it in a file only the service user can read (`/secrets/setup-code`). Creating the first administrator needs it, from any address, so whoever reaches the port first cannot take the NVR over:
+
+```sh
+docker compose logs nvr | grep "setup code"
+```
+
+Open the NVR in a browser, choose the administrator's username and password, and enter the code (either case, with or without the dashes). It stops working the moment the administrator exists, and the file is removed. Five wrong codes in a minute and every attempt waits a minute; each wrong code is in the security log. If the log also says the database "looks lost or misplaced", stop: the NVR found footage from an earlier installation beside an empty database, and [database recovery](docs/database-recovery.md) is the page to read before starting again.
+
+Still place the NVR behind the workplace VPN or approved gateway, then use HTTPS and enable secure cookies.
 
 ## Using the interface
 

@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 
 from app.api import web_interface
 from app.application import create_app
-from tests.test_support import TEST_PASSWORD
+from tests.test_support import TEST_PASSWORD, setup_code
 
 
 class WebInterfaceTests(unittest.TestCase):
@@ -91,7 +91,7 @@ class WebInterfaceTests(unittest.TestCase):
 
     def test_theme_preference_is_personal(self):
         self.assertEqual(self.client.get("/api/me/preferences").status_code, 401)
-        self.assertEqual(self.client.post("/api/setup/admin", json={"username": "keeper", "password": TEST_PASSWORD}).status_code, 201)
+        self.assertEqual(self.client.post("/api/setup/admin", json={"username": "keeper", "password": TEST_PASSWORD, "setup_code": setup_code()}).status_code, 201)
         self.assertEqual(self.client.get("/api/me/preferences").json()["theme"], "system")
         self.assertEqual(self.client.put("/api/me/preferences", json={"theme": "dark"}).json()["theme"], "dark")
         self.assertEqual(self.client.put("/api/me/preferences", json={"theme": "neon"}).status_code, 422)

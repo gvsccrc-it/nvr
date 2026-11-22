@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 
 from app.main import app
-from tests.test_support import patch_camera_probe, TEST_CAMERA_PASSWORD, TEST_PASSWORD
+from tests.test_support import patch_camera_probe, TEST_CAMERA_PASSWORD, TEST_PASSWORD, setup_code
 
 
 class CameraInventoryTests(unittest.TestCase):
@@ -24,7 +24,7 @@ class CameraInventoryTests(unittest.TestCase):
         os.environ["NVR_COOKIE_SECURE"] = "false"
         self.context = TestClient(app)
         self.client = self.context.__enter__()
-        self.client.post("/api/setup/admin", json={"username": "inventory-admin", "password": TEST_PASSWORD})
+        self.client.post("/api/setup/admin", json={"username": "inventory-admin", "password": TEST_PASSWORD, "setup_code": setup_code()})
 
     def tearDown(self):
         self.context.__exit__(None, None, None)

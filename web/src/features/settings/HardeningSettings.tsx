@@ -49,7 +49,7 @@ export function HardeningSettings() {
       {data?.listening?.every_address ? (
         <section className="field-group settings-block" aria-label="Where the interface is served">
           <h2 className="field-heading">Where the interface is served</h2>
-          <p className="notice" data-tone="warn" role="status">
+          <p className="notice" data-tone="warn">
             The NVR's own interface is served over plain HTTP on every address of this machine{data.listening.networks.length ? `, so it can be reached from: ${data.listening.networks.join(", ")}` : ", so it can be reached from every network the machine is on"}.
             That includes the camera network. Set <code>NVR_LISTEN_HOST</code> to the one address people should reach it by (the management network's address, or <code>127.0.0.1</code> behind a tunnel or proxy on this machine),
             and close the port on the camera interface with the host's firewall. The README's settings table and the remote access guide have the steps.

@@ -16,7 +16,7 @@ from app.migrations import m0047_falls
 from app.store import connect
 from tests.scene_case import SceneTestCase
 from tests.test_falls import pose
-from tests.test_support import TEST_PASSWORD
+from tests.test_support import TEST_PASSWORD, setup_code
 
 
 class ScriptedReader:
@@ -138,7 +138,7 @@ class ApiTests(unittest.TestCase):
         os.environ["NVR_CREDENTIAL_KEY_PATH"] = str(Path(self.temporary.name) / "credentials.key")
         self.context = TestClient(create_app(start_workers=False))
         self.client = self.context.__enter__()
-        self.assertEqual(self.client.post("/api/setup/admin", json={"username": "keeper", "password": TEST_PASSWORD}).status_code, 201)
+        self.assertEqual(self.client.post("/api/setup/admin", json={"username": "keeper", "password": TEST_PASSWORD, "setup_code": setup_code()}).status_code, 201)
         with connect() as db:
             db.execute("INSERT INTO cameras(id,name,stream_url_ciphertext) VALUES('c1','Lounge',X'01')")
 

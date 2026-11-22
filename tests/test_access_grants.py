@@ -19,7 +19,7 @@ from app.routes import all_routes
 from app.principal import administrator, current_user, depends_on
 from app.security import hash_password
 from app.store import connect
-from tests.test_support import TEST_PASSWORD
+from tests.test_support import TEST_PASSWORD, setup_code
 
 OPERATOR_PASSWORD = "operator-password-1234"
 START = datetime.now(timezone.utc) - timedelta(hours=2)
@@ -40,7 +40,7 @@ class GrantCase(unittest.TestCase):
         self.app = create_app(start_workers=False)
         self.context = TestClient(self.app)
         self.admin = self.context.__enter__()
-        self.assertEqual(self.admin.post("/api/setup/admin", json={"username": "keeper", "password": TEST_PASSWORD}).status_code, 201)
+        self.assertEqual(self.admin.post("/api/setup/admin", json={"username": "keeper", "password": TEST_PASSWORD, "setup_code": setup_code()}).status_code, 201)
         self.dock, self.yard = self.add_group("Dock"), self.add_group("Yard")
         self.d1, self.d2 = self.add_camera("Dock 1", self.dock), self.add_camera("Dock 2", self.dock)
         self.y1 = self.add_camera("Yard 1", self.yard)

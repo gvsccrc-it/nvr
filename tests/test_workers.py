@@ -63,6 +63,10 @@ class SupervisedInstallation:
         self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(CookieJar()))
         _wait(self._healthy, 30, "the supervised web worker did not become healthy")
 
+    def setup_code(self) -> str:
+        """The one-time code the supervisor wrote beside the credential key when it started with no administrator (#542)."""
+        return (self.root / "setup-code").read_text(encoding="utf-8").strip()
+
     def _healthy(self) -> bool:
         try:
             with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/healthz", timeout=1) as response:
@@ -126,7 +130,7 @@ class SupervisorTests(unittest.TestCase):
         self.nvr = SupervisedInstallation(Path(self.temporary.name))
         self.addCleanup(self.temporary.cleanup)
         self.addCleanup(self.nvr.stop)
-        status, _ = self.nvr.request("POST", "/api/setup/admin", {"username": "keeper", "password": TEST_PASSWORD})
+        status, _ = self.nvr.request("POST", "/api/setup/admin", {"username": "keeper", "password": TEST_PASSWORD, "setup_code": self.nvr.setup_code()})
         self.assertEqual(status, 201)
 
     def _pid_alive(self, pid: int) -> bool:
@@ -338,7 +342,7 @@ class RecordingContinuityTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         nvr = SupervisedInstallation(Path(temporary.name), NVR_SEGMENT_SECONDS="10")
         self.addCleanup(nvr.stop)
-        self.assertEqual(nvr.request("POST", "/api/setup/admin", {"username": "keeper", "password": TEST_PASSWORD})[0], 201)
+        self.assertEqual(nvr.request("POST", "/api/setup/admin", {"username": "keeper", "password": TEST_PASSWORD, "setup_code": nvr.setup_code()})[0], 201)
         created, camera = nvr.request("POST", "/api/cameras", {"name": "Continuity", "stream_url": os.environ["NVR_RTSP_TEST_URL"], "recording_mode": "continuous"})
         self.assertEqual(created, 201, camera)
         self.assertEqual(nvr.request("PATCH", f"/api/cameras/{camera['id']}", {"recording_enabled": True})[0], 200)

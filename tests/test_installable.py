@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 
 from app.api import web_interface
 from app.application import create_app
-from tests.test_support import TEST_PASSWORD
+from tests.test_support import TEST_PASSWORD, setup_code
 
 
 def png_size(data: bytes) -> tuple[int, int]:
@@ -36,7 +36,7 @@ class InstallableAppTests(unittest.TestCase):
         shutil.copyfile(Path(__file__).resolve().parents[1] / "web" / "public" / "sw.js", self.dist / "sw.js")
         self.context = TestClient(create_app(start_workers=False))
         self.client = self.context.__enter__()
-        self.assertEqual(self.client.post("/api/setup/admin", json={"username": "keeper", "password": TEST_PASSWORD}).status_code, 201)
+        self.assertEqual(self.client.post("/api/setup/admin", json={"username": "keeper", "password": TEST_PASSWORD, "setup_code": setup_code()}).status_code, 201)
 
     def tearDown(self):
         self.context.__exit__(None, None, None)

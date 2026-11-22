@@ -250,7 +250,21 @@ jobs:
 
           status, setup = get_json("/api/setup/status")
           assert status == 200 and setup["setup_required"]
-          payload = json.dumps({"username": "ci-admin", "password": os.environ["NVR_CI_TEST_PASSWORD"]}).encode()
+          # First-time setup needs the one-time code the NVR printed when it started with no administrator (#542). An installer reads it
+          # from the log; here it is read from the file the NVR keeps it in, and checked to be in the log too.
+          import subprocess
+          import urllib.error
+          code = subprocess.run(["docker", "compose", "exec", "-T", "nvr", "cat", "/secrets/setup-code"], check=True, capture_output=True, text=True).stdout.strip()
+          logs = subprocess.run(["docker", "compose", "logs", "--no-color", "nvr"], check=True, capture_output=True, text=True)
+          assert code and code in logs.stdout + logs.stderr, "the setup code was not printed in the container's log"
+          refused = urllib.request.Request(base + "/api/setup/admin", method="POST", headers={"Content-Type": "application/json"},
+                                           data=json.dumps({"username": "ci-admin", "password": os.environ["NVR_CI_TEST_PASSWORD"]}).encode())
+          try:
+              urllib.request.urlopen(refused, timeout=5)
+              raise AssertionError("setup without the code was accepted")
+          except urllib.error.HTTPError as error:
+              assert error.code == 403, error.code
+          payload = json.dumps({"username": "ci-admin", "password": os.environ["NVR_CI_TEST_PASSWORD"], "setup_code": code}).encode()
           request = urllib.request.Request(
               base + "/api/setup/admin", data=payload,
               headers={"Content-Type": "application/json"}, method="POST"
