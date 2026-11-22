@@ -16,6 +16,12 @@ services:
         max-size: "20m"
         max-file: "5"
     stop_grace_period: 30s
+    # How many files, pipes and connections the NVR may have open at once (#546). Docker's own default is often 1,024, which a large
+    # site's recorder and a busy web interface can both reach. Each worker also raises its own limit as far as this allows.
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     # Hardening (#384). The NVR runs as an unprivileged user and needs no Linux capabilities: all are dropped, and nothing in the
     # container can gain privileges. An init process reaps anything orphaned when a worker is killed, so no zombies are left.
     # (Disk health is the one exception: the commented cap_add below adds back only what smartctl needs.)
@@ -87,6 +93,8 @@ services:
       NVR_DB_LOG_LIMIT_MB:
       NVR_DB_SYNCHRONOUS:
       NVR_STOP_GRACE_SECONDS:
+      NVR_WEB_MAX_CONNECTIONS:
+      NVR_WEB_FIRST_REQUEST_SECONDS:
       NVR_WORKER_START_SECONDS:
       NVR_ONVIF_TIMEOUT_SECONDS:
       NVR_TAMPER_SAMPLE_SECONDS:
