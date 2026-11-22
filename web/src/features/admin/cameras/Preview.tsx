@@ -19,13 +19,14 @@ const PHASE_LABEL: Record<PlayerSnapshot["phase"], string> = {
  */
 export function Preview({ camera, onClose }: { camera: Camera; onClose: () => void }) {
   const video = useRef<HTMLVideoElement>(null);
+  const image = useRef<HTMLImageElement>(null);
   const player = useRef<LivePlayer | null>(null);
   const [state, setState] = useState<PlayerSnapshot | null>(null);
   const [fallback, setFallback] = useState<string | null>(null);
 
   useEffect(() => {
     if (!video.current) return;
-    const instance = new LivePlayer({ cameraId: camera.id, quality: "low", video: video.current, onChange: setState, onFallback: setFallback });
+    const instance = new LivePlayer({ cameraId: camera.id, quality: "low", video: video.current, onChange: setState, onFallback: setFallback, picture: () => image.current });
     player.current = instance;
     instance.start();
     return () => {
@@ -39,7 +40,7 @@ export function Preview({ camera, onClose }: { camera: Camera; onClose: () => vo
     <section className="preview" aria-label={`Preview of ${camera.name}`} data-phase={phase}>
       <div className="preview-frame">
         <video ref={video} muted playsInline hidden={Boolean(fallback)} />
-        {fallback ? <img src={fallback} alt="" onError={() => player.current?.retry()} /> : null}
+        {fallback ? <img ref={image} alt="" /> : null}
         {phase !== "live" ? <div className="tile-overlay" role="status">{PHASE_LABEL[phase]}{state?.detail ? ` · ${state.detail}` : ""}</div> : null}
       </div>
       <div className="preview-bar">
