@@ -457,6 +457,39 @@ class HomeAssistantTests(MqttTests):
         self.sync(manager)
         self.assertIn(f"ha/prefix/camera/site2/{added}/config", self.retained(other))
 
+    def test_a_pass_uses_one_connection_however_many_messages_it_sends(self):
+        broker = self.broker(username="ha", password="pw")
+        self.enable(broker)
+        manager = self.sync()
+        self.assertGreater(len(broker.messages), 5)
+        self.assertEqual(len(broker.connections), 1, "one connection for the whole pass (#530)")
+        self.sync(manager)
+        self.assertEqual(len(broker.connections), 1, "a pass with nothing to say opens none")
+
+    def test_after_everything_has_to_be_said_again_it_is_said_over_several_passes(self):
+        broker = self.broker(username="ha", password="pw")
+        self.enable(broker)
+        whole = home_assistant.HomeAssistantManager()
+        everything = asyncio.run(whole.sync())
+        with patch.object(home_assistant, "MESSAGES_PER_PASS", 4):
+            manager = home_assistant.HomeAssistantManager()
+            passes = []
+            for _ in range(everything):
+                sent = asyncio.run(manager.sync())
+                if not sent:
+                    break
+                passes.append(sent)
+        self.assertGreater(len(passes), 1)
+        self.assertTrue(all(sent <= 4 for sent in passes), passes)
+        self.assertEqual(sum(passes), everything, "and nothing is left out")
+        self.assertEqual(manager.published, whole.published)
+
+    def test_the_open_alarms_are_read_through_their_index(self):
+        with connect() as db:
+            plan = " | ".join(row[3] for row in db.execute("EXPLAIN QUERY PLAN " + home_assistant.OPEN_ALARMS))
+        self.assertIn("alarms_open_order_idx", plan)
+        self.assertNotIn("TEMP B-TREE", plan)
+
     def test_nothing_is_published_while_it_is_off_or_misconfigured(self):
         broker = self.broker()
         self.assertEqual(asyncio.run(home_assistant.HomeAssistantManager().sync()), 0)
