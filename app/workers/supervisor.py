@@ -34,6 +34,7 @@ STOP_GRACE_SECONDS = float(os.environ.get("NVR_STOP_GRACE_SECONDS", "25"))
 # The workers other than the recorder stop together within this share of it; the recorder, stopped last, always has the rest to finish
 # and index the segments it is writing.
 OTHERS_SHARE = 0.5
+DAMAGED_BACKOFF_SECONDS = 300.0  # Between restarts of a worker while the database file is known to be damaged
 STATE_WRITE_SECONDS = 2.0  # The most the stop waits, in all, to write the workers' states while the recorder may be writing its last segments
 
 SUMMARIES = {
@@ -170,6 +171,9 @@ class Supervisor:
         worker.process = None
         worker.consecutive_failures += 1
         delay = min(BACKOFF_MAX_SECONDS, BACKOFF_BASE_SECONDS * 2 ** (worker.consecutive_failures - 1))
+        if code == db_health.DAMAGED_EXIT or db_health.damage_reported():
+            # Restarting cannot help until the file is restored: a few tries an hour, not one every few seconds (#453: 560 restarts a day).
+            delay = DAMAGED_BACKOFF_SECONDS
         worker.next_start_at = now + delay
         worker.pending_restart = True
         reason = self._explain(worker, code)
@@ -209,6 +213,8 @@ class Supervisor:
             self._oom_kills_seen = kills
         if worker.killed_reason:
             return worker.killed_reason
+        if code == db_health.DAMAGED_EXIT:
+            return f"the database file is damaged; {db_health.ADVICE}"
         if code == -signal.SIGKILL:
             memory = f"; it was using about {process_info.megabytes(worker.last_rss)} MB when last measured" if worker.last_rss else ""
             limit = process_info.megabytes(process_info.memory_limit_bytes())
@@ -304,6 +310,8 @@ def main() -> int:
     os.environ["NVR_STARTED_AT"] = repr(time.time())
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     logforward.install("supervisor")
+    db_health.install_log_filter("supervisor")
+    db_health.clear_damage_report()  # A new start, after a restore, begins clean; damage still there is found again within moments
     os.umask(0o077)
     if backup.pre_migration_backup not in migrations.pre_migration_hooks:
         migrations.pre_migration_hooks.append(backup.pre_migration_backup)

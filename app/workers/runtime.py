@@ -5,9 +5,11 @@ import asyncio
 import logging
 import os
 import signal
+import sqlite3
+import sys
 from typing import Protocol
 
-from app import logforward
+from app import db_health, logforward
 from app.workers import control, liveness
 
 
@@ -41,4 +43,13 @@ async def run(name: str, service: Service) -> None:
 def main(name: str, service: Service) -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     logforward.install(name)
-    asyncio.run(run(name, service))
+    db_health.install_log_filter(name)
+    try:
+        asyncio.run(run(name, service))
+    except sqlite3.DatabaseError as exc:
+        if not db_health.is_damage(exc):
+            raise
+        # The file is damaged: say so once and exit with the code that tells the supervisor not to restart this worker in a tight loop (#453).
+        db_health.report_damage(exc, f"{name} worker")
+        logging.getLogger(f"nvr.{name}").error("The %s worker stopped: THE DATABASE FILE IS DAMAGED (%s). %s", name, exc, db_health.ADVICE)
+        sys.exit(db_health.DAMAGED_EXIT)

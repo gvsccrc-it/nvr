@@ -90,6 +90,9 @@ def _record_damaged(kind: str, started: datetime, database: dict[str, Any]) -> d
     """A damaged file ends the run at once: the other checks read the same file, and recovering their incidents on a run that skipped them would be wrong.
     The incident and the run are written if the file still allows it; the log line and the returned result stand either way."""
     logger.error("Self-test: %s", database["detail"])
+    from . import db_health
+
+    db_health.report_damage(sqlite3.DatabaseError("; ".join(database.get("lines", [])) or "the integrity check failed"), "self-test")  # The health check fails from now on (#453)
     finished = _now()
     try:
         with connect() as db:
@@ -206,6 +209,7 @@ class SelfTestManager:
                 from . import db_health
 
                 if db_health.is_damage(exc):
+                    db_health.report_damage(exc, "self-test")
                     logger.error("The self-test cannot read the database: the file is damaged (%s). %s", exc, db_health.ADVICE)  # One line, not a traceback a minute
                 else:
                     logger.exception("Self-test cycle failed")
