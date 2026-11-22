@@ -9,6 +9,13 @@ services:
     image: cloudflare/cloudflared:2026.11.1@sha256:e613aadbc2d9511785d2e67a86b0c8ac18dd63a3f9af0d06faf04cbfdcb35f2d  # Pinned (#384); Dependabot proposes updates
     network_mode: host
     restart: unless-stopped
+    # Bounded on purpose (#543): Docker's default keeps every line for ever, on the system disk. 30 MB at most; raise max-size or
+    # max-file here if you need more history. docs: README, "Container logs".
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     command: tunnel --no-autoupdate run
     environment:
       TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:?Set CLOUDFLARE_TUNNEL_TOKEN to the tunnel's token}

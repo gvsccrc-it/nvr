@@ -8,6 +8,13 @@ services:
     # camera-network interfaces directly. This is the tested deployment mode.
     network_mode: host
     restart: unless-stopped
+    # Bounded on purpose (#543): Docker's default keeps every line for ever, on the system disk. 100 MB at most; raise max-size or
+    # max-file here if you need more history. docs: README, "Container logs".
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
     stop_grace_period: 30s
     # Hardening (#384). The NVR runs as an unprivileged user and needs no Linux capabilities: all are dropped, and nothing in the
     # container can gain privileges. An init process reaps anything orphaned when a worker is killed, so no zombies are left.
@@ -50,6 +57,55 @@ services:
       NVR_BACKUP_KEEP: ${NVR_BACKUP_KEEP:-14}
       # Which disk holds each storage volume, for SMART (JSON, volume name to device). Needed in a container, where the disk cannot be traced from the mount.
       NVR_SMART_DEVICES: ${NVR_SMART_DEVICES:-}
+      # Everything below is passed through only when it is set, in .env or in the shell that runs Compose (#544): a name with no value
+      # here means "take it from there, and leave it unset in the container if it is not there". Compose reads .env only to fill in this
+      # file, so a setting that is not named in this list never reaches the NVR. The README's table says what each one does.
+      NVR_WEBAUTHN_RP_ID:
+      NVR_TRUST_FORWARDED_FOR:
+      NVR_VAPID_SUBJECT:
+      NVR_PUSH_EXTRA_HOSTS:
+      NVR_MAX_REQUEST_BYTES:
+      NVR_UPDATE_CHECK:
+      NVR_UPDATE_FEED_URL:
+      NVR_UPDATE_IMAGE:
+      NVR_LOG_FORWARD_URL:
+      NVR_LOG_FORWARD_CA:
+      NVR_LOG_FORWARD_LEVEL:
+      NVR_LOG_FORWARD_QUEUE:
+      NVR_LOG_FORWARD_HEADERS:
+      NVR_MS_LOGIN_URL:
+      NVR_MS_GRAPH_URL:
+      NVR_HWACCEL:
+      NVR_VAAPI_DEVICE:
+      NVR_SEGMENT_SECONDS:
+      NVR_MOTION_BUFFER_PATH:
+      NVR_STORAGE_PRESSURE_FREE_BYTES:
+      NVR_TIER_CACHE_PATH:
+      NVR_TIER_CACHE_BYTES:
+      NVR_FOOTAGE_CHAIN_KEEP_DAYS:
+      NVR_DB_LOG_LIMIT_MB:
+      NVR_DB_SYNCHRONOUS:
+      NVR_STOP_GRACE_SECONDS:
+      NVR_WORKER_START_SECONDS:
+      NVR_ONVIF_TIMEOUT_SECONDS:
+      NVR_TAMPER_SAMPLE_SECONDS:
+      NVR_HARDENING_PROBE_GAP_SECONDS:
+      NVR_SMART_INTERVAL_SECONDS:
+      NVR_SMARTCTL:
+      NVR_SIMILAR_EXTENSION:
+      NVR_AI_CPU_THREADS:
+      NVR_AI_MODEL_PATH:
+      NVR_AI_MODEL_DIRECTORY:
+      NVR_AI_ATTRIBUTE_MODEL_PATH:
+      NVR_AI_REID_MODEL_PATH:
+      NVR_AI_CLIP_MODEL_DIR:
+      NVR_AI_REDACTION_MODEL_DIR:
+      NVR_AI_PLATE_LABEL:
+      NVR_PLATE_MODELS_DIR:
+      NVR_PLATE_DETECTOR_MODEL_PATH:
+      NVR_PLATE_RECOGNISER_MODEL_PATH:
+      NVR_POSE_MODELS_DIR:
+      NVR_FACE_MODELS_DIR:
     # Disk health (SMART) needs the recording disks passed through. Uncomment and name your disks, and tell the NVR which disk holds each volume;
     # without this, Settings > Recording & storage reports disk health as "not available". See docs/disk-health-and-retention-forecast.md.
     # For hardware video acceleration (docs/hevc-and-acceleration.md), pass the graphics device in, e.g. under devices: "/dev/dri:/dev/dri"

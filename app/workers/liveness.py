@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from app import env_numbers
 from app.store import connect
 
 logger = logging.getLogger(__name__)
@@ -70,7 +71,7 @@ def pulse(name: str) -> None:
     os.replace(temporary, path)
 
 
-START_LIMIT_SECONDS = float(os.environ.get("NVR_WORKER_START_SECONDS", "300"))  # How long a worker may take to finish starting
+START_LIMIT_SECONDS = env_numbers.number("NVR_WORKER_START_SECONDS", 300, 30, 3600)  # How long a worker may take to finish starting
 
 
 def _starting_path(name: str) -> Path:

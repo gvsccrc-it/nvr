@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import logging
 
 import uvicorn
 from uvicorn.config import LOGGING_CONFIG
@@ -10,11 +11,26 @@ from app import db_health, logforward
 from app.entrypoint import listen_port
 
 
+class FailedRequestsOnly(logging.Filter):
+    """Keeps the access log's lines for requests that failed (status 400 and above) and drops the rest (#543).
+
+    The access log wrote a line for every request: the health check every 30 seconds and 40 to 100 background requests a minute from
+    each open browser tab, all of it into the container's log on the system disk. What went wrong is what the log is read for."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            return int(record.args[4]) >= 400  # type: ignore[index]  # (client, method, path, HTTP version, status)
+        except (TypeError, ValueError, IndexError, KeyError):
+            return True  # Not a line of the usual shape: kept
+
+
 def log_config() -> dict:
     """Uvicorn's own logging, with its server and error log (start-up failures, "Exception in ASGI application") also passed up to the
-    root logger, where log forwarding listens. The access log, one line per request, stays out of it."""
+    root logger, where log forwarding listens. The access log stays out of that, and holds only the requests that failed."""
     config = copy.deepcopy(LOGGING_CONFIG)
     config["loggers"]["uvicorn"]["propagate"] = True
+    config.setdefault("filters", {})["failed_requests_only"] = {"()": "app.workers.web.FailedRequestsOnly"}
+    config["handlers"]["access"]["filters"] = ["failed_requests_only"]
     return config
 
 

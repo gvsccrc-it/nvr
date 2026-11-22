@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from app import backup, db_health, failover, logforward, migrations
+from app import backup, db_health, env_numbers, failover, logforward, migrations
 from app.detection import mark_analysis_interrupted
 from app.incidents import sync_incident
 from app.store import connect, initialize
@@ -30,7 +30,8 @@ STABLE_AFTER_SECONDS = 60.0
 MEMORY_SAMPLE_SECONDS = 5.0
 POLL_SECONDS = 0.5
 # The whole stop, every worker included: under Compose's stop_grace_period (30 s), after which Docker kills everything without cleanup (#410).
-STOP_GRACE_SECONDS = float(os.environ.get("NVR_STOP_GRACE_SECONDS", "25"))
+# A mistyped value used to stop the supervisor, the container's first process, with a traceback; and 0 killed every worker at once (#544).
+STOP_GRACE_SECONDS = env_numbers.number("NVR_STOP_GRACE_SECONDS", 25, 1, 600)
 # The workers other than the recorder stop together within this share of it; the recorder, stopped last, always has the rest to finish
 # and index the segments it is writing.
 OTHERS_SHARE = 0.5
