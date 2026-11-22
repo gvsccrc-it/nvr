@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, field_validator
 from app.principal import Administrator, CurrentUser
 from app.store import connect
 from app.incidents import acknowledge_incident, incident_view, list_incidents
+from app.incidents import history as incident_history
 from app.webhooks import EVENT_TYPES as WEBHOOK_EVENT_TYPES, create_endpoint as create_webhook_endpoint, delete_endpoint as delete_webhook_endpoint, enqueue_test as enqueue_webhook_test, list_deliveries as list_webhook_deliveries, list_endpoints as list_webhook_endpoints, rotate_secret as rotate_webhook_secret, update_endpoint as update_webhook_endpoint
 from app.heartbeat import configure_heartbeat, disable_heartbeat, heartbeat_status, queue_heartbeat_test, rotate_heartbeat_secret
 from app.audit import record as audit_record
@@ -56,10 +57,19 @@ def get_incidents(
     state: str | None = Query(default=None, pattern="^(active|acknowledged|recovered)$"),
 ) -> dict[str, object]:
     with connect() as db:
-        # Someone limited to some cameras sees the incidents of those cameras, not the system's or other cameras'. They are
-        # filtered before the page is cut, or newer incidents of hidden cameras could push all of theirs off it.
-        incidents = list_incidents(db, state=state, limit=200 if user.access.unrestricted else 5000)
-    return {"incidents": [incident for incident in incidents if user.access.unrestricted or (incident["camera_id"] and user.access.can_see(incident["camera_id"]))][:200]}
+        # Someone limited to some cameras sees the incidents of those cameras, not the system's or other cameras'. The query filters them
+        # (#516): it used to read up to 5,000 incidents, each with every event, and filter here.
+        return {"incidents": list_incidents(db, state=state, limit=200, cameras=None if user.access.unrestricted else user.access.cameras)}
+
+
+@router.get("/api/incidents/{incident_id}")
+def get_incident_history(incident_id: str, user: CurrentUser, before: int | None = Query(default=None, ge=1)) -> dict[str, object]:
+    """One incident with a page of its history (the list carries only its newest events, #516). ``next`` asks for the page before."""
+    with connect() as db:
+        result = incident_history(db, incident_id, before)
+    if result is None or not (user.access.unrestricted or (result["camera_id"] and user.access.can_see(result["camera_id"]))):
+        raise HTTPException(status_code=404, detail="Incident not found")
+    return result
 
 
 @router.post("/api/incidents/{incident_id}/acknowledge")

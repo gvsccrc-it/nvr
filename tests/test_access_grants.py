@@ -293,7 +293,7 @@ class RouteTests(GrantCase):
         ("POST", "/api/alarms/{alarm_id}/comments"), ("POST", "/api/alarms/{alarm_id}/resolve"),
         ("GET", "/api/exports"), ("POST", "/api/exports"), ("GET", "/api/exports/{job_id}"), ("POST", "/api/exports/{job_id}/cancel"),
         ("GET", "/api/exports/{job_id}/download"), ("POST", "/api/exports/{job_id}/retry"), ("POST", "/api/exports/{job_id}/verify"),
-        ("GET", "/api/incidents"), ("POST", "/api/incidents/{incident_id}/acknowledge"),
+        ("GET", "/api/incidents"), ("GET", "/api/incidents/{incident_id}"), ("POST", "/api/incidents/{incident_id}/acknowledge"),
         ("GET", "/api/live/layouts"), ("DELETE", "/api/live/layouts/{name}"), ("PUT", "/api/live/layouts/{name}"), ("GET", "/api/live/views"),
         ("GET", "/api/live/workspace"), ("PUT", "/api/live/workspace"), ("GET", "/api/live/alarm-pop-ins"), ("POST", "/api/playback/timeline"),
         ("GET", "/api/ai/search"), ("GET", "/api/insights"), ("GET", "/api/digests"), ("GET", "/api/external-events"), ("GET", "/api/camera-health"), ("GET", "/api/camera-health/export.csv"), ("GET", "/api/digests/preview"), ("GET", "/api/digests/{digest_id}"), ("GET", "/api/insights/export.csv"), ("GET", "/api/ai/search/options"), ("GET", "/api/ai/tracks/{track_id}/thumbnail"), ("GET", "/api/ai/tracks/{track_id}/similar"), ("GET", "/api/ai/search/ask"),
@@ -449,6 +449,10 @@ class ContentTests(GrantCase):
             ids = {row["incident_key"]: row["id"] for row in db.execute("SELECT id,incident_key FROM incidents")}
         self.assertEqual({incident["summary"] for incident in self.limited.get("/api/incidents").json()["incidents"]}, {"fault a"})
         self.assertEqual({incident["summary"] for incident in self.admin.get("/api/incidents").json()["incidents"]}, {"fault a", "fault b", "fault c"})
+        self.assertEqual(self.limited.get(f"/api/incidents/{ids['test:b']}").status_code, 404)  # Its history too (#516)
+        self.assertEqual(self.limited.get(f"/api/incidents/{ids['test:c']}").status_code, 404)
+        self.assertEqual(self.limited.get(f"/api/incidents/{ids['test:a']}").json()["summary"], "fault a")
+        self.assertEqual(self.admin.get(f"/api/incidents/{ids['test:c']}").json()["summary"], "fault c")
         self.assertEqual(self.limited.post(f"/api/incidents/{ids['test:b']}/acknowledge").status_code, 404)
         self.assertEqual(self.limited.post(f"/api/incidents/{ids['test:c']}/acknowledge").status_code, 404)  # A system incident.
         self.assertEqual(self.limited.post(f"/api/incidents/{ids['test:a']}/acknowledge").status_code, 200)

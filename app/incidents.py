@@ -22,6 +22,7 @@ def _event(db: sqlite3.Connection, incident_id: str, event_type: str, details: d
         "INSERT INTO incident_events(event_id,incident_id,event_type,actor_id,occurred_at,details_json) VALUES(?,?,?,?,?,?)",
         (event_id, incident_id, event_type, actor_id, occurred_at, json.dumps(details, sort_keys=True)),
     )
+    db.execute("UPDATE incidents SET event_count=event_count+1 WHERE id=?", (incident_id,))  # So the list never counts them (#516)
     if event_type not in {"raised", "recurred", "recovered"}:
         return
     incident = db.execute("SELECT fault_type,camera_id,summary,recurrence_count FROM incidents WHERE id=?", (incident_id,)).fetchone()
@@ -142,24 +143,130 @@ def acknowledge_incident(db: sqlite3.Connection, incident_id: str, actor_id: int
     return dict(db.execute("SELECT * FROM incidents WHERE id=?", (incident_id,)).fetchone())
 
 
-def incident_view(db: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
+EVENTS_SHOWN = 5  # Newest events of each incident in the list; the whole history is on its own route (#516)
+HISTORY_PAGE = 500  # Events per page of one incident's history
+PRUNE_BATCH = 500  # Rows removed per write transaction, so the pass never holds the write lock for long
+
+
+def _view(row: sqlite3.Row) -> dict[str, Any]:
     result = dict(row)
     result["fault_active"] = bool(result["fault_active"])
     result["details"] = json.loads(result.pop("details_json"))
-    result["events"] = []
-    for event in db.execute("SELECT * FROM incident_events WHERE incident_id=? ORDER BY id", (row["id"],)).fetchall():
-        event_data = dict(event)
-        event_data["details"] = json.loads(event_data.pop("details_json"))
-        result["events"].append(event_data)
+    result["events_total"] = int(result.pop("event_count")) + int(result["events_removed"])  # Every event it has had; events_removed are no longer kept
     return result
 
 
-def list_incidents(db: sqlite3.Connection, state: str | None = None, limit: int = 200) -> list[dict[str, Any]]:
-    if state is None:
-        rows = db.execute("SELECT * FROM incidents ORDER BY last_seen_at DESC LIMIT ?", (limit,)).fetchall()
-    else:
-        rows = db.execute("SELECT * FROM incidents WHERE state=? ORDER BY last_seen_at DESC LIMIT ?", (state, limit)).fetchall()
-    return [incident_view(db, row) for row in rows]
+def _event_view(row: sqlite3.Row) -> dict[str, Any]:
+    event = dict(row)
+    event["details"] = json.loads(event.pop("details_json"))
+    return event
+
+
+def _with_newest_events(db: sqlite3.Connection, rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
+    """Each incident with its EVENTS_SHOWN newest events, oldest first, in one statement for the page: an incident whose fault comes and goes
+    gained events for ever, and the list sent them all every 15 seconds to every open tab (#516)."""
+    views = [_view(row) for row in rows]
+    events: dict[str, list[dict[str, Any]]] = {view["id"]: [] for view in views}
+    if views:
+        for event in db.execute(
+                "SELECT e.* FROM incidents i JOIN incident_events e ON e.id IN (SELECT x.id FROM incident_events x WHERE x.incident_id=i.id ORDER BY x.id DESC LIMIT ?) "
+                "WHERE i.id IN (SELECT value FROM json_each(?)) ORDER BY e.id", (EVENTS_SHOWN, json.dumps(list(events)))):
+            events[event["incident_id"]].append(_event_view(event))
+    for view in views:
+        view["events"] = events[view["id"]]
+    return views
+
+
+def incident_view(db: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
+    return _with_newest_events(db, [row])[0]
+
+
+def list_incidents(db: sqlite3.Connection, state: str | None = None, limit: int = 200, cameras: frozenset[str] | None = None) -> list[dict[str, Any]]:
+    """The newest incidents, of one state or all. ``cameras`` limits them to those cameras' incidents (incidents naming no camera are the
+    system's, and left out): filtered in the query, so a restricted person's page is read through an index like anyone else's (#516)."""
+    where, values = [], []
+    if state is not None:
+        # With cameras, the unary + keeps the state index out: walking every incident in a state (months of recovered ones) to find a few
+        # cameras' would cost more than reading those cameras' incidents through their own index
+        where.append("+state=?" if cameras is not None else "state=?")
+        values.append(state)
+    if cameras is not None:
+        if not cameras:
+            return []
+        where.append("camera_id IN (SELECT value FROM json_each(?))")
+        values.append(json.dumps(sorted(cameras)))
+    clause = f"WHERE {' AND '.join(where)} " if where else ""
+    rows = db.execute(f"SELECT * FROM incidents {clause}ORDER BY last_seen_at DESC LIMIT ?", (*values, limit)).fetchall()
+    return _with_newest_events(db, rows)
+
+
+def history(db: sqlite3.Connection, incident_id: str, before: int | None = None, limit: int = HISTORY_PAGE) -> dict[str, Any] | None:
+    """One incident with a page of its history, newest page first and each page oldest first. ``next`` is the ``before`` of the page of
+    older events, or None when this page reaches the oldest one kept."""
+    row = db.execute("SELECT * FROM incidents WHERE id=?", (incident_id,)).fetchone()
+    if row is None:
+        return None
+    rows = db.execute("SELECT * FROM incident_events WHERE incident_id=? AND id<? ORDER BY id DESC LIMIT ?",
+                      (incident_id, before if before is not None else 2 ** 63 - 1, limit + 1)).fetchall()
+    result = _view(row)
+    result["events"] = [_event_view(event) for event in reversed(rows[:limit])]
+    result["next"] = rows[limit - 1]["id"] if len(rows) > limit else None
+    return result
+
+
+def prune_history(now: datetime | None = None) -> dict[str, int]:
+    """Keep incident history for the alarm history period (``alarm_settings.history_days``, #349), as decided on #516.
+
+    An incident that is active or acknowledged is never removed, however old. A recovered one goes, with its events, once it has been
+    recovered for longer than the period. Older events of the incidents that stay are removed and counted on the incident, so a fault
+    that comes and goes for months cannot grow its history without limit. Each step reads what is due first and takes the write lock
+    only when there is something to do (#280), a batch at a time."""
+    from datetime import timedelta
+
+    from .alarms import settings
+    from .store import connect, has_row
+
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    done = {"removed_incidents": 0, "removed_events": 0}
+    with connect() as db:
+        before = (now - timedelta(days=settings(db)["history_days"])).isoformat()  # The form _now writes
+        recovered = "SELECT id FROM incidents WHERE state='recovered' AND recovered_at<?"
+        while has_row(db, f"{recovered} LIMIT 1", (before,)):
+            ids = [row[0] for row in db.execute(f"{recovered} LIMIT ?", (before, PRUNE_BATCH))]
+            # Their events first, a batch at a time: one incident can have thousands, and the cascade would remove them in one go
+            while has_row(db, "SELECT 1 FROM incident_events WHERE incident_id IN (SELECT value FROM json_each(?)) LIMIT 1", (json.dumps(ids),)):
+                _write(db, "DELETE FROM incident_events WHERE id IN (SELECT id FROM incident_events WHERE incident_id IN (SELECT value FROM json_each(?)) LIMIT ?)",
+                       (json.dumps(ids), PRUNE_BATCH))
+            done["removed_incidents"] += _write(db, "DELETE FROM incidents WHERE id IN (SELECT value FROM json_each(?)) AND state='recovered' AND recovered_at<?",
+                                                (json.dumps(ids), before))
+        old = "SELECT id,incident_id FROM incident_events WHERE occurred_at<?"
+        while has_row(db, f"{old} LIMIT 1", (before,)):
+            rows = db.execute(f"{old} ORDER BY occurred_at LIMIT ?", (before, PRUNE_BATCH)).fetchall()
+            counts: dict[str, int] = {}
+            for row in rows:
+                counts[row["incident_id"]] = counts.get(row["incident_id"], 0) + 1
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                removed = db.execute("DELETE FROM incident_events WHERE id IN (SELECT value FROM json_each(?))", (json.dumps([row["id"] for row in rows]),)).rowcount
+                db.executemany("UPDATE incidents SET event_count=MAX(event_count-?,0),events_removed=events_removed+?,events_removed_before=? WHERE id=?",
+                               [(count, count, before, incident_id) for incident_id, count in counts.items()])
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            db.execute("COMMIT")
+            done["removed_events"] += removed
+    return done
+
+
+def _write(db: sqlite3.Connection, statement: str, values: tuple[Any, ...]) -> int:
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        changed = db.execute(statement, values).rowcount
+    except BaseException:
+        db.execute("ROLLBACK")
+        raise
+    db.execute("COMMIT")
+    return changed
 
 
 def sync_storage_incidents(db: sqlite3.Connection, volumes: list[dict[str, Any]]) -> None:

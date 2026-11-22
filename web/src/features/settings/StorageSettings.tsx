@@ -435,7 +435,7 @@ function AlarmFootage() {
           </label>
           <p className="muted field-hint">
             Older resolved alarms and rule events are removed (never sooner than their footage above). An alarm nobody resolves is closed after
-            30 days. Alarms in a case, or over held footage, are kept.
+            30 days. Alarms in a case, or over held footage, are kept. Recovered incidents, and incident history, are kept for the same number of days.
           </p>
           <TabFooter outcome={tab.outcome} dirty={tab.dirty} saving={tab.saving} onRevert={tab.revert} blocked={blocked} />
         </>
