@@ -117,14 +117,21 @@ def discovery(db: sqlite3.Connection, settings: dict[str, Any]) -> list[tuple[st
     return messages
 
 
+# The open states by name, so that the index for open alarms serves it. "Not resolved" could not use that index: every pass, every five
+# seconds, walked the whole alarms table, resolved history included (538 ms at 150,000 alarms, #530).
+OPEN_ALARMS = "SELECT id,camera_id,rule_name,label,occurred_at,state FROM alarms INDEXED BY alarms_open_order_idx WHERE state IN ('new','acknowledged','assigned') ORDER BY occurred_at DESC,id"
+MESSAGES_PER_PASS = 60  # The most one pass publishes; the rest go in the passes that follow, five seconds apart
+
+
 def alarm_states(db: sqlite3.Connection) -> dict[str, dict[str, Any]]:
     """For each live camera: whether it has an alarm not yet resolved, and the latest one."""
     states = {row["id"]: {"on": False, "open": 0, "latest": None} for row in db.execute("SELECT id FROM cameras WHERE archived_at IS NULL")}
-    for row in db.execute("SELECT id,camera_id,rule_name,label,occurred_at,state FROM alarms WHERE state!='resolved' ORDER BY occurred_at,id"):
+    for row in db.execute(OPEN_ALARMS):
         if row["camera_id"] in states:
             state = states[row["camera_id"]]
             state["on"], state["open"] = True, state["open"] + 1
-            state["latest"] = {"alarm_id": row["id"], "rule_name": row["rule_name"], "label": row["label"], "occurred_at": row["occurred_at"], "state": row["state"]}
+            if state["latest"] is None:  # Newest first, in the index's own order: the first seen for a camera is its latest
+                state["latest"] = {"alarm_id": row["id"], "rule_name": row["rule_name"], "label": row["label"], "occurred_at": row["occurred_at"], "state": row["state"]}
     return states
 
 
@@ -179,31 +186,37 @@ class HomeAssistantManager:
         broker, settings = found
         node = settings["node_id"]
         digest = hashlib.sha256(json.dumps([settings, configs], sort_keys=True).encode()).hexdigest()
-        sent = 0
-        async def publish(topic: str, payload: bytes | str, *, retain: bool = True) -> None:
-            nonlocal sent
-            await mqtt.publish(broker, topic, payload if isinstance(payload, bytes) else payload.encode("utf-8"), qos=1, retain=retain)
-            sent += 1
         if digest != self.config_hash:
-            self.published.clear()  # A new broker or new discovery: everything is said again
-            for topic, config in configs:
-                await publish(topic, json.dumps(config, sort_keys=True, separators=(",", ":")))
-            await publish(f"{node}/status", "online")
+            self.published.clear()  # A new broker, new discovery, or a broker that failed: everything is said again
             self.config_hash, self.broker, self.node = digest, broker, node
-        total = sum(state["open"] for state in states.values())
-        for key, payload in {f"{node}/alarms/open": str(total), **{f"{node}/{camera}/alarm": "ON" if state["on"] else "OFF" for camera, state in states.items()},
-                             **{f"{node}/{camera}/alarm/attributes": json.dumps({"open_alarms": state["open"], **(state["latest"] or {})}, sort_keys=True) for camera, state in states.items()}}.items():
-            if self.published.get(key) != payload:
-                await publish(key, payload)
-                self.published[key] = payload
-        for camera, state in states.items():
-            latest = state["latest"]["alarm_id"] if state["latest"] else None
-            if latest and self.snapshots.get(camera) != latest:
-                from .push import thumbnail
-                image = await asyncio.to_thread(thumbnail, latest)
-                if image:
-                    await publish(f"{node}/{camera}/snapshot", image)
-                self.snapshots[camera] = latest
+        # What the broker should hold, in the order it is said: the discovery messages, that the NVR is online, then each camera's state.
+        wanted: dict[str, str] = {topic: json.dumps(config, sort_keys=True, separators=(",", ":")) for topic, config in configs}
+        wanted[f"{node}/status"] = "online"
+        wanted[f"{node}/alarms/open"] = str(sum(state["open"] for state in states.values()))
+        wanted.update({f"{node}/{camera}/alarm": "ON" if state["on"] else "OFF" for camera, state in states.items()})
+        wanted.update({f"{node}/{camera}/alarm/attributes": json.dumps({"open_alarms": state["open"], **(state["latest"] or {})}, sort_keys=True) for camera, state in states.items()})
+        sent = 0
+        # One connection for the pass, and a bounded number of messages: after a broker failure everything is said again, and saying it
+        # all at once was about two messages a camera in one burst, each on a connection of its own (#530).
+        async with mqtt.Session(broker) as session:
+            for key, payload in wanted.items():
+                if sent >= MESSAGES_PER_PASS:
+                    break
+                if self.published.get(key) != payload:
+                    await session.publish(key, payload.encode("utf-8"), qos=1, retain=True)
+                    self.published[key] = payload
+                    sent += 1
+            for camera, state in states.items():
+                if sent >= MESSAGES_PER_PASS:
+                    break
+                latest = state["latest"]["alarm_id"] if state["latest"] else None
+                if latest and self.snapshots.get(camera) != latest:
+                    from .push import thumbnail
+                    image = await asyncio.to_thread(thumbnail, latest)
+                    if image:
+                        await session.publish(f"{node}/{camera}/snapshot", image, qos=1, retain=True)
+                        sent += 1
+                    self.snapshots[camera] = latest
         return sent
 
     async def _run(self) -> None:

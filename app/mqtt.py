@@ -112,10 +112,42 @@ async def _read_message(reader: asyncio.StreamReader, limit: int) -> tuple[int, 
     return header, head, True
 
 
-async def publish(broker: Broker, topic: str, payload: bytes, *, qos: int = 1, retain: bool = False) -> None:
-    context = ssl.create_default_context() if broker.tls else None
-    reader, writer = await asyncio.wait_for(asyncio.open_connection(broker.host, broker.port, ssl=context), TIMEOUT_SECONDS)
-    try:
+class Session:
+    """One connection to a broker for several messages: ``async with Session(broker) as session: await session.publish(...)``.
+
+    The connection is made at the first message, so a pass with nothing to say opens none. Each message used to open its own connection
+    (TCP, and TLS where the broker uses it): a sync of 200 cameras after a broker hiccup was about 400 connections in a row (#530)."""
+
+    def __init__(self, broker: Broker) -> None:
+        self.broker = broker
+        self.reader: asyncio.StreamReader | None = None
+        self.writer: asyncio.StreamWriter | None = None
+
+    async def __aenter__(self) -> "Session":
+        return self
+
+    async def __aexit__(self, *error: object) -> None:
+        writer, self.reader, self.writer = self.writer, None, None
+        if writer is None:
+            return
+        try:
+            if error[0] is None:
+                writer.write(bytes([0xE0, 0]))
+                await writer.drain()
+        except (OSError, ConnectionError):
+            pass
+        finally:
+            writer.close()
+            try:
+                await asyncio.wait_for(writer.wait_closed(), 2)
+            except (ConnectionError, ssl.SSLError, asyncio.TimeoutError):
+                pass
+
+    async def _connect(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        broker = self.broker
+        context = ssl.create_default_context() if broker.tls else None
+        reader, writer = await asyncio.wait_for(asyncio.open_connection(broker.host, broker.port, ssl=context), TIMEOUT_SECONDS)
+        self.reader, self.writer = reader, writer
         flags = 0x02  # Clean session.
         credentials = b""
         if broker.username:
@@ -132,6 +164,10 @@ async def publish(broker: Broker, topic: str, payload: bytes, *, qos: int = 1, r
             raise ConnectionError("MQTT broker did not acknowledge the connection")
         if body[1]:
             raise MqttRefused(body[1])
+        return reader, writer
+
+    async def publish(self, topic: str, payload: bytes, *, qos: int = 1, retain: bool = False) -> None:
+        reader, writer = (self.reader, self.writer) if self.reader is not None and self.writer is not None else await self._connect()
         packet_id = secrets.randbelow(65535) + 1
         variable = _string(topic) + (struct.pack("!H", packet_id) if qos else b"")
         writer.write(_packet(0x30 | (qos << 1) | int(retain), variable + payload))
@@ -140,14 +176,12 @@ async def publish(broker: Broker, topic: str, payload: bytes, *, qos: int = 1, r
             header, body = await asyncio.wait_for(_read_packet(reader), TIMEOUT_SECONDS)
             if header >> 4 != 4 or body != struct.pack("!H", packet_id):
                 raise ConnectionError("MQTT broker did not acknowledge the message")
-        writer.write(bytes([0xE0, 0]))
-        await writer.drain()
-    finally:
-        writer.close()
-        try:
-            await asyncio.wait_for(writer.wait_closed(), 2)
-        except (ConnectionError, ssl.SSLError, asyncio.TimeoutError):
-            pass
+
+
+async def publish(broker: Broker, topic: str, payload: bytes, *, qos: int = 1, retain: bool = False) -> None:
+    """One message on a connection of its own."""
+    async with Session(broker) as session:
+        await session.publish(topic, payload, qos=qos, retain=retain)
 
 
 def topic_matches(topic_filter: str, topic: str) -> bool:
