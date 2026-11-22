@@ -577,6 +577,9 @@ class RecordingManager:
         with connect() as db:
             viewing_audit.close_orphans(db)  # What a crash left open, once it has gone quiet; at start alone, a full restart's own were too fresh to close
             viewing_audit.prune(db)
+            from . import backfill  # Here: backfill imports this module
+
+            backfill.prune_jobs(db)  # Jobs about time older than the camera's oldest footage (#475)
             security_log.prune(db)
         from . import talk
 
