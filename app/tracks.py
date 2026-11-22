@@ -70,13 +70,16 @@ class Tracker:
     """Links one camera's detections into tracks, one frame at a time."""
 
     def __init__(self, max_gap: timedelta = timedelta(seconds=10), min_iou: float = 0.1,
-                 min_similarity: float = 0.6, max_jump: float = 0.2):
+                 min_similarity: float = 0.6, max_jump: float = 0.2, take_up: bool = False):
         self.max_gap = max_gap
         self.min_iou = min_iou
         self.min_similarity = min_similarity
         self.max_jump = max_jump
         self.active: list[_ActiveTrack] = []
         self.profiles: dict[str, TrackProfile] = {}
+        # ``take_up``: begin with the objects the camera was following a moment ago (see ``resume``). The AI worker asks for it each time
+        # it opens a camera's stream; a tracker made without it starts from nothing, as it always did.
+        self.resumed = not take_up
 
     def profile(self, track_id: str) -> TrackProfile:
         """What a live track has shown so far (its attribute votes, direction and places passed)."""
@@ -121,6 +124,31 @@ class Tracker:
         return result
 
 
+RESUME_SECONDS = 30  # How long after it was last seen an object is still taken to be the one in the same place
+
+
+def resume(db: sqlite3.Connection, tracker: Tracker, camera_id: str, at: datetime) -> int:
+    """Take up the objects this camera was following a moment ago, so each keeps its track (#514).
+
+    Every opening of a camera's stream starts a new tracker, and a new tracker gave every object in view a new track. A rule fires once
+    for a rule and a track, and "inside the zone" counts for a zone-entry rule, so after each stream hiccup every parked car and everyone
+    at a desk raised its alarms again. The tracks seen within ``RESUME_SECONDS`` are given to the new tracker at their last boxes: an
+    object found where one of them was is that object, with its track, and so with everything already known and already fired for it.
+    The same holds when the AI worker itself has restarted. Nothing is known of how they looked, so they are matched by place alone."""
+    since = (at - timedelta(seconds=RESUME_SECONDS)).astimezone(timezone.utc).isoformat()
+    taken = {track.id for track in tracker.active}
+    for track in db.execute("SELECT id,label FROM ai_tracks WHERE camera_id=? AND last_seen_at>=? AND last_seen_at<=?", (camera_id, since, at.astimezone(timezone.utc).isoformat())).fetchall():
+        if track["id"] in taken:
+            continue
+        last = db.execute("SELECT box_x,box_y,box_width,box_height FROM ai_detections WHERE track_id=? ORDER BY detected_at DESC,id DESC LIMIT 1", (track["id"],)).fetchone()
+        if last is None:
+            continue
+        box = {"x": last["box_x"], "y": last["box_y"], "width": last["box_width"], "height": last["box_height"]}
+        tracker.active.append(_ActiveTrack(track["id"], track["label"], box, at, None))  # Seen "now": it has the tracker's usual patience from here
+    tracker.resumed = True
+    return len(tracker.active) - len(taken)
+
+
 def record_detections(
     db: sqlite3.Connection,
     camera_id: str,
@@ -136,6 +164,8 @@ def record_detections(
     """Store one frame's detections and return the track id of each."""
     stamp = at.astimezone(timezone.utc).isoformat()
     track_ids: list[str] = []
+    if not tracker.resumed:
+        resume(db, tracker, camera_id, at)
     for item, (track_id, _) in zip(detections, tracker.assign(detections, at, frame), strict=True):
         # Also recreates a track whose earlier detections were deleted with their footage mid-track.
         db.execute(

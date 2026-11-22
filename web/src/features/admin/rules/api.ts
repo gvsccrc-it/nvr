@@ -139,7 +139,7 @@ export function switchCondition(current: Condition, type: Condition["type"]): Co
 
 export const newRule = (): RuleDefinition => ({
   name: "", enabled: true, camera_ids: [], group_ids: [], condition: { type: "zone_entry", zone: DEFAULT_ZONE },
-  classes: ["person"], schedule: null, cooldown_seconds: 0, pop_into_live: false, actions: [],
+  classes: ["person"], schedule: null, cooldown_seconds: 60, pop_into_live: false, actions: [],
 });
 
 export const definitionOf = (rule: Rule): RuleDefinition => ({

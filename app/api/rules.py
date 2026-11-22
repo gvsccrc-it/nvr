@@ -189,6 +189,7 @@ class RuleDefinition(BaseModel):
     condition: Condition
     classes: list[Literal["person", "vehicle"]] = Field(default_factory=list)
     schedule: RuleSchedule | None = None
+    # 0 when a caller leaves it out, as it always was for API clients. The interface starts a new rule at a minute and marks a rule with none (#514).
     cooldown_seconds: int = Field(default=0, ge=0, le=86400)
     # Bring the alarm's camera and its neighbours into Live for people who opted in.
     pop_into_live: bool = False

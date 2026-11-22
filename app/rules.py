@@ -395,12 +395,13 @@ class _Counting:
         self.fingerprint, self.stretch, self.fed_at = fingerprint, stretch, time.monotonic()
 
 
+LATE_AFTER = timedelta(minutes=10)  # An event this far behind the newest detection stored is recorded, and notifies no one
 _counting: dict[tuple[str, str, str], _Counting] = {}  # (database file, rule, camera): kept in memory, rebuilt from the stored detections after a restart
 
 
 def _open_stretch(db: sqlite3.Connection, rule_id: str, camera_id: str) -> sqlite3.Row | None:
     """The rule's last occupancy event on the camera, if its stretch has not been recorded as ended."""
-    row = db.execute("SELECT id,occurred_at,ended_at FROM rule_events WHERE rule_id=? AND camera_id=? AND condition_type='occupancy' ORDER BY occurred_at DESC LIMIT 1",
+    row = db.execute("SELECT id,occurred_at,ended_at FROM rule_events WHERE rule_id=? AND camera_id=? AND condition_type='occupancy' AND label='occupancy' ORDER BY occurred_at DESC LIMIT 1",
                      (rule_id, camera_id)).fetchone()
     return row if row is not None and row["ended_at"] is None else None
 
@@ -480,7 +481,7 @@ def _occupancy_gone_quiet(database: str, rules: list[Rule] | None) -> list[tuple
     return events  # type: ignore[return-value]
 
 
-def _record_occupancy(db: sqlite3.Connection, rule: Rule | str, camera_id: str, what: str, at: datetime) -> None:
+def _record_occupancy(db: sqlite3.Connection, rule: Rule | str, camera_id: str, what: str, at: datetime, late: bool = False) -> None:
     """Write one thing an occupancy count came to, inside the caller's transaction."""
     from . import alarms
 
@@ -496,7 +497,7 @@ def _record_occupancy(db: sqlite3.Connection, rule: Rule | str, camera_id: str, 
         box = json.dumps(rule.condition.get("zone") or occupancy.FULL_FRAME, separators=(",", ":"))
         if db.execute("INSERT OR IGNORE INTO rule_events(id,rule_id,rule_name,camera_id,track_id,detection_id,label,condition_type,occurred_at,box_json) VALUES(?,?,?,?,?,?,?,?,?,?)",
                       (event_id, rule.id, rule.name, camera_id, f"occupancy-{rule.id}-{int(at.timestamp())}", None, "occupancy", "occupancy", at.isoformat(), box)).rowcount:
-            create_alarm(db, event_id)
+            create_alarm(db, event_id, late=late)
         return
     stretch = _open_stretch(db, rule_id, camera_id)
     if stretch is None:
@@ -566,6 +567,10 @@ def process_pending(batch_size: int = BATCH_SIZE) -> int:
                 pending.append((rule, track, moments))
 
         occupied = _occupancy_events(db, database, rules, cursor, fresh[-1]["id"])
+        # Something found long after it happened (the rules worker was down, or behind) is recorded but tells no one (#514). "Long after"
+        # is measured against the newest detection stored, not the clock: an alarm about what the AI has only just analysed is not late.
+        head = db.execute("SELECT detected_at FROM ai_detections ORDER BY id DESC LIMIT 1").fetchone()
+        late_before = _parse(head["detected_at"]) - LATE_AFTER if head is not None else None
         occupied += _occupancy_gone_quiet(database, rules)
 
         db.execute("BEGIN IMMEDIATE")
@@ -590,9 +595,9 @@ def process_pending(batch_size: int = BATCH_SIZE) -> int:
                          rule.condition_type, moment.at.isoformat(), json.dumps(moment.box, separators=(",", ":"))),
                     ).rowcount
                     if inserted:
-                        create_alarm(db, event_id)
+                        create_alarm(db, event_id, late=late_before is not None and moment.at < late_before)
             for rule, camera_id, what, at in occupied:
-                _record_occupancy(db, rule, camera_id, what, at)
+                _record_occupancy(db, rule, camera_id, what, at, late=late_before is not None and at < late_before)
             db.execute("UPDATE rules_cursor SET last_detection_id=? WHERE singleton_id=1", (fresh[-1]["id"],))
         except BaseException:
             db.execute("ROLLBACK")
