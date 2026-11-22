@@ -54,6 +54,12 @@ An **incident** (`retention_forecast`, also sent as `storage.failure` and `stora
 
 Metrics: `nvr_disk_health_state{volume,state}`, `nvr_camera_retention_policy_days` and `nvr_camera_retention_forecast_days`.
 
+## When free space cannot be kept
+
+Each recordings volume keeps some space free (its headroom, set in Settings, Recording & storage) by removing its oldest footage. It never removes footage that is held, held for a case, kept for an alarm, in an export or being played. When that alone leaves a volume short, an incident says so on the first pass that ends short: how much is short, and what is holding the space (how much each person holds, how much is held for cases, kept for alarms and in exports). It recovers on the first pass that has the room again. Release holds, close cases or resolve alarms that are no longer needed: when the disk is full, every camera on it stops recording.
+
+A volume is under **pressure** when its free space is less than 15 minutes of recording at the rate its cameras have been writing (over the last ten minutes), or less than the configured reserve (`NVR_STORAGE_PRESSURE_FREE_BYTES`, 1 GiB by default) if that is more. A fixed 1 GiB is about ten seconds' warning on a large site.
+
 ## Limits
 
 - The forecast assumes the last 48 hours are typical; a change in scene, schedule or bitrate changes it, and it is recalculated every five minutes.

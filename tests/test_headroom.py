@@ -191,6 +191,91 @@ class KeepHeadroomTests(HeadroomCase):
         self.assertEqual(headroom.volume_of("archived/cam/a.mp4", volumes), "default")
 
 
+class ShortfallIncidentTests(HeadroomCase):
+    """#491: free space that cannot be kept was a number beside a setting; the first incident came seconds before the disk was full."""
+
+    def setUp(self):
+        super().setUp()
+        headroom._said.clear()
+        self.addCleanup(headroom._said.clear)
+        for volume in ("default", "archive"):
+            headroom.set_headroom(volume, 0)
+        with connect() as db:
+            db.execute("INSERT INTO users(username,password_hash,role) VALUES('alice','x','operator')")
+            self.alice = db.execute("SELECT id FROM users WHERE username='alice'").fetchone()[0]
+
+    def incident(self) -> dict | None:
+        with connect() as db:
+            row = db.execute("SELECT * FROM incidents WHERE incident_key='headroom:default'").fetchone()
+        return dict(row) if row else None
+
+    def test_a_volume_filled_with_held_footage_raises_an_incident_that_says_who_holds_what_and_recovers(self):
+        ids = [self.segment("north", hour) for hour in range(9, 0, -1)]  # 900 of 1000 used: 100 free
+        with connect() as db:
+            for segment in ids[:6]:  # Alice holds six
+                db.execute("INSERT INTO recording_holds(id,segment_id,camera_id,created_by) VALUES(?,?,?,?)", (str(uuid.uuid4()), segment, self.cameras["north"], self.alice))
+            for segment in ids[6:8]:  # Two are held for a case
+                db.execute("INSERT INTO recording_holds(id,segment_id,camera_id,case_id) VALUES(?,?,?,'a-case')", (str(uuid.uuid4()), segment, self.cameras["north"]))
+        headroom.set_headroom("default", 400)
+        self.assertIsNone(self.incident())
+        result = headroom.keep_headroom(NOW)  # The one free segment goes; 200 free of the 400 wanted
+        self.assertEqual(result["default"], {"removed_segments": 1, "removed_bytes": 100, "short_bytes": 200})
+        self.assertEqual(sorted(self.remaining()), sorted(ids[:8]))  # Held footage stays protected
+        raised = self.incident()
+        self.assertEqual((raised["fault_type"], raised["fault_active"]), ("storage_headroom", 1))  # On the first pass that ends short
+        details = json.loads(raised["details_json"])
+        self.assertEqual((details["short_bytes"], details["headroom_bytes"], details["held_bytes"], details["case_bytes"]), (200, 400, 600, 200))
+        self.assertEqual(details["held_by"], [{"who": "alice", "bytes": 600}])
+        self.assertIn("cannot keep its free space", raised["summary"])
+        self.assertIn("alice", raised["summary"])
+        self.assertIn("held for cases", raised["summary"])
+        # Still short a minute later: the incident is not written again every pass.
+        with connect() as db:
+            events = db.execute("SELECT COUNT(*) FROM incident_events").fetchone()[0]
+        headroom.keep_headroom(NOW + timedelta(minutes=1))
+        with connect() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM incident_events").fetchone()[0], events)
+        # Alice's holds are released: the next pass makes the room and the incident recovers.
+        with connect() as db:
+            db.execute("UPDATE recording_holds SET released_at=? WHERE created_by=?", (NOW.isoformat(), self.alice))
+        self.assertEqual(headroom.keep_headroom(NOW + timedelta(minutes=2))["default"]["short_bytes"], 0)
+        self.assertEqual(self.incident()["fault_active"], 0)
+
+    def test_a_volume_that_keeps_its_headroom_writes_no_incident_at_all(self):
+        for hour in range(5, 0, -1):
+            self.segment("north", hour)
+        headroom.set_headroom("default", 300)
+        headroom.keep_headroom(NOW)
+        headroom.keep_headroom(NOW + timedelta(minutes=1))
+        self.assertIsNone(self.incident())
+
+    def test_footage_kept_for_alarms_and_in_exports_is_counted_too(self):
+        ids = [self.segment("north", hour) for hour in range(4, 0, -1)]
+        with connect() as db:
+            row = db.execute("SELECT starts_at,ends_at FROM recording_segments WHERE id=?", (ids[0],)).fetchone()
+            db.execute("INSERT INTO alarms(id,rule_name,camera_id,label,condition_type,occurred_at,box_json,clip_starts_at,clip_ends_at,created_at,updated_at) VALUES('a','Rule',?,'person','zone_entry',?,'{}',?,?,?,?)",
+                       (self.cameras["north"], row["starts_at"], row["starts_at"], row["ends_at"], NOW.isoformat(), NOW.isoformat()))
+            found = headroom.protected_bytes(db, "default", {"default": "", "archive": "archive"}, NOW)
+        self.assertEqual((found["alarm_bytes"], found["held_bytes"], found["case_bytes"], found["export_bytes"]), (100, 0, 0, 0))
+
+
+class PressureThresholdTests(HeadroomCase):
+    def test_pressure_is_fifteen_minutes_of_recording_at_the_rate_the_volume_is_written(self):
+        from app import storage
+
+        now = datetime.now(timezone.utc)
+        with connect() as db:
+            ids = list(self.cameras.values())
+            self.assertEqual(storage.pressure_threshold(db, ids, 1 << 30, now), 1 << 30)  # Nothing being written: the configured reserve
+            for index, camera in enumerate(ids * 5):  # 100 GB written in the last ten minutes
+                db.execute("INSERT INTO recording_segments(camera_id,relative_path,starts_at,ends_at,size_bytes) VALUES(?,?,?,?,?)",
+                           (camera, f"{camera}/fast-{index}.mp4", (now - timedelta(minutes=5)).isoformat(), (now - timedelta(minutes=4)).isoformat(), 10 * (1 << 30)))
+            self.assertEqual(storage.pressure_threshold(db, ids, 1 << 30, now), 150 * (1 << 30))  # Fifteen minutes' worth, not a fixed 1 GiB
+            self.assertEqual(storage.pressure_threshold(db, ids[:1], 1 << 30, now), 75 * (1 << 30))  # Each volume by its own cameras
+            self.assertEqual(storage.pressure_threshold(db, ids, 0, now), 0)  # A reserve of 0 still turns the warning off
+            self.assertEqual(storage.pressure_threshold(db, [], 1 << 30, now), 1 << 30)
+
+
 class HeadroomApiTests(HeadroomCase):
     def setUp(self):
         super().setUp()

@@ -199,6 +199,26 @@ def _probe_cached(path: Path, max_age: float) -> tuple[bool, float | None]:
     return result
 
 
+PRESSURE_MINUTES = 15  # "Pressure" is less than this much recording left, at the rate the volume is being written
+RATE_WINDOW_MINUTES = 10
+
+
+def pressure_threshold(db, camera_ids: list[str], configured: int, now=None) -> int:
+    """The free space below which a volume is under pressure: the configured reserve, or ``PRESSURE_MINUTES`` of recording at the rate its
+    cameras have been writing, whichever is more. A fixed 1 GiB is ten seconds' warning at 200 cameras (#491). A reserve of 0 turns the
+    warning off, as it always did."""
+    from datetime import datetime, timedelta, timezone
+
+    if configured <= 0 or not camera_ids:
+        return max(0, configured)
+    since = ((now or datetime.now(timezone.utc)) - timedelta(minutes=RATE_WINDOW_MINUTES)).isoformat()
+    written = 0
+    for start in range(0, len(camera_ids), 500):
+        part = camera_ids[start:start + 500]
+        written += db.execute(f"SELECT COALESCE(SUM(size_bytes),0) FROM recording_segments WHERE camera_id IN ({','.join('?' * len(part))}) AND starts_at>=?", (*part, since)).fetchone()[0]
+    return max(configured, int(written / RATE_WINDOW_MINUTES * PRESSURE_MINUTES))
+
+
 def storage_status(max_age: float = 0.0) -> dict[str, object]:
     """Every volume's state. A write test (create, write and fsync a file) is part of it; ``max_age`` lets a caller that only displays the
     result reuse a test that recent instead of repeating it on each request or scrape (#280). The default is a fresh test."""
@@ -218,15 +238,17 @@ def storage_status(max_age: float = 0.0) -> dict[str, object]:
             mount_expected=bool(relative)
             mounted=exists and (os.path.ismount(path) if mount_expected else True)
             marker=volume_marker.state(name,path) if exists and mounted else volume_marker.PRESENT
-            state="missing" if not exists or not mounted else "wrong_disk" if marker==volume_marker.WRONG_DISK else "disk_not_mounted" if marker==volume_marker.UNMARKED else "read_only" if not writable else "slow" if write_latency is not None and write_latency>250 else "pressure" if free is not None and free<minimum_free else "healthy"
+            with connect() as db:
+                pressure_below=pressure_threshold(db,[camera["id"] for camera in cameras if (camera["storage_volume_id"] or "default")==name],minimum_free)
+            state="missing" if not exists or not mounted else "wrong_disk" if marker==volume_marker.WRONG_DISK else "disk_not_mounted" if marker==volume_marker.UNMARKED else "read_only" if not writable else "slow" if write_latency is not None and write_latency>250 else "pressure" if free is not None and free<pressure_below else "healthy"
         except (OSError,ValueError):
             path=recordings_path()/relative
-            exists=path.is_dir(); mounted=False; writable=False; write_latency=None; free=None; capacity=None; state="unavailable"
+            exists=path.is_dir(); mounted=False; writable=False; write_latency=None; free=None; capacity=None; state="unavailable"; pressure_below=minimum_free
         assigned=[dict(id=camera["id"],name=camera["name"],recording_status=camera["recording_status"],last_error=camera["last_error"]) for camera in cameras if (camera["storage_volume_id"] or "default")==name]
         at_risk=state in {"pressure","missing","read_only","unavailable","slow","wrong_disk","disk_not_mounted"} and bool(assigned)
         with connect() as db:
             headroom_status=headroom.status(db,name,capacity,free,volumes)
-        result.append({"id":name,"headroom":headroom_status,"relative_path":relative,"exists":exists,"mounted":mounted,"writable":writable,"write_latency_ms":write_latency,"capacity_bytes":capacity,"free_bytes":free,"state":state,"retention_at_risk":at_risk,"cameras":assigned})
+        result.append({"id":name,"headroom":headroom_status,"relative_path":relative,"exists":exists,"mounted":mounted,"writable":writable,"write_latency_ms":write_latency,"capacity_bytes":capacity,"free_bytes":free,"pressure_below_bytes":pressure_below,"state":state,"retention_at_risk":at_risk,"cameras":assigned})
     unconfigured={camera["storage_volume_id"] for camera in cameras if camera["storage_volume_id"] and camera["storage_volume_id"] not in volumes}
     for name in sorted(unconfigured):
         assigned=[dict(id=camera["id"],name=camera["name"],recording_status=camera["recording_status"],last_error=camera["last_error"]) for camera in cameras if camera["storage_volume_id"]==name]
