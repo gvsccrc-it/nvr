@@ -866,7 +866,7 @@ class DetectionManager:
             track_ids = await self._db(_store_frame, camera_id, observations, at, tracker, frame, model, self._delayed(camera_id))
             for watch in watches:
                 await watch.after_frame(frame, at, track_ids, observations, tracker)
-            await self._keep_first_sightings(camera_id, frame, at, track_ids, observations, keyframed, models)
+            await self._keep_first_sightings(frame, at, track_ids, observations, keyframed, models)
             # An object that has left never comes back under the same track: forgetting it keeps this to the objects in view, where it
             # used to hold every object seen for as long as the stream stayed open, weeks on a busy camera (#217).
             keyframed.intersection_update(track.id for track in tracker.active)
@@ -895,7 +895,7 @@ class DetectionManager:
         lateness = self._lateness.get(camera_id)
         return bool(lateness and lateness.delayed)
 
-    async def _keep_first_sightings(self, camera_id: str, frame: Any, at: datetime, track_ids: list[str], observations: list[dict[str, Any]],
+    async def _keep_first_sightings(self, frame: Any, at: datetime, track_ids: list[str], observations: list[dict[str, Any]],
                                     keyframed: set[str], models: _FrameModels) -> None:
         """Each object's first analysed frame, kept as its keyframe, with what it looks like for finding it again and for searching in words."""
         from . import clip, similar
@@ -908,7 +908,7 @@ class DetectionManager:
             keyframed.add(track_id)
             jpeg = await asyncio.to_thread(encode_jpeg, frame)
             if jpeg:
-                await self._db(store_keyframe, camera_id, track_id, at, jpeg)  # A file write, then its row: in a database thread
+                await self._db(store_keyframe, track_id, at, jpeg)  # A file write, then its row: in a database thread
             item = first_seen.get(track_id)
             # What the object looks like, for finding it again on other cameras. A failure here never stops detection.
             try:

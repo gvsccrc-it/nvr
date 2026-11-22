@@ -242,8 +242,11 @@ def encode_jpeg(frame: bytes) -> bytes | None:
     return result.stdout if result.returncode == 0 and result.stdout.startswith(b"\xff\xd8") else None
 
 
-def store_keyframe(camera_id: str, track_id: str, at: datetime, jpeg: bytes) -> bool:
+def store_keyframe(track_id: str, at: datetime, jpeg: bytes) -> bool:
     """Keep an object's first picture: a file in its camera's folder on the recordings volume, and a row saying where (#512)."""
     from . import track_pictures
+    from .store import connect
 
-    return track_pictures.keep(camera_id, track_id, at, jpeg)
+    with connect() as db:
+        track = db.execute("SELECT camera_id FROM ai_tracks WHERE id=?", (track_id,)).fetchone()
+    return track is not None and track_pictures.keep(track["camera_id"], track_id, at, jpeg)

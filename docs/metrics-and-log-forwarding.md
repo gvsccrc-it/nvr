@@ -30,6 +30,9 @@ scrape_configs:
 | `nvr_database_bytes` | gauge | – | the size of the database file |
 | `nvr_database_log_bytes` | gauge | – | the size of the database's write-ahead log file |
 | `nvr_database_log_limit_bytes` | gauge | – | the size the log file is brought back to once it can be reset |
+| `nvr_database_table_bytes` | gauge | table | bytes each of the database's largest tables holds, with its indexes, as measured after the last nightly self-test (absent until the first one) |
+| `nvr_track_picture_bytes` | gauge | – | bytes of objects' first pictures kept as files on the recordings volumes |
+| `nvr_track_picture_files` | gauge | – | how many such pictures |
 | `nvr_recordings_unindexed_bytes` | gauge | – | bytes of segment files in old run folders that have no row in the index (after the recorder's first pass) |
 | `nvr_recordings_unindexed_files` | gauge | – | how many such files |
 | `nvr_ai_seconds_since_last_analysis` | gauge | camera | seconds since the camera's last analysed frame |

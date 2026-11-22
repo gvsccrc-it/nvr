@@ -21,6 +21,10 @@ const ZONES: string[] = (() => {
   }
 })();
 
+function megabytes(bytes: number): string {
+  return bytes >= 1 << 30 ? `${(bytes / (1 << 30)).toFixed(1)} GB` : `${(bytes / (1 << 20)).toFixed(1)} MB`;
+}
+
 interface SystemStatus {
   version: string;
   application_status: string;
@@ -28,6 +32,7 @@ interface SystemStatus {
   configured_administrators: number;
   configured_cameras: number;
   self_test: { passed: boolean; finished_at: string; results: { passed: boolean | null }[] } | null;
+  database_size?: { bytes: number; log_bytes: number; tables: { name: string; bytes: number }[] | null; measured_at: string | null; other_bytes: number; free_bytes: number };
   acceleration: {
     setting: string;
     selected: string | null;
@@ -121,6 +126,19 @@ export function GeneralSettings() {
               <ul className="plain-list" aria-label="Hardware acceleration found">
                 {system.data.acceleration.backends.map(backend => <li key={backend.name}>{backend.label}: {backend.usable ? "working" : "not available"} · {backend.detail}</li>)}
               </ul>
+            ) : null}
+            {system.data.database_size ? (
+              <div data-testid="database-size">
+                <p>
+                  Database: {megabytes(system.data.database_size.bytes)}{system.data.database_size.log_bytes ? ` (and ${megabytes(system.data.database_size.log_bytes)} of recent changes not yet folded in)` : ""}.
+                  {system.data.database_size.tables ? ` Largest tables, measured ${formatRelative(system.data.database_size.measured_at ?? "")}:` : " Which tables hold it is measured after the nightly self-test."}
+                </p>
+                {system.data.database_size.tables ? (
+                  <ul className="plain-list" aria-label="Largest database tables">
+                    {system.data.database_size.tables.slice(0, 6).map(table => <li key={table.name}>{table.name}: {megabytes(table.bytes)}</li>)}
+                  </ul>
+                ) : null}
+              </div>
             ) : null}
             <p data-testid="self-test-summary">
               {system.data.self_test

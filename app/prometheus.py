@@ -196,6 +196,13 @@ def _database(out: _Output) -> None:
         size = 0
     out.family("nvr_database_bytes", "gauge", "The size of the database file.")
     out.sample("nvr_database_bytes", size)
+    from . import db_size
+
+    tables = db_size.report()["tables"]
+    if tables is not None:
+        out.family("nvr_database_table_bytes", "gauge", "Bytes each of the database's largest tables holds, with its indexes, as measured after the last nightly check.")
+        for table in tables:
+            out.sample("nvr_database_table_bytes", table["bytes"], table=table["name"])
     out.family("nvr_database_log_bytes", "gauge", "The size of the database's write-ahead log file.")
     out.sample("nvr_database_log_bytes", log_bytes())
     from . import run_folders

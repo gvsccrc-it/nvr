@@ -37,7 +37,7 @@ MAX_BYTES = 2_000_000  # A picture larger than this is not one of ours
 
 def _relative(camera_id: str, track_id: str, at: datetime) -> tuple[Path, str]:
     """Where a track's picture goes: the file, and its path from the recordings root."""
-    from .config import recordings_path
+    from .recording import recordings_path
     from .storage import camera_recordings_dir
 
     if not re.fullmatch(r"[0-9a-fA-F-]{1,64}", track_id):
