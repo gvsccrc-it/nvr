@@ -160,8 +160,12 @@ def counts(db: sqlite3.Connection, cameras: dict[str, str], start: datetime, end
 def _count_moments(db: sqlite3.Connection, track_ids: list[str], label_of: dict[str, str], defined: list[tuple[rules.Rule, list[list[int]]]],
                    index, permitted: str, permitted_values: tuple | list) -> None:
     """Add to each zone's and line's cells the moments these tracks meet it, reading their points as a stream in path order."""
-    reading = db.execute(f"SELECT d.track_id,d.id,d.detected_at,d.box_x,d.box_y,d.box_width,d.box_height FROM ai_detections d WHERE d.track_id IN ({','.join('?' * len(track_ids))}) "
-                                         f"AND {permitted} ORDER BY d.track_id,d.detected_at,d.id", (*track_ids, *permitted_values))
+    from . import detection_thinning
+
+    # A point for each analysed frame: a still object's thinned rows stand for the frames between them (#512).
+    reading = detection_thinning.expand_by_track(db, db.execute(
+        f"SELECT d.track_id,d.id,d.detected_at,d.box_x,d.box_y,d.box_width,d.box_height,d.stands_for FROM ai_detections d WHERE d.track_id IN ({','.join('?' * len(track_ids))}) "
+        f"AND {permitted} ORDER BY d.track_id,d.detected_at,d.id", (*track_ids, *permitted_values)))
     current: str | None = None
     following: list[tuple[rules.Rule, list[list[int]], rules.Step]] = []
     entered: set[str] = set()
@@ -223,7 +227,7 @@ def heatmap(db: sqlite3.Connection, camera_id: str, camera_name: str, start: dat
     cells = [[0] * HEAT_COLUMNS for _ in range(HEAT_ROWS)]
     for row in db.execute(
         f"SELECT min(CAST((d.box_x+d.box_width/2)*{HEAT_COLUMNS} AS INTEGER),{HEAT_COLUMNS - 1}) AS column,"
-        f"min(CAST((d.box_y+d.box_height/2)*{HEAT_ROWS} AS INTEGER),{HEAT_ROWS - 1}) AS row,COUNT(*) AS samples "
+        f"min(CAST((d.box_y+d.box_height/2)*{HEAT_ROWS} AS INTEGER),{HEAT_ROWS - 1}) AS row,SUM(d.stands_for) AS samples "  # A thinned row counts the frames it stands for (#512)
         f"FROM ai_detections d JOIN ai_tracks t ON t.id=d.track_id WHERE {' AND '.join(clauses)} GROUP BY column,row", values):
         cells[row["row"]][row["column"]] = row["samples"]
     tracks = db.execute(f"SELECT COUNT(DISTINCT d.track_id) FROM ai_detections d JOIN ai_tracks t ON t.id=d.track_id WHERE {' AND '.join(clauses)}", values).fetchone()[0]

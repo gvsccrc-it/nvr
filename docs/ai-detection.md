@@ -43,6 +43,16 @@ Alongside the grouped observations above, the AI worker stores every detection a
 
 Detections follow footage retention. Deleting a recorded interval or retention expiry deletes the detections inside that footage (unless other retained footage still covers the same moment). Deleting an archived camera's footage deletes all of its detections and tracks. Detections that no footage covers, for example on a motion-recorded camera between events, expire on the camera's retention schedule. A track whose detections are all gone is deleted. The grouped observations behind `GET /api/ai/events` and the Playback timeline expire on the same schedule: one older than the camera's retention period is removed unless footage that is still kept covers it.
 
+**An object that is not moving does not keep a row for every analysed frame** (`app/detection_thinning.py`). Every frame's detections are stored as they are analysed, so rules, alarms, Live's object picker and PTZ following see exactly what the AI saw. Once a frame is more than ten minutes old (or older than the longest time any enabled rule looks back, if that is more) and the rules worker has evaluated it, the rows of a still object are thinned. What is kept:
+
+- the object's box whenever it has moved by more than a fiftieth of the picture since the last box kept, and at least every 30 seconds;
+- its first and last sighting, always;
+- any box whose answer to "inside this rule's zone? which side of this rule's line? touching a privacy mask?" differs from the last box kept.
+
+A kept row says how many analysed frames it stands for (`stands_for`: its own and the thinned ones after it, up to the object's next row). An object that stands still for an hour keeps 121 rows where it used to keep 1,801. Everything that wants a point for each analysed frame (rules in test mode, occupancy, Playback's overlay, Insights' counts and heatmap) reads the thinned frames back from the row that stands for them, the same box at evenly spaced times, so it shows what it showed before, each box within a fiftieth of the picture of where the object was. A track's `detection_count` still counts every analysed frame. Rows stored before this version are not thinned; they age out with retention. The model's id, version and provider are stored once, on the track; the API still reports them on each detection.
+
+What thinning cannot give back: within a still stretch, the exact box of each thinned frame (it is the kept one's, within a fiftieth of the picture), its confidence, and its body points on cameras with fall detection (the kept frame's are shown).
+
 Detections are written only inside analysed coverage. Each response lists the unanalysed intervals that overlap the request: no detection in such an interval means the frames were not analysed, not that the scene was empty.
 
 ```http

@@ -147,7 +147,8 @@ def record_detections(
             "INSERT INTO ai_detections(camera_id,track_id,detected_at,label,confidence,box_x,box_y,box_width,box_height,attributes_json,model_id,model_version,provider) "
             "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (camera_id, track_id, stamp, item["label"], min(1.0, max(0.0, float(item["confidence"]))), box["x"], box["y"], box["width"], box["height"],
-             json.dumps(item.get("attributes") or {}, separators=(",", ":"), sort_keys=True), model_id, model_version, provider),
+             # The model is the track's, stored once there (#512): repeated on every row it was a tenth of the row.
+             json.dumps(item.get("attributes") or {}, separators=(",", ":"), sort_keys=True), "", "", ""),
         )
         track_ids.append(track_id)
         tracker.profile(track_id).add(item.get("attributes") or {}, box)
@@ -212,7 +213,23 @@ def detection_view(row: sqlite3.Row) -> dict[str, Any]:
         "box": {"x": row["box_x"], "y": row["box_y"], "width": row["box_width"], "height": row["box_height"]},
         "attributes": json.loads(row["attributes_json"]),
         "model_id": row["model_id"], "model_version": row["model_version"], "provider": row["provider"],
+        # How many analysed frames this row stands for: more than one for a still object whose rows were thinned (#512).
+        "stands_for": row["stands_for"],
     }
+
+
+def with_models(db: sqlite3.Connection, views: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Detections with the model that made them. It is stored once, on the track (#512); rows stored before that carry it themselves."""
+    missing = sorted({view["track_id"] for view in views if not view["model_id"]})
+    models: dict[str, sqlite3.Row] = {}
+    for start in range(0, len(missing), 500):
+        part = missing[start:start + 500]
+        models.update({row["id"]: row for row in db.execute(f"SELECT id,model_id,model_version,provider FROM ai_tracks WHERE id IN ({','.join('?' * len(part))})", part)})
+    for view in views:
+        track = models.get(view["track_id"]) if not view["model_id"] else None
+        if track is not None:
+            view.update(model_id=track["model_id"], model_version=track["model_version"], provider=track["provider"])
+    return views
 
 
 def track_view(row: sqlite3.Row) -> dict[str, Any]:

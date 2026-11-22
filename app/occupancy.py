@@ -52,12 +52,19 @@ def window_rows(db: sqlite3.Connection, camera_id: str, classes: Iterable[str], 
     """Detections of the classes on a camera in [start, end), as ``exceedances`` takes them."""
     labels = list(classes)
     marks = ",".join("?" for _ in labels)
-    rows = db.execute(
-        f"SELECT track_id,detected_at,box_x,box_y,box_width,box_height FROM ai_detections WHERE camera_id=? AND label IN ({marks}) AND detected_at>=? AND detected_at<? ORDER BY detected_at",
-        (camera_id, *labels, start.isoformat(), end.isoformat())).fetchall()
+    from . import detection_thinning
+
+    # A still object's thinned rows stand for the frames between them (#512): read from a hold before the window, so an object standing
+    # there since before it is counted, and given back as a point for each analysed frame.
+    reach = start - timedelta(seconds=detection_thinning.HOLD_SECONDS)
+    rows = detection_thinning.expand(db, db.execute(
+        f"SELECT id,track_id,detected_at,box_x,box_y,box_width,box_height,stands_for FROM ai_detections WHERE camera_id=? AND label IN ({marks}) AND detected_at>=? AND detected_at<? ORDER BY detected_at",
+        (camera_id, *labels, reach.isoformat(), end.isoformat())))
     result = []
     for row in rows:
         at = datetime.fromisoformat(row["detected_at"].replace("Z", "+00:00"))
+        if not start <= at < end:
+            continue
         result.append((row["track_id"], at, row["box_x"] + row["box_width"] / 2, row["box_y"] + row["box_height"] / 2))
     return result
 
