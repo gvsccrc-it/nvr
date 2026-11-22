@@ -29,6 +29,38 @@ from .clock import parse as clock_parse, stamp as clock_stamp
 logger = logging.getLogger(__name__)
 
 WARM_UP_FRAMES = 3
+# A frame is late when it waited longer than this for its turn at inference (or longer than two frame intervals, if that is more).
+LATE_AFTER_SECONDS = 1.0
+# One late frame is not a state. A camera is recorded as "delayed" once its frames have been late for this long, and as analysed again once
+# they have been on time for the second figure. It used to be written as delayed and then analysed again on every late frame: two coverage
+# rows, two incident events, an email and two webhooks a frame, exactly when the machine was already short of capacity (#511).
+LATE_FOR_SECONDS = 20.0
+ON_TIME_FOR_SECONDS = 60.0
+DELAYED_REASON = "Inference was delayed while CPU capacity was occupied"
+
+
+class _Lateness:
+    """Whether one camera's analysis is behind, with the two waits above. Kept in memory: nothing here touches the database."""
+
+    def __init__(self) -> None:
+        self.late_since: float | None = None
+        self.on_time_since: float | None = None
+        self.delayed = False
+
+    def note(self, late: bool, now: float) -> None:
+        if late:
+            self.on_time_since = None
+            if self.late_since is None:
+                self.late_since = now
+            if now - self.late_since >= LATE_FOR_SECONDS:
+                self.delayed = True
+            return
+        if self.late_since is None:
+            return
+        if self.on_time_since is None:
+            self.on_time_since = now
+        if now - self.on_time_since >= ON_TIME_FOR_SECONDS:
+            self.late_since, self.on_time_since, self.delayed = None, None, False
 _FACTOR_TEXT = {"cpu": "CPU", "inference": "the AI model is busy", "memory": "memory", "late": "analysis is falling behind"}
 
 MODEL_ID = "person-vehicle-bike-detection-2004"
@@ -383,6 +415,7 @@ def _set_camera_state(db: sqlite3.Connection, camera_id: str, state: str, error:
     if state == "disabled":
         if active:
             db.execute("UPDATE ai_coverage SET ends_at=? WHERE id=?", (stamp, active["id"]))
+        _end_delayed_incident(db, camera_id, state)
         return
     coverage_state = state if state in {"analyzed", "delayed", "failed", "unanalyzed"} else "unanalyzed"
     if active and active["state"] == coverage_state:
@@ -391,6 +424,8 @@ def _set_camera_state(db: sqlite3.Connection, camera_id: str, state: str, error:
         if active:
             db.execute("UPDATE ai_coverage SET ends_at=? WHERE id=?", (stamp, active["id"]))
         db.execute("INSERT INTO ai_coverage(camera_id,state,starts_at,detail) VALUES(?,?,?,?)", (camera_id, coverage_state, stamp, error or ""))
+    if state in RESTING_STATES:
+        _end_delayed_incident(db, camera_id, state)
     if state in {"failed", "delayed", "analyzed"}:
         from .incidents import sync_incident
         camera = db.execute("SELECT name FROM cameras WHERE id=?", (camera_id,)).fetchone()
@@ -404,6 +439,22 @@ def _set_camera_state(db: sqlite3.Connection, camera_id: str, state: str, error:
                 active=state in {"failed", "delayed"},
                 details={"analysis_state": state, "reason": error},
             )
+
+
+def _end_delayed_incident(db: sqlite3.Connection, camera_id: str, state: str) -> None:
+    """A camera that was behind and is then switched off, or stopped to save capacity, is not behind any more: nothing else would ever
+    end its "delayed" incident (#511). A failure's incident stays: the fault has not been seen to go."""
+    from .incidents import sync_incident
+
+    key = f"ai_analysis:{camera_id}"
+    row = db.execute("SELECT details_json FROM incidents WHERE incident_key=? AND fault_active=1", (key,)).fetchone()
+    try:
+        was = json.loads(row["details_json"]).get("analysis_state") if row else None
+    except (TypeError, ValueError):
+        was = None
+    if was == "delayed":
+        sync_incident(db, incident_key=key, camera_id=camera_id, fault_type="ai_analysis", summary="AI analysis is no longer delayed: the camera is not being analysed",
+                      active=False, details={"analysis_state": state, "reason": None})
 
 
 def _camera_source(camera_id: str, use_substream: bool) -> str:
@@ -483,15 +534,16 @@ def _fall_refresh(camera_id: str, at: datetime) -> tuple[Any, ...]:
         return (on, sensitivity, stay_down, falls.camera_aspect(db, camera_id) if on else 16 / 9, privacy.server_zones(db, camera_id, at) if on else [])
 
 
-def _store_frame(camera_id: str, observations: list[dict[str, Any]], at: datetime, tracker: Any, frame: Any, model: dict[str, str]) -> list[str]:
-    """Store one analysed frame: the camera's state, its detections and the tracks they belong to. Blocking, so callers run it in a thread."""
+def _store_frame(camera_id: str, observations: list[dict[str, Any]], at: datetime, tracker: Any, frame: Any, model: dict[str, str], delayed: bool = False) -> list[str]:
+    """Store one analysed frame: the camera's state, its detections and the tracks they belong to. Blocking, so callers run it in a thread.
+    ``delayed`` is whether the camera's frames have been late for a while: the frame is stored all the same, and the state says so."""
     from .tracks import record_detections
     # One connection and one transaction for the frame: the camera's state, its observations and its detections. Analysed coverage starts no
     # later than the detections it contains, and a frame that cannot be stored is not recorded as analysed (#279).
     with connect() as db:
         db.execute("BEGIN IMMEDIATE")
         try:
-            _set_camera_state(db, camera_id, "analyzed", at=at)
+            _set_camera_state(db, camera_id, "delayed" if delayed else "analyzed", DELAYED_REASON if delayed else None, at=at)
             _record_observations(db, camera_id, observations, at, **model)
             track_ids = record_detections(db, camera_id, observations, at, tracker, frame=frame, **model)
         except BaseException:
@@ -526,6 +578,7 @@ class DetectionManager:
         # Database writes can wait seconds for a busy database; their own threads keep them from starving inference, embedding and JPEG work in the shared pool.
         self._db_threads = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ai-db")
         self._inference_slots = asyncio.Semaphore(1)
+        self._lateness: dict[str, _Lateness] = {}  # Per analysed camera, for as long as its stream stays open
         self.capacity = ai_capacity.Capacity()
         self.limit_now: int | None = None  # How many cameras may be analysed now (from the controller, or the fixed number)
         self.waiting_text = "Waiting because the configured number of AI analysis slots is in use"
@@ -798,6 +851,7 @@ class DetectionManager:
                    _FallWatch(self, camera_id, provider))
         keyframed: set[str] = set()
         frames_seen = 0
+        self._lateness.pop(camera_id, None)  # A new opening of the stream starts on time
         async for frame in _raw_frames(source, float(config["analysis_fps"])):
             if self.stopping:
                 return frames_seen > 0
@@ -809,7 +863,7 @@ class DetectionManager:
             model = {"model_id": str(config["model_id"]), "model_version": str(config["model_version"]), "provider": provider}
             # The database writes wait up to 10 s each for a busy database, so they run off the event loop: a loop blocked for 30 s
             # stops the heartbeat and the supervisor kills the whole worker (exit code -9), taking every camera's analysis with it.
-            track_ids = await self._db(_store_frame, camera_id, observations, at, tracker, frame, model)
+            track_ids = await self._db(_store_frame, camera_id, observations, at, tracker, frame, model, self._delayed(camera_id))
             for watch in watches:
                 await watch.after_frame(frame, at, track_ids, observations, tracker)
             await self._keep_first_sightings(frame, at, track_ids, observations, keyframed, models)
@@ -822,17 +876,24 @@ class DetectionManager:
         """The confident people and vehicles in one frame, read when the camera's turn at the shared inference slots comes."""
         wait_started = asyncio.get_running_loop().time()
         async with self._inference_slots:
-            queue_wait = asyncio.get_running_loop().time() - wait_started
-            if queue_wait > max(1.0, 2 / float(config["analysis_fps"])):
-                if frames_seen > WARM_UP_FRAMES:  # The first frames wait behind other cameras' model start-up: not a sign of too little capacity
+            # Nothing in here waits for the database: a write that waited for its lock held the one slot, and with it every camera (#511).
+            now = asyncio.get_running_loop().time()
+            late = now - wait_started > max(LATE_AFTER_SECONDS, 2 / float(config["analysis_fps"]))
+            if frames_seen > WARM_UP_FRAMES:  # The first frames wait behind other cameras' model start-up: not a sign of too little capacity
+                if late:
                     self.capacity.note_late(camera_id)
-                await self._db(set_camera_state, camera_id, "delayed", "Inference was delayed while CPU capacity was occupied")
+                self._lateness.setdefault(camera_id, _Lateness()).note(late, now)
             infer_started = time.monotonic()
             person_threshold, vehicle_threshold = float(config["confidence_threshold"]), float(config["effective_vehicle_confidence_threshold"])
             observations = await asyncio.to_thread(detector.infer, frame, min(person_threshold, vehicle_threshold))
             observations = [item for item in observations if item["label"] == "vehicle" or item["confidence"] >= person_threshold]
             self.capacity.note_inference(time.monotonic() - infer_started)
         return keep_confident_vehicles(observations, vehicle_threshold)
+
+    def _delayed(self, camera_id: str) -> bool:
+        """Whether the camera's frames have been late for long enough to say so (see ``_Lateness``)."""
+        lateness = self._lateness.get(camera_id)
+        return bool(lateness and lateness.delayed)
 
     async def _keep_first_sightings(self, frame: Any, at: datetime, track_ids: list[str], observations: list[dict[str, Any]],
                                     keyframed: set[str], models: _FrameModels) -> None:

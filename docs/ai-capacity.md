@@ -7,7 +7,7 @@ There is **no fixed cap** on the cameras the AI can analyse. By default the numb
 Every analysed camera costs three things, and the AI worker measures them every 15 seconds:
 
 - **CPU.** Each analysed camera has its own FFmpeg process that decodes the camera's whole stream (the analysis rate only picks which frames are kept), and everything else (recording, live, the web) needs the CPU too. Measured against the cores the container may use.
-- **The AI model's time.** One inference runs at a time, for all cameras; its busy share is measured, and a camera whose frames wait too long for it counts as late.
+- **The AI model's time.** One inference runs at a time, for all cameras; its busy share is measured, and a camera whose frames wait too long for it counts as late. A camera is shown as **delayed**, and its incident raised, only once its frames have been late for 20 seconds; it is shown as analysed again, and the incident cleared, once they have been on time for a minute. One late frame now and then changes nothing a person sees.
 - **Memory**, not counting file cache, against the container's limit (or the machine's memory), because running out gets the worker killed (#217).
 
 It then moves a limit:
