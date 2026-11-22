@@ -128,10 +128,24 @@ def _evaluate(volume_id: str, path: Path) -> str:
     root = recordings_path()
     proven = any((root / relative).is_file() for relative in footage)
     if footage and not proven:
+        if _restore_awaited():
+            return PRESENT
         return WRONG_DISK if on_disk else UNMARKED
     if path.is_dir():
         _mark(volume_id, path, volumes)  # A first use, or footage that proves the disk
     return PRESENT
+
+
+def _restore_awaited() -> bool:
+    """A configuration was restored and the pass that follows it has not run yet. The restored database lists footage this machine may
+    never have held (a standby made from the primary's backup; a move to new hardware): that pass takes the disks mounted then as the
+    installation's own and marks what they do not hold (``backup.reconcile_after_restore``). Until it has, missing footage says nothing."""
+    from . import backup
+
+    try:
+        return backup.restore_marker().exists()
+    except OSError:
+        return False
 
 
 def state(volume_id: str, path: Path) -> str:

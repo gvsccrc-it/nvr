@@ -219,6 +219,18 @@ class RestoreTests(MarkerCase):
         self.assertEqual(self.state(), "pressure")  # The test disk is tiny; what matters is that it is not "disk_not_mounted"
 
 
+    def test_between_a_restore_and_its_reconciliation_missing_footage_does_not_stop_recording(self):
+        """A standby made from the primary's backup lists the primary's footage, which its own disk never held."""
+        self.segment("north", hours_ago=2)
+        self.disk_did_not_mount()
+        self.assertEqual(self.state(), "disk_not_mounted")
+        backup.restore_marker().parent.mkdir(parents=True, exist_ok=True)
+        backup.restore_marker().write_text("restored", encoding="utf-8")
+        volume_marker.forget()
+        self.assertEqual(camera_recordings_dir(self.cameras["north"]), self.root / self.cameras["north"])
+        self.assertIsNone(self.marker(), "the marker is written by the reconciliation, not before")
+
+
 class FootageFilterTests(MarkerCase):
     def test_a_volumes_footage_is_what_is_under_its_folder_and_under_no_inner_volume(self):
         volumes = {"default": "", "archive": "archive"}
