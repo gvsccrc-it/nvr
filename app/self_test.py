@@ -240,6 +240,10 @@ class SelfTestManager:
             return  # The file is damaged: the full check would only take minutes to say the same
         if due():
             run("scheduled")
+            from .store import shrink_log
+
+            before, after = shrink_log()  # The check held the log open for as long as it read (#493)
+            logger.info("The database's write-ahead log was %.1f MB after the nightly check and is %.1f MB now", before / (1 << 20), after / (1 << 20))
         publish_weekly_report()
 
     async def _run(self) -> None:

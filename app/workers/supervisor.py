@@ -149,7 +149,14 @@ class Supervisor:
                 worker.start()
             return
         code = process.poll()
-        if code is None and self._hung(worker, now):
+        if code is None and self._hung(worker, now) and liveness.starting(worker.name, process.pid):
+            logger.warning("%s worker did not finish starting; restarting it", worker.name)
+            worker.killed_reason = (f"killed by the supervisor: it had not finished starting after {liveness.START_LIMIT_SECONDS:.0f} s "
+                                    "(its start-up waits for the database and reads the recordings disk; see what it logged before this)")
+            end_group(process)
+            process.kill()
+            code = process.wait()
+        elif code is None and self._hung(worker, now):
             logger.warning("%s worker stopped reporting liveness; restarting it", worker.name)
             worker.killed_reason = (f"killed by the supervisor: no heartbeat for {liveness.STALE_AFTER.total_seconds():.0f} s (the process was alive but its event loop was blocked or starved; "
                                     "the heartbeat the supervisor reads is a file, not a database write, so a busy database does not cause this)")
@@ -227,9 +234,12 @@ class Supervisor:
         return "exited by itself"
 
     def _hung(self, worker: Worker, now: float) -> bool:
-        if now - worker.started_at < liveness.STALE_AFTER.total_seconds():
+        age = now - worker.started_at
+        if age < liveness.STALE_AFTER.total_seconds() or self._reporting(worker):
             return False
-        return not self._reporting(worker)
+        # A worker that has said it is starting, and not yet that it has started, is given the start-up limit: it used to be killed
+        # 30 s after launch whatever it was doing, restarted with a growing wait, and killed again until a start happened to be quick (#494).
+        return not (liveness.starting(worker.name, worker.process.pid if worker.process else None) and age < liveness.START_LIMIT_SECONDS)
 
     @staticmethod
     def _reporting(worker: Worker) -> bool:

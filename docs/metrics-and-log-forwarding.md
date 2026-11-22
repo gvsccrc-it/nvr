@@ -27,6 +27,9 @@ scrape_configs:
 | `nvr_export_oldest_queued_age_seconds` | gauge | – | how long the oldest queued export has waited |
 | `nvr_ai_cameras` | gauge | `state` | cameras with analysis on, by state |
 | `nvr_ai_backlog_cameras` | gauge | – | cameras whose analysis is delayed or failing |
+| `nvr_database_bytes` | gauge | – | the size of the database file |
+| `nvr_database_log_bytes` | gauge | – | the size of the database's write-ahead log file |
+| `nvr_database_log_limit_bytes` | gauge | – | the size the log file is brought back to once it can be reset |
 | `nvr_ai_seconds_since_last_analysis` | gauge | camera | seconds since the camera's last analysed frame |
 | `nvr_storage_free_bytes`, `nvr_storage_capacity_bytes` | gauge | `volume` | free space and capacity of each recording volume |
 | `nvr_storage_write_latency_seconds` | gauge | `volume` | how long a small write to the volume took (a probe file is written and removed on each volume at every scrape) |
