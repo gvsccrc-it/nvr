@@ -551,6 +551,9 @@ def restore(archive: Path, *, force: bool = False, standby: bool = False) -> dic
         work_dir = Path(work)
         os.chmod(work_dir, 0o700)
         manifest = _unpack_checked(archive, secret, work_dir)
+        if manifest.get("kind") == "failover":
+            # Made for a standby's sync (#501): only the tables a standby copies. Restoring it would leave an installation with no users, footage index or history.
+            raise BackupError("This file is a configuration export for a failover standby, not a backup: it cannot be restored. Use a scheduled or manual backup")
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         keyfile = key_path()
         preserved = []
