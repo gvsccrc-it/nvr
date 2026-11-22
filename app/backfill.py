@@ -35,7 +35,7 @@ from .onvif_client import OnvifClient, OnvifError, Recording, Services
 from .recording import recordings_path
 from .storage import camera_recordings_dir
 from .processes import run_to_end
-from .store import connect
+from .store import connect, has_row
 from app.clock import now as _now
 
 log = logging.getLogger(__name__)
@@ -148,6 +148,36 @@ def support_view(camera_id: str) -> dict[str, Any]:
 
 # ------------------------------------------------------------------------------------------------------------------------ planning
 
+# What each camera's last full plan saw (#475): its data's fingerprint, and whether everything in that data had settled into the window
+# planned. Working the gaps out reads every segment of the camera's last day, about 11 ms a camera, every 30 seconds; with nothing new
+# there is nothing new to plan. In the recorder's memory only: a restart plans every camera once.
+_last_plan: dict[str, tuple[tuple[Any, ...], bool]] = {}
+
+
+def _fingerprint(db: sqlite3.Connection, camera_id: str, begin: datetime) -> tuple[Any, ...]:
+    """What, if it changed, could change a camera's outages or its jobs: each a lookup through an index, none reading every segment.
+
+    The newest footage (an outage ends when footage resumes), the newest coverage record and how many are still open (an outage begins
+    or is closed), and the camera's jobs over the lookback (one deleted, or turned back to pending, may be planned again)."""
+    newest = db.execute("SELECT MAX(starts_at) FROM recording_segments WHERE camera_id=?", (camera_id,)).fetchone()[0]
+    latest = db.execute("SELECT id,starts_at,ends_at,coverage_kind FROM coverage_intervals WHERE camera_id=? ORDER BY starts_at DESC LIMIT 1", (camera_id,)).fetchone()
+    still_open = db.execute("SELECT COUNT(*) FROM coverage_intervals WHERE camera_id=? AND ends_at IS NULL", (camera_id,)).fetchone()[0]
+    jobs = db.execute("SELECT COUNT(*),MAX(updated_at) FROM backfill_jobs WHERE camera_id=? AND starts_at>?", (camera_id, (begin - LOOKBACK).isoformat())).fetchone()
+    camera = db.execute("SELECT created_at FROM cameras WHERE id=?", (camera_id,)).fetchone()
+    return (newest, tuple(latest) if latest else None, still_open, tuple(jobs), camera["created_at"] if camera else None)
+
+
+def _settled(fingerprint: tuple[Any, ...], end: datetime) -> bool:
+    """Whether everything the fingerprint names lies inside a window ending at ``end``. Footage that resumed less than ``SETTLE`` ago is
+    past the window: its outage is not planned yet, and must be looked at again once it is in, though nothing changes meanwhile."""
+    newest, latest = fingerprint[0], fingerprint[1]
+    moments = [newest] + ([latest[1], latest[2]] if latest else [])
+    try:
+        return all(_parse(moment) <= end for moment in moments if moment)
+    except ValueError:
+        return False
+
+
 def plan_jobs(db: sqlite3.Connection, camera_id: str, now: datetime) -> int:
     """Start a job for each outage in the lookback that has none yet. Returns how many were started."""
     end = now - SETTLE
@@ -155,6 +185,16 @@ def plan_jobs(db: sqlite3.Connection, camera_id: str, now: datetime) -> int:
     begin = max(now - LOOKBACK, _parse(camera["created_at"])) if camera else now - LOOKBACK  # Time before the camera was added is not an outage
     if begin >= end:
         return 0
+    fingerprint = _fingerprint(db, camera_id, begin)
+    if _last_plan.get(camera_id) == (fingerprint, True):
+        return 0  # Nothing new since a plan that had seen all of it (#475)
+    started = _plan_camera(db, camera_id, begin, end, now)
+    # Remembered as it is after this plan's own new jobs, so that they do not count as a change next time
+    _last_plan[camera_id] = (_fingerprint(db, camera_id, begin), _settled(fingerprint, end))
+    return started
+
+
+def _plan_camera(db: sqlite3.Connection, camera_id: str, begin: datetime, end: datetime, now: datetime) -> int:
     found = coverage.timeline(db, camera_id, begin, end, limit=None)["gaps"]
     merged: list[list[datetime]] = []
     for gap in found:
@@ -169,13 +209,28 @@ def plan_jobs(db: sqlite3.Connection, camera_id: str, now: datetime) -> int:
     for start, stop in merged:
         if stop >= end or stop - start < MIN_GAP:
             continue  # Still going on, or too short to be worth a request
-        if db.execute("SELECT 1 FROM backfill_jobs WHERE camera_id=? AND starts_at<? AND ends_at>? LIMIT 1", (camera_id, stop.isoformat(), start.isoformat())).fetchone():
+        # Bounded below too (#475): a job spans at most the lookback, so one overlapping this outage began after ``start - LOOKBACK``, and
+        # the index on (camera, start) reads only those, not the camera's whole job history.
+        if db.execute("SELECT 1 FROM backfill_jobs WHERE camera_id=? AND starts_at<? AND starts_at>? AND ends_at>? LIMIT 1",
+                      (camera_id, stop.isoformat(), (start - LOOKBACK).isoformat(), start.isoformat())).fetchone():
             continue
         stamp = now.isoformat()
         db.execute("INSERT INTO backfill_jobs(id,camera_id,starts_at,ends_at,state,cursor_at,created_at,updated_at) VALUES(?,?,?,?,'pending',?,?,?)",
                    (str(uuid.uuid4()), camera_id, start.isoformat(), stop.isoformat(), start.isoformat(), stamp, stamp))
         started += 1
     return started
+
+
+_OUTLIVED = ("FROM backfill_jobs WHERE state NOT IN ('pending','running') AND ends_at<"
+             "(SELECT MIN(s.starts_at) FROM recording_segments s WHERE s.camera_id=backfill_jobs.camera_id)")
+
+
+def prune_jobs(db: sqlite3.Connection) -> int:
+    """Remove the jobs that describe time older than any footage their camera still keeps (#475): retention has removed what they
+    filled, or what they could not, and they would otherwise be kept for ever. A job still to do, or doing, is kept. Returns how many."""
+    if not has_row(db, "SELECT 1 " + _OUTLIVED + " LIMIT 1"):
+        return 0  # Read first: this runs every few minutes and nearly always finds nothing, which must not take the write lock (#280)
+    return db.execute("DELETE " + _OUTLIVED).rowcount
 
 
 def annotate_gaps(db: sqlite3.Connection, camera_id: str, gaps: list[dict[str, Any]]) -> None:

@@ -53,6 +53,9 @@ def _seconds(name: str, default: float) -> float:
 
 PROBE_GAP = timedelta(seconds=_seconds("NVR_HARDENING_PROBE_GAP_SECONDS", 3600))
 PROBE_CONCURRENCY = 4
+# A run that has said nothing for this long is taken to have died with its process (#477): its record no longer says "running", and it
+# no longer keeps another run from starting.
+RUN_STALE = timedelta(minutes=30)
 PROBE_TIMEOUT_SECONDS = 3.0
 SCHEDULE = timedelta(days=7)
 POLL_SECONDS = 60.0
@@ -312,6 +315,11 @@ def run(kind: str = "manual", prober: Callable[[str, str], int | None] | None = 
     stamp = now.isoformat()
     prober = prober or tls_offered
     with connect() as db:
+        # One run at a time, across the processes (the page's and the weekly one): claimed here, or left to the run already going (#477)
+        claimed = db.execute("UPDATE hardening_settings SET run_started_at=?,run_probes_total=0,run_probes_done=0 WHERE id=1 AND "
+                             "(run_started_at IS NULL OR run_started_at<?)", (stamp, (now - RUN_STALE).isoformat())).rowcount
+        if not claimed:
+            return {**report(db, now), "ran": False}
         cameras = _load_cameras(db)
         camera_networks = networks(db)
         asking = probes_enabled(db)
@@ -331,6 +339,9 @@ def run(kind: str = "manual", prober: Callable[[str, str], int | None] | None = 
             else:
                 pending.setdefault((host, probe_kind), []).append(camera["id"])
 
+    with connect() as db:
+        db.execute("UPDATE hardening_settings SET run_probes_total=? WHERE id=1", (len(pending),))
+
     def probe(item: tuple[str, str]) -> tuple[str, str, int | None, bool]:
         host, probe_kind = item
         try:
@@ -340,9 +351,21 @@ def run(kind: str = "manual", prober: Callable[[str, str], int | None] | None = 
         except Exception:  # noqa: BLE001 - a probe that failed to run says nothing about the camera; it is asked again next run
             logger.warning("A hardening probe could not be made")
             return host, probe_kind, None, False
+        finally:
+            try:
+                with connect() as db:  # How far the run has got, for the page (#477)
+                    db.execute("UPDATE hardening_settings SET run_probes_done=run_probes_done+1 WHERE id=1")
+            except sqlite3.Error:
+                pass  # Only the count shown is behind
 
-    with ThreadPoolExecutor(max_workers=PROBE_CONCURRENCY) as pool:
-        probed = list(pool.map(probe, list(pending)))
+    try:
+        with ThreadPoolExecutor(max_workers=PROBE_CONCURRENCY) as pool:
+            probed = list(pool.map(probe, list(pending)))
+    except BaseException:
+        with connect() as db:
+            db.execute("UPDATE hardening_settings SET run_started_at=NULL WHERE id=1")
+        raise
+    not_answered = sorted({camera_id for host, probe_kind, _, answered in probed if not answered for camera_id in pending[(host, probe_kind)]})
 
     with connect() as db:
         db.execute("BEGIN IMMEDIATE")
@@ -370,12 +393,14 @@ def run(kind: str = "manual", prober: Callable[[str, str], int | None] | None = 
                     logger.warning("A camera could not be checked")
                     continue
                 _sync(db, camera["id"], results, stamp)
-            db.execute("UPDATE hardening_settings SET last_run_at=?,last_run_kind=? WHERE id=1", (stamp, kind))
+            db.execute("UPDATE hardening_settings SET last_run_at=?,last_run_kind=?,run_started_at=NULL,run_not_answered_json=? WHERE id=1",
+                       (stamp, kind, json.dumps(not_answered)))
             db.execute("COMMIT")
         except BaseException:
             db.execute("ROLLBACK")
+            db.execute("UPDATE hardening_settings SET run_started_at=NULL WHERE id=1")
             raise
-        return report(db, now)
+        return {**report(db, now), "ran": True}
 
 
 def acknowledge(db: sqlite3.Connection, camera_id: str, check: str, reason: str, user_id: int | None, now: datetime | None = None) -> bool:
@@ -420,11 +445,21 @@ def report(db: sqlite3.Connection, now: datetime | None = None) -> dict[str, Any
         (acknowledged if row["acknowledged_at"] else findings).append(entry)
     anchor = settings["last_run_at"] or settings["scheduled_from"]
     configured = networks(db)
+    started = settings["run_started_at"]
+    try:
+        unanswered = [str(item) for item in json.loads(settings["run_not_answered_json"] or "[]")]
+    except ValueError:
+        unanswered = []
+    names = {row["id"]: row["name"] for row in db.execute(f"SELECT id,name FROM cameras WHERE id IN ({','.join('?' * len(unanswered))})", unanswered)} if unanswered else {}
+    progress = {"running": bool(started) and _parse(started) > now - RUN_STALE, "started_at": started,
+                "probes_total": settings["run_probes_total"], "probes_done": settings["run_probes_done"],
+                # The cameras whose secure-connection probe got no answer in the last run: their protocol checks used nothing new
+                "not_answered": [{"camera_id": camera_id, "camera_name": names[camera_id]} for camera_id in unanswered if camera_id in names]}
     # Standing, for as long as the allowance lasts: these cameras' passwords go unprotected when they ask during two-way audio (#476)
     unprotected = [{"camera_id": row["id"], "camera_name": row["name"]} for row in db.execute(
         "SELECT c.id,c.name FROM camera_talk t JOIN cameras c ON c.id=t.camera_id WHERE t.allow_basic=1 AND c.archived_at IS NULL ORDER BY c.name COLLATE NOCASE")]
     return {
-        "listening": listening(), "unprotected_talk": unprotected,
+        "listening": listening(), "unprotected_talk": unprotected, "run": progress,
         "as_of": now.isoformat(), "last_run_at": settings["last_run_at"], "last_run_kind": settings["last_run_kind"],
         "next_run_at": (_parse(anchor) + SCHEDULE).isoformat() if anchor else None,
         "camera_networks": [str(network) for network in configured], "network_check": bool(configured), "probes_enabled": bool(settings["probes_enabled"]),
