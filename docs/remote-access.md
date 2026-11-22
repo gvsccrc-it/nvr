@@ -52,6 +52,24 @@ Administrators see how the page reached the NVR (the caller's address and whethe
 | `NVR_MAX_REQUEST_BYTES` | The largest request body accepted (default 8 MiB; evidence packages uploaded for checking have their own 2 GiB limit). Set the same limit at your reverse proxy |
 | `NVR_PUBLIC_URL` | The address people use (also allowed for the live socket, and used for passkeys and links) |
 | `NVR_COOKIE_SECURE` | Mark the session cookie Secure (implied by an `https://` `NVR_PUBLIC_URL`) |
+| `NVR_LISTEN_HOST` | The one address of this machine the interface is served on (below) |
+
+
+## Where the interface is served
+
+The NVR speaks plain HTTP on port 8280; HTTPS comes from the tunnel or proxy in front of it. The stack uses the host's network (camera discovery needs it), so unless told otherwise the NVR answers on **every address the host has**, the camera network included. Settings, Hardening shows a standing warning, naming those networks, for as long as that is so.
+
+- **Behind a tunnel or proxy on the same machine** (the Tailscale and Cloudflare overlays): the overlays set `NVR_LISTEN_HOST=127.0.0.1`. The interface is reached through the tunnel and nowhere else; `http://<host>:8280` on the local network no longer answers. If something on the local network must still reach the NVR directly (a failover partner, a building system posting events, a metrics scraper, a video wall), either give it the tunnel's address, or set `NVR_LISTEN_HOST` in `.env` to the address it should use, which overrides the overlay.
+- **The plain stack, reached over the local network:** set `NVR_LISTEN_HOST` in `.env` to the host's address on the management network, for example `NVR_LISTEN_HOST=192.0.2.10`, and run `docker compose up -d`. The NVR then refuses connections on its other addresses.
+- **Close the port on the camera interface with the host's firewall as well**, so that a later change of address or setting does not open it again. With `ufw`, where `eth1` is the camera network's interface:
+
+  ```sh
+  sudo ufw deny in on eth1 to any port 8280 proto tcp
+  ```
+
+  With `nftables` directly: `sudo nft add rule inet filter input iifname "eth1" tcp dport 8280 drop`.
+
+A value that is not an IP address (a name, a network, an address with a port) stops the NVR starting, with a message saying so: a typo must not quietly open the interface everywhere. The container's health check asks at whichever address is set.
 
 ## Tailscale
 

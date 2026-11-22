@@ -12,6 +12,13 @@ services:
     image: lscr.io/linuxserver/wireguard:1.0.20260223-r0-ls130@sha256:10db56ad834f94541307d5dfdbe87370e26d155bb341a5bf65789f970f24ab5c  # Pinned (#384); Dependabot proposes updates
     network_mode: host
     restart: unless-stopped
+    # Bounded on purpose (#543): Docker's default keeps every line for ever, on the system disk. 30 MB at most; raise max-size or
+    # max-file here if you need more history. docs: README, "Container logs".
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     cap_add:
       - NET_ADMIN
     environment:

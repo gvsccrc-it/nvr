@@ -24,7 +24,7 @@ from app.api import live_media
 from app.application import create_app
 from app.credentials import encrypt
 from app.store import connect
-from tests.test_support import TEST_PASSWORD
+from tests.test_support import TEST_PASSWORD, setup_code
 
 RTSP = "rtsp://192.0.2.10:554/stream"
 H264 = 'video/mp4; codecs="avc1.640028"'
@@ -53,7 +53,7 @@ class LiveStreamPathTests(unittest.TestCase):
         self.app = create_app(start_workers=False)
         self.context = TestClient(self.app)
         self.client = self.context.__enter__()
-        self.assertEqual(self.client.post("/api/setup/admin", json={"username": "keeper", "password": TEST_PASSWORD}).status_code, 201)
+        self.assertEqual(self.client.post("/api/setup/admin", json={"username": "keeper", "password": TEST_PASSWORD, "setup_code": setup_code()}).status_code, 201)
         self.camera("cam", "h264")
         self.left: list = []
         self.stream = ScriptedStream()

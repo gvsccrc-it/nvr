@@ -30,6 +30,7 @@ The `nvr-data` volume stores the database and account/session state. `nvr-secret
 |---|---:|---|
 | `NVR_PORT` | `8280` | Host listening port for the web application |
 | `NVR_SESSION_HOURS` | `12` | Session lifetime, clamped to 1–168 hours |
+| `NVR_LISTEN_HOST` | every address | The one address of this machine the interface is served on: the management network's address, or `127.0.0.1` behind a tunnel or proxy on the same machine (the Tailscale and Cloudflare overlays set that). Not set, it is served on every network the host is on, the camera network included; the hardening page then shows a standing warning. Anything that is not an IP address stops start-up with a message |
 | `NVR_COOKIE_SECURE` | `false` | Set `true` behind HTTPS so session cookies are HTTPS-only |
 | `NVR_PUBLIC_URL` | unset | Public HTTPS origin used to construct the fixed Entra callback URL, and the origin and relying party of passkeys |
 | `NVR_WEBAUTHN_RP_ID` | unset | Optional parent domain for passkeys, to share them between hosts |
@@ -61,8 +62,48 @@ The `nvr-data` volume stores the database and account/session state. `nvr-secret
 | `NVR_BACKUP_PASSPHRASE` | unset | Enables encrypted configuration backups (at least 16 characters) |
 | `NVR_BACKUP_PASSPHRASE_FILE` | unset | Path of a file holding the backup passphrase, used when `NVR_BACKUP_PASSPHRASE` is empty |
 | `NVR_BACKUP_KEEP` | `14` | Number of configuration backups kept |
+| `NVR_VAPID_SUBJECT` | `NVR_PUBLIC_URL` when HTTPS | Contact given to push services that deliver alarm notifications (`mailto:` or `https://`) |
+| `NVR_PUSH_EXTRA_HOSTS` | none | Extra push-service hosts a device may subscribe with, besides the browsers' own (comma-separated) |
+| `NVR_UPDATE_CHECK` | `true` | `false` turns the release check off for the whole installation: no request is made at all ([guided updates](docs/guided-updates.md)) |
+| `NVR_UPDATE_FEED_URL` / `NVR_UPDATE_IMAGE` | GitHub's releases / `ghcr.io/gvsccrc-it/nvr` | A different releases feed (a mirror), and the image the upgrade commands name |
+| `NVR_LOG_FORWARD_HEADERS` | none | HTTP headers added to OTLP log requests, `Name=value,Name2=value2` (a token for the collector); never logged |
+| `NVR_MS_LOGIN_URL` / `NVR_MS_GRAPH_URL` | Microsoft's public cloud | The sign-in and Graph addresses for sending mail through Microsoft 365, for a national cloud |
+| `NVR_SEGMENT_SECONDS` | `60` | Length of each recorded segment, 10 to 3600 seconds |
+| `NVR_MOTION_BUFFER_PATH` | `/tmp/nvr-motion-buffer` | Where motion-only cameras keep the seconds before an event until it is confirmed |
+| `NVR_STORAGE_PRESSURE_FREE_BYTES` | `1073741824` | Free space below which a volume reports storage pressure (0, for no reserve, to 1 TiB) |
+| `NVR_TIER_CACHE_PATH` / `NVR_TIER_CACHE_BYTES` | beside the database / 2 GiB | Where footage fetched back from a cold tier is cached, and how much (at least 64 MiB) |
+| `NVR_FOOTAGE_CHAIN_KEEP_DAYS` | `365` | How long the signed-footage chain keeps the links of removed footage, 90 to 3650 days ([signed footage](docs/signed-footage.md)) |
+| `NVR_DB_LOG_LIMIT_MB` | `128` | The size the database's write-ahead log is brought back to once it can be reset, 16 to 4096 |
+| `NVR_DB_SYNCHRONOUS` | `NORMAL` | SQLite's `synchronous` setting. `FULL` or `EXTRA` wait for the disk on every write (slower; nothing is lost in a power cut). `OFF` is accepted and is **not for a production server**: a crash or power cut can then damage the database. Leave it unless you know why |
+| `NVR_STOP_GRACE_SECONDS` | `25` | How long a worker is given to stop before it is killed, 1 to 600; keep it under the container's `stop_grace_period` |
+| `NVR_WORKER_START_SECONDS` | `300` | How long a worker may take to start before it is treated as hung, 30 to 3600 |
+| `NVR_ONVIF_TIMEOUT_SECONDS` | `8` | How long an ONVIF request to a camera may take, 1 to 120 |
+| `NVR_TAMPER_SAMPLE_SECONDS` | `15` | Seconds between tamper-detection samples of a camera, 1 to 3600 |
+| `NVR_SMART_INTERVAL_SECONDS` | `21600` | Seconds between SMART disk-health readings, 60 to 604800 |
+| `NVR_SMARTCTL` | found on `PATH` | The `smartctl` program to run, when it is not on `PATH` |
+| `NVR_AI_CPU_THREADS` | `2` | Processor threads the detector may use, 1 to 8 |
+| `NVR_AI_MODEL_PATH` / `NVR_AI_MODEL_DIRECTORY` | built into the image / `/data/models` | The person and vehicle detection model, and the folder uploaded models are kept in |
+| `NVR_AI_PLATE_LABEL` | `2` | Which label of the optional redaction plate detector means "plate" |
+| `NVR_PLATE_DETECTOR_MODEL_PATH` / `NVR_PLATE_RECOGNISER_MODEL_PATH` | built into the image | The older single-region plate models, used when the regional ones are absent |
+| `NVR_FACE_MODELS_DIR` | `/opt/nvr/models/faces` | The face models for the face watch, built into the image |
 
-Do not expose the initial HTTP setup screen to untrusted networks. Place it behind the workplace VPN or approved gateway, then use HTTPS and enable secure cookies.
+**How a setting reaches the server.** Put it in `.env` beside `compose.yaml` (start from `.env.example`). Compose reads `.env` only to fill in `compose.yaml`, so only the names listed under `environment:` in that file reach the NVR: every setting in the table above is listed there, and a test keeps the two the same. A setting that is not set is left unset in the container, and the default applies. After a change run `docker compose up -d`; `docker compose config` shows what the service will be given.
+
+A number that cannot be read (`30s` for `30`) or is outside its limits never stops the server: the default or the nearest limit is used, and one line in the log names the setting and the value used.
+
+**Not for you to set.** These are fixed by `compose.yaml`, or set by the NVR itself: `NVR_DB_PATH`, `NVR_RECORDINGS_PATH`, `NVR_STORAGE_VOLUMES`, `NVR_CREDENTIAL_KEY_PATH`, `NVR_BACKUP_PATH` and `NVR_LISTEN_PORT` (the paths and port inside the container; change the volumes and `NVR_PORT` instead), `NVR_BUILD_COMMIT` (the commit the image was built from), and `NVR_SUPERVISED`, `NVR_STARTED_AT` and `NVR_CONTROL_DIR` (how the worker processes find each other).
+
+**Container logs.** Every service's log is bounded in the Compose files: the NVR keeps at most five files of 20 MB (100 MB), each tunnel three of 10 MB. Without that, Docker keeps every line for ever on the system disk. To keep more, raise `max-size` or `max-file` under `logging:` in `compose.yaml`; to send logs elsewhere as well, see `NVR_LOG_FORWARD_URL`. The web server's access log holds only the requests that failed (status 400 and above), not a line for every request.
+
+**First-time setup needs a one-time code.** While no account exists the NVR makes a random setup code each time it starts, prints it once in its log, and keeps it in a file only the service user can read (`/secrets/setup-code`). Creating the first administrator needs it, from any address, so whoever reaches the port first cannot take the NVR over:
+
+```sh
+docker compose logs nvr | grep "setup code"
+```
+
+Open the NVR in a browser, choose the administrator's username and password, and enter the code (either case, with or without the dashes). It stops working the moment the administrator exists, and the file is removed. Five wrong codes in a minute and every attempt waits a minute; each wrong code is in the security log. If the log also says the database "looks lost or misplaced", stop: the NVR found footage from an earlier installation beside an empty database, and [database recovery](docs/database-recovery.md) is the page to read before starting again.
+
+Still place the NVR behind the workplace VPN or approved gateway, then use HTTPS and enable secure cookies.
 
 ## Using the interface
 

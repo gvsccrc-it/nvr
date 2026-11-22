@@ -99,6 +99,7 @@ def _mapped_role(claims: dict[str, object]) -> str | None:
 class BootstrapRequest(BaseModel):
     username: str = Field(min_length=3, max_length=128)
     password: str = Field(min_length=14, max_length=1024)
+    setup_code: str = Field(default="", max_length=64)  # The one-time code from the NVR's log (#542)
 
 
 class LoginRequest(BaseModel):
@@ -139,11 +140,29 @@ def start_session(response: Response, user_id: int, device_session_id: str | Non
 def setup_status() -> dict[str, bool]:
     with connect() as db:
         configured = db.execute("SELECT EXISTS(SELECT 1 FROM users)").fetchone()[0] == 1
-    return {"setup_required": not configured}
+    if not configured:
+        from app import setup_code
+
+        setup_code.expected()  # Makes and prints the code if this process was not started by the supervisor, which does it at start
+    return {"setup_required": not configured}  # The code itself is never in an answer; the setup page always asks for it
 
 
 @router.post("/api/setup/admin", status_code=status.HTTP_201_CREATED)
-def bootstrap(payload: BootstrapRequest, response: Response) -> dict[str, str]:
+def bootstrap(payload: BootstrapRequest, request: Request, response: Response) -> dict[str, str]:
+    from app import setup_code
+
+    with connect() as db:
+        if has_row(db, "SELECT 1 FROM users LIMIT 1"):  # Read first: this route needs no sign-in, and a refusal must not take the write lock (#353)
+            raise HTTPException(status_code=409, detail="Initial setup is already complete")
+    # The code before anything else is looked at: without it a caller learns nothing about what a username or password must be like here.
+    address = limits.client_address(request)
+    try:
+        setup_code.check(payload.setup_code, address)
+    except setup_code.Refused as refused:
+        if refused.status == 403:
+            with connect() as db:
+                record(db, None, "setup_code_refused", "setup", "first-run", address=address)  # Never the code that was tried
+        raise HTTPException(status_code=refused.status, detail=refused.detail) from None
     username = payload.username.strip()
     if not USERNAME_RE.fullmatch(username):
         raise HTTPException(status_code=422, detail="Use 3–128 letters, numbers, or . _ @ - characters")
@@ -163,10 +182,12 @@ def bootstrap(payload: BootstrapRequest, response: Response) -> dict[str, str]:
                 (username, hash_password(payload.password)),
             )
             user_id = int(cur.lastrowid)
+            record(db, user_id, "setup_completed", "user", user_id, username=username, address=address)
             db.commit()
         except sqlite3.IntegrityError as exc:
             db.rollback()
             raise HTTPException(status_code=409, detail="Initial setup is already complete") from exc
+    setup_code.used()  # It worked once: the file is removed and the code is dead
     start_session(response, user_id)
     return {"username": username, "role": "administrator"}
 

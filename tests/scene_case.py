@@ -24,7 +24,7 @@ from app.credentials import encrypt
 from app.detection import DetectionManager
 from app.store import connect
 from tests.fixtures import detection_scene as scene
-from tests.test_support import TEST_PASSWORD
+from tests.test_support import TEST_PASSWORD, setup_code
 
 
 def iso(value: datetime) -> str:
@@ -57,7 +57,7 @@ class SceneTestCase(unittest.TestCase):
         (root / "recordings").mkdir()
         self.context = TestClient(create_app(start_workers=False))
         self.client = self.context.__enter__()
-        created = self.client.post("/api/setup/admin", json={"username": "keeper", "password": TEST_PASSWORD})
+        created = self.client.post("/api/setup/admin", json={"username": "keeper", "password": TEST_PASSWORD, "setup_code": setup_code()})
         self.assertEqual(created.status_code, 201, created.text)
         self.camera_id = str(uuid.uuid4())
         with connect() as db:

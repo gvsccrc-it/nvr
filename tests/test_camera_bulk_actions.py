@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
-from tests.test_support import patch_camera_probe, TEST_PASSWORD
+from tests.test_support import patch_camera_probe, TEST_PASSWORD, setup_code
 
 
 class CameraBulkActionsApiTests(unittest.TestCase):
@@ -42,7 +42,7 @@ class CameraBulkActionsApiTests(unittest.TestCase):
         return response.json()
 
     def test_bulk_update_reports_each_camera_and_does_not_mutate_archived_or_missing_targets(self):
-        self.client.post("/api/setup/admin", json={"username": "local-admin", "password": TEST_PASSWORD})
+        self.client.post("/api/setup/admin", json={"username": "local-admin", "password": TEST_PASSWORD, "setup_code": setup_code()})
         active = self.add_camera("Bulk active", "active", recording_mode="continuous")
         archived = self.add_camera("Bulk archived", "archived")
         self.client.delete(f"/api/cameras/{archived['id']}")
@@ -64,7 +64,7 @@ class CameraBulkActionsApiTests(unittest.TestCase):
         self.assertFalse(inventory[archived["id"]]["recording_enabled"])
 
     def test_bulk_update_keeps_per_camera_success_when_recorder_refresh_fails_after_commit(self):
-        self.client.post("/api/setup/admin", json={"username": "local-admin", "password": TEST_PASSWORD})
+        self.client.post("/api/setup/admin", json={"username": "local-admin", "password": TEST_PASSWORD, "setup_code": setup_code()})
         first = self.add_camera("Bulk first", "first", recording_mode="continuous")
         second = self.add_camera("Bulk second", "second", recording_mode="continuous")
         sync_camera = AsyncMock(side_effect=[RuntimeError("recorder unavailable"), None])
@@ -85,7 +85,7 @@ class CameraBulkActionsApiTests(unittest.TestCase):
         self.assertTrue(inventory[second["id"]]["recording_enabled"])
 
     def test_bulk_recording_enablement_preserves_disabled_recording_mode(self):
-        self.client.post("/api/setup/admin", json={"username": "local-admin", "password": TEST_PASSWORD})
+        self.client.post("/api/setup/admin", json={"username": "local-admin", "password": TEST_PASSWORD, "setup_code": setup_code()})
         camera = self.add_camera("Disabled bulk camera", "disabled")
 
         with patch.object(self.context.app.state.recorders, "sync_camera", new=AsyncMock()):
@@ -103,7 +103,7 @@ class CameraBulkActionsApiTests(unittest.TestCase):
         self.assertFalse(persisted["recording_enabled"])
 
     def test_bulk_update_rejects_a_batch_above_the_existing_500_camera_limit(self):
-        self.client.post("/api/setup/admin", json={"username": "local-admin", "password": TEST_PASSWORD})
+        self.client.post("/api/setup/admin", json={"username": "local-admin", "password": TEST_PASSWORD, "setup_code": setup_code()})
         response = self.client.post("/api/cameras/bulk-update", json={
             "camera_ids": [str(uuid.uuid4()) for _ in range(501)],
             "group_name": "Operations",

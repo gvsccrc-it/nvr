@@ -18,7 +18,7 @@ from app.application import create_app
 from app.security import hash_password, new_session_token, token_digest
 from app.store import connect
 from tests.fixtures.software_authenticator import SoftwareAuthenticator, decode_secret
-from tests.test_support import TEST_PASSWORD
+from tests.test_support import TEST_PASSWORD, setup_code
 
 OPERATOR_PASSWORD = "operator-password-1234"
 
@@ -37,7 +37,7 @@ class SecondFactorCase(unittest.TestCase):
         self.app = create_app(start_workers=False)
         self.context = TestClient(self.app)
         self.admin = self.context.__enter__()
-        created = self.admin.post("/api/setup/admin", json={"username": "keeper", "password": TEST_PASSWORD})
+        created = self.admin.post("/api/setup/admin", json={"username": "keeper", "password": TEST_PASSWORD, "setup_code": setup_code()})
         self.assertEqual(created.status_code, 201, created.text)
 
     def tearDown(self):

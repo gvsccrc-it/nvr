@@ -13,7 +13,7 @@ from app.application import create_app
 from app.principal import COOKIE_NAME
 from app.security import hash_password
 from app.store import connect
-from tests.test_support import TEST_PASSWORD
+from tests.test_support import TEST_PASSWORD, setup_code
 
 
 class APITokenTests(unittest.TestCase):
@@ -25,7 +25,7 @@ class APITokenTests(unittest.TestCase):
         os.environ["NVR_CREDENTIAL_KEY_PATH"] = str(root / "credentials.key")
         self.context = TestClient(create_app(start_workers=False))
         self.client = self.context.__enter__()
-        created = self.client.post("/api/setup/admin", json={"username": "keeper", "password": TEST_PASSWORD})
+        created = self.client.post("/api/setup/admin", json={"username": "keeper", "password": TEST_PASSWORD, "setup_code": setup_code()})
         self.assertEqual(created.status_code, 201, created.text)
         self.admin_cookie = self.client.cookies.get(COOKIE_NAME)
 

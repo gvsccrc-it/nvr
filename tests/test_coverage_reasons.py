@@ -19,7 +19,7 @@ from app.application import create_app
 from app.credentials import encrypt
 from app.recording import RecordingManager
 from app.store import connect
-from tests.test_support import TEST_PASSWORD
+from tests.test_support import TEST_PASSWORD, setup_code
 
 NOW = datetime.now(timezone.utc)
 
@@ -47,7 +47,7 @@ class CoverageCase(unittest.TestCase):
             os.environ.pop(key, None)
         self.context = TestClient(create_app(start_workers=False))
         self.client = self.context.__enter__()
-        self.assertEqual(self.client.post("/api/setup/admin", json={"username": "keeper", "password": TEST_PASSWORD}).status_code, 201)
+        self.assertEqual(self.client.post("/api/setup/admin", json={"username": "keeper", "password": TEST_PASSWORD, "setup_code": setup_code()}).status_code, 201)
         self.camera_id = self.add_camera("Loading dock")
 
     def tearDown(self):
