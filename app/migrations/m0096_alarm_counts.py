@@ -14,17 +14,21 @@ NAME = "alarm_counts"
 KEY_OLD = "camera_id=OLD.camera_id AND rule_key=COALESCE(OLD.rule_id,'') AND rule_name=OLD.rule_name AND state=OLD.state"
 ADD_NEW = ("INSERT INTO alarm_counts(camera_id,rule_key,rule_name,state,count) VALUES(NEW.camera_id,COALESCE(NEW.rule_id,''),NEW.rule_name,NEW.state,1) "
            "ON CONFLICT(camera_id,rule_key,rule_name,state) DO UPDATE SET count=count+1;")
+# Work the table out again from the alarms: here, and after a salvage, whose copied counts need not agree with the alarms it kept
+RECOUNT = ("DELETE FROM alarm_counts",
+           "INSERT INTO alarm_counts(camera_id,rule_key,rule_name,state,count) "
+           "SELECT camera_id,COALESCE(rule_id,''),rule_name,state,COUNT(*) FROM alarms GROUP BY camera_id,COALESCE(rule_id,''),rule_name,state")
 TAKE_OLD = f"UPDATE alarm_counts SET count=count-1 WHERE {KEY_OLD}; DELETE FROM alarm_counts WHERE {KEY_OLD} AND count<=0;"
 
 
 def upgrade(db: sqlite3.Connection) -> None:
     # rule_key is the rule's id, or '' for an alarm whose rule was removed (a key column cannot be NULL and still be unique)
+    # An ordinary table with a unique key, not WITHOUT ROWID: the salvage (app.db_salvage, #455) copies tables by their row numbers
     db.execute("CREATE TABLE IF NOT EXISTS alarm_counts (camera_id TEXT NOT NULL, rule_key TEXT NOT NULL, rule_name TEXT NOT NULL, state TEXT NOT NULL, "
-               "count INTEGER NOT NULL, PRIMARY KEY (camera_id,rule_key,rule_name,state)) WITHOUT ROWID")
+               "count INTEGER NOT NULL, UNIQUE (camera_id,rule_key,rule_name,state))")
     db.execute("CREATE INDEX IF NOT EXISTS alarm_counts_rule_idx ON alarm_counts(rule_key)")
-    db.execute("DELETE FROM alarm_counts")
-    db.execute("INSERT INTO alarm_counts(camera_id,rule_key,rule_name,state,count) "
-               "SELECT camera_id,COALESCE(rule_id,''),rule_name,state,COUNT(*) FROM alarms GROUP BY camera_id,COALESCE(rule_id,''),rule_name,state")
+    for statement in RECOUNT:
+        db.execute(statement)
     db.execute(f"CREATE TRIGGER IF NOT EXISTS alarm_counts_insert AFTER INSERT ON alarms BEGIN {ADD_NEW} END")
     db.execute(f"CREATE TRIGGER IF NOT EXISTS alarm_counts_delete AFTER DELETE ON alarms BEGIN {TAKE_OLD} END")
     # Also fired by the foreign keys' own changes: a removed rule sets rule_id to NULL, a removed camera deletes its alarms
