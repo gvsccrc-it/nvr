@@ -34,6 +34,13 @@ RECONNECTS, FRAMES_DROPPED = "reconnects", "frames_dropped"
 SAMPLE_SECONDS = 600
 MEASURE_WINDOW = timedelta(minutes=30)
 ONVIF_CONCURRENCY = 4
+# How many cameras' recordings are measured at once (#477). Each measurement can run ffprobe for up to 15 s on a busy volume, in a thread
+# of the worker's shared pool: unbounded, 200 cameras due together took every thread, and webhook results, PTZ tours and capability
+# writes waited behind them. A stalled measurement holds one of these places, not the others.
+MEASURE_CONCURRENCY = 4
+# Each camera is checked again after SAMPLE_SECONDS moved by an amount of its own, within this spread, so that cameras first checked in one
+# pass (at start-up, or when added together) do not all come due together for ever (#477).
+SAMPLE_SPREAD_SECONDS = 300
 NOT_REPORTED = "Not reported"
 UP_STATES = ("recording", "buffering")  # The same two as in the trigger of migration 33
 PRERELEASE = frozenset({"alpha", "beta", "rc", "pre", "dev", "preview", "a", "b"})
@@ -153,12 +160,35 @@ def _store_one(camera_id: str, values: dict[str, Any]) -> None:
         _store(db, camera_id, values)
 
 
+def sample_seconds(camera_id: str) -> float:
+    """How long after its last check this camera is checked again: SAMPLE_SECONDS moved by an amount of its own, the same every time, in
+    [-SPREAD/2, +SPREAD/2). Cameras checked together drift apart and stay apart."""
+    import hashlib
+
+    share = int.from_bytes(hashlib.sha256(camera_id.encode()).digest()[:4], "big") / 2**32
+    return SAMPLE_SECONDS + (share - 0.5) * SAMPLE_SPREAD_SECONDS
+
+
 def due(db: sqlite3.Connection, now: datetime, limit: int = 200) -> list[sqlite3.Row]:
-    cutoff = _iso(now - timedelta(seconds=SAMPLE_SECONDS))
-    return db.execute(
+    # Read with the earliest any camera can be due; each camera's own time is applied below
+    cutoff = _iso(now - timedelta(seconds=SAMPLE_SECONDS - SAMPLE_SPREAD_SECONDS / 2))
+    rows = db.execute(
         "SELECT c.*,h.onvif_checked_at,h.measured_at FROM cameras c LEFT JOIN camera_health h ON h.camera_id=c.id WHERE c.archived_at IS NULL "
         "AND ((c.device_service_url IS NOT NULL AND (h.onvif_checked_at IS NULL OR h.onvif_checked_at<?)) OR (c.recording_enabled=1 AND (h.measured_at IS NULL OR h.measured_at<?))) "
-        "ORDER BY c.id LIMIT ?", (cutoff, cutoff, limit)).fetchall()
+        "ORDER BY c.id", (cutoff, cutoff)).fetchall()
+    return [row for row in rows if _onvif_due(row, now) or _measure_due(row, now)][:limit]
+
+
+def _stale(checked_at: str | None, camera_id: str, now: datetime) -> bool:
+    return checked_at is None or checked_at < _iso(now - timedelta(seconds=sample_seconds(camera_id)))
+
+
+def _onvif_due(row: sqlite3.Row, now: datetime) -> bool:
+    return bool(row["device_service_url"]) and _stale(row["onvif_checked_at"], row["id"], now)
+
+
+def _measure_due(row: sqlite3.Row, now: datetime) -> bool:
+    return bool(row["recording_enabled"]) and _stale(row["measured_at"], row["id"], now)
 
 
 async def sample_once(now: datetime | None = None) -> int:
@@ -169,6 +199,7 @@ async def sample_once(now: datetime | None = None) -> int:
     with connect() as db:
         cameras = due(db, now)
     gate = asyncio.Semaphore(ONVIF_CONCURRENCY)
+    measuring = asyncio.Semaphore(MEASURE_CONCURRENCY)
 
     async def refresh(row: sqlite3.Row) -> None:
         try:
@@ -179,8 +210,7 @@ async def sample_once(now: datetime | None = None) -> int:
 
     async def refresh_one(row: sqlite3.Row) -> None:
         values: dict[str, Any] = {}
-        cutoff = _iso(now - timedelta(seconds=SAMPLE_SECONDS))
-        if row["device_service_url"] and (row["onvif_checked_at"] is None or row["onvif_checked_at"] < cutoff):
+        if _onvif_due(row, now):
             values["onvif_checked_at"] = _iso(now)
             try:
                 async with gate:
@@ -190,11 +220,12 @@ async def sample_once(now: datetime | None = None) -> int:
                 values["onvif_error"] = exc.message[:300]
             except (asyncio.TimeoutError, OSError, ValueError) as exc:
                 values["onvif_error"] = f"The camera did not answer ({type(exc).__name__})"
-        if row["recording_enabled"] and (row["measured_at"] is None or row["measured_at"] < cutoff):
+        if _measure_due(row, now):
             def measure() -> dict[str, Any]:
                 with connect() as db:
                     return measure_recordings(db, row["id"], now)
-            values.update(await asyncio.to_thread(measure), measured_at=_iso(now))
+            async with measuring:  # A few at a time, so the worker's other work still finds a thread (#477)
+                values.update(await asyncio.to_thread(measure), measured_at=_iso(now))
         await asyncio.to_thread(_store_one, row["id"], values)
 
     await asyncio.gather(*(refresh(row) for row in cameras))

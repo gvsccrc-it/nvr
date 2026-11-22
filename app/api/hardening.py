@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import threading
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -12,6 +14,36 @@ from app.principal import Administrator
 from app.store import connect
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+# How long a request that starts the checks waits for them (#477). Most runs finish well within it (a camera asked within the hour is not
+# asked again) and the answer is the result, as before. A run with cameras that do not answer goes on in the background, and the answer
+# says how far it has got: the page asks again until it is done. It used to hold the request for minutes.
+RUN_WAIT_SECONDS = 3.0
+
+
+async def _start_run(admin_id: int) -> dict[str, object]:
+    """Start the checks in a thread of their own, wait up to RUN_WAIT_SECONDS, and answer with the report as it stands then."""
+    finished = threading.Event()
+
+    def work() -> None:
+        try:
+            result = hardening.run("manual")
+            if result.get("ran"):
+                with connect() as db:
+                    record(db, admin_id, "hardening_run", "hardening", "checks", high=result["counts"]["high"], medium=result["counts"]["medium"])
+        except Exception:  # noqa: BLE001 - the page shows the run as no longer going; the error is in the log
+            logger.exception("The hardening checks failed")
+        finally:
+            finished.set()
+
+    threading.Thread(target=work, name="hardening-run", daemon=True).start()
+    await asyncio.to_thread(finished.wait, RUN_WAIT_SECONDS)
+
+    def now_report() -> dict[str, object]:
+        with connect() as db:
+            return hardening.report(db)
+
+    return await asyncio.to_thread(now_report)
 
 
 class Settings(BaseModel):
@@ -36,15 +68,9 @@ def get_report(_: Administrator) -> dict[str, object]:
 
 @router.post("/api/hardening/run")
 async def run_checks(admin: Administrator) -> dict[str, object]:
-    """Run every check now. A camera probed within the probe gap is not probed again: its last answer is used."""
-    result = await asyncio.to_thread(hardening.run, "manual")
-
-    def note() -> None:
-        with connect() as db:
-            record(db, admin.id, "hardening_run", "hardening", "checks", high=result["counts"]["high"], medium=result["counts"]["medium"])
-
-    await asyncio.to_thread(note)  # Off the event loop, like every database write in an asynchronous route (#354)
-    return result
+    """Run every check now. A camera probed within the probe gap is not probed again: its last answer is used. Answers within a few
+    seconds: with the result when the run is done by then, otherwise with its progress (``run``) while it goes on in the background."""
+    return await _start_run(admin.id)
 
 
 @router.put("/api/hardening/settings")
@@ -69,7 +95,7 @@ async def put_settings(payload: Settings, admin: Administrator) -> dict[str, obj
                 raise
 
     await asyncio.to_thread(save)  # Off the event loop (#354)
-    return await asyncio.to_thread(hardening.run, "manual")
+    return await _start_run(admin.id)  # Applied at once when it can be; never held up for minutes by cameras that do not answer (#477)
 
 
 @router.put("/api/hardening/findings/{camera_id}/{check}/acknowledgement")
