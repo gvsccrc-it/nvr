@@ -35,6 +35,29 @@ STREAM_FAULTS = frozenset({"camera_offline", "stream_error", "disk_unavailable"}
 REPORT_GAPS = 5
 
 
+# A camera's intervals follow one another, so the ones that overlap a window begin no earlier than the last interval that began at or before
+# the window's start. Both bounds are on the start time, which the (camera, start) index serves: the plain overlap test (began before the
+# end, ended after the start) read every interval the camera had before the window's end, its whole history for a recent window (#492).
+COVERAGE_IN_WINDOW = (
+    "SELECT coverage_kind,reason,reason_code,starts_at,ends_at FROM coverage_intervals "
+    "WHERE camera_id=? AND starts_at>=COALESCE((SELECT MAX(starts_at) FROM coverage_intervals WHERE camera_id=? AND starts_at<=?),'') "
+    "AND starts_at<? AND (ends_at IS NULL OR ends_at>?) ORDER BY starts_at LIMIT ?")
+KEEP_DAYS_AT_LEAST = 15  # The weekly report is made up to a week after its week ends
+
+
+def prune(db: sqlite3.Connection, camera_id: str, retention_days: int, now: datetime) -> int:
+    """Remove a camera's closed intervals that ended before its retention began and before its oldest remaining footage: nothing is left
+    for them to describe. Nothing removed them before, so the table grew by a row for every change of every camera for ever (#492)."""
+    cutoff = (now - timedelta(days=max(retention_days, KEEP_DAYS_AT_LEAST))).isoformat()
+    oldest = db.execute("SELECT MIN(starts_at) FROM recording_segments WHERE camera_id=?", (camera_id,)).fetchone()[0]
+    if oldest and oldest < cutoff:
+        cutoff = oldest  # Footage kept past its retention (held, or kept for an alarm) keeps its coverage
+    first = db.execute("SELECT starts_at,ends_at FROM coverage_intervals WHERE camera_id=? ORDER BY starts_at LIMIT 1", (camera_id,)).fetchone()
+    if first is None or first["starts_at"] >= cutoff:
+        return 0  # Read first: nothing to remove takes no write lock (#280)
+    return db.execute("DELETE FROM coverage_intervals WHERE camera_id=? AND starts_at<? AND ends_at IS NOT NULL AND ends_at<?", (camera_id, cutoff, cutoff)).rowcount
+
+
 def _parse(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
 
@@ -66,10 +89,7 @@ def timeline(db: sqlite3.Connection, camera_id: str, start: datetime, end: datet
         "SELECT id,starts_at,ends_at,size_bytes,source,tier_id IS NOT NULL AS archived FROM recording_segments "
         "WHERE camera_id=? AND starts_at<? AND ends_at>? AND unavailable_at IS NULL ORDER BY starts_at LIMIT ?",
         (camera_id, end_text, start_text, bound)).fetchall()
-    coverage = [dict(row) for row in db.execute(
-        "SELECT coverage_kind,reason,reason_code,starts_at,ends_at FROM coverage_intervals "
-        "WHERE camera_id=? AND starts_at<? AND (ends_at IS NULL OR ends_at>?) ORDER BY starts_at LIMIT ?",
-        (camera_id, end_text, start_text, bound))]
+    coverage = [dict(row) for row in db.execute(COVERAGE_IN_WINDOW, (camera_id, camera_id, start_text, end_text, start_text, bound))]
     # Indexed footage whose file is gone (for example after a restore) is a known failure, not footage.
     coverage += [{"coverage_kind": "failure", "reason": row["unavailable_reason"], "reason_code": "disk_unavailable",
                   "starts_at": row["starts_at"], "ends_at": row["ends_at"]}
