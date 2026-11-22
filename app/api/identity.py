@@ -22,7 +22,7 @@ from app.audit import record
 from app.clock import stamp
 from app.access import ensure_default_grant
 from app.principal import secure_cookie, COOKIE_NAME, Administrator, CurrentUser
-from app.security import hash_password, new_session_token, password_problem, spend_password_time, token_digest, verify_password
+from app.security import SignInBusy, hash_password, new_session_token, password_problem, sign_in_check, spend_password_time, token_digest, verify_password
 from app.store import connect, has_row
 
 router = APIRouter()
@@ -214,9 +214,15 @@ def login(payload: LoginRequest, request: Request, response: Response) -> dict[s
             "SELECT id, username, password_hash, role, provider_issuer FROM users WHERE username=? COLLATE NOCASE AND disabled_at IS NULL",
             (payload.username.strip(),),
         ).fetchone()
-    if user is None:
-        spend_password_time(payload.password)  # An unknown name takes as long to refuse as a wrong password, so names cannot be told apart.
-    if user is None or not verify_password(payload.password, user["password_hash"]):
+    try:
+        with sign_in_check():  # Only a few password checks at once for callers who are not signed in (#462)
+            if user is None:
+                spend_password_time(payload.password)  # An unknown name takes as long to refuse as a wrong password, so names cannot be told apart.
+            right = user is not None and verify_password(payload.password, user["password_hash"])
+    except SignInBusy:
+        limits.release(account, address)  # Not checked, so not a wrong password
+        raise HTTPException(status_code=429, detail="Many people are signing in at this moment. Try again in a few seconds.", headers={"Retry-After": "2"}) from None
+    if not right:
         raise HTTPException(status_code=401, detail="Invalid username or password")
     with connect() as db:
         found = mfa.factors(db, int(user["id"]))
