@@ -28,6 +28,10 @@ def warnings(info: dict[str, Any], policy: str, remote_mfa: bool, role: str) -> 
     if exposed and not (remote_mfa or policy == "all" or (policy == "administrators" and role == "administrator")):
         add("warn", "no_second_factor", "Remote sessions are not required to use a second factor: a password alone opens the NVR from outside the local network. "
                                         "Turn on the second factor for remote sessions below, or require one for everybody in Users & access.")
+    if remote_mfa and info.get("classed_by") == "private_range" and info.get("on_host_network") is False:
+        add("warn", "private_address_off_site", f"This request came from {info['client_address']}, a private address that is not on any network this machine is connected to, and it was "
+                                                "counted as local, so the second factor for remote sessions was not asked for. If it arrives through a VPN or a link between sites, "
+                                                "list that range in NVR_REMOTE_NETWORKS so the people on it count as remote. If it is another network at this site, nothing needs doing.")
     forwarded = any(info["forwarded"].values())
     if forwarded and not info["peer_is_trusted_proxy"] and not info["legacy_forwarded_trust"]:
         add("warn", "forwarded_headers_ignored", f"Forwarded headers arrived from {info['peer_address']}, which is not a trusted proxy, so they were ignored and everybody behind it looks like one address "

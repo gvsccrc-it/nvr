@@ -9,16 +9,28 @@ So forwarded headers are believed **only from a peer listed in ``NVR_TRUSTED_PRO
 * the scheme (HTTPS or not) and the host come from ``X-Forwarded-Proto`` and ``-Host`` the same way, and from the connection otherwise.
 
 ``NVR_TRUST_FORWARDED_FOR=true`` (before trusted proxies existed) still trusts the last ``X-Forwarded-For`` entry from any sender; it is only safe
-when the NVR is reachable through the proxy alone, and Settings says so. A caller is *remote* when its address is outside the local networks
-(loopback, private and link-local ranges, plus ``NVR_LOCAL_NETWORKS``; Tailscale's range is not local unless listed); an address that cannot be read counts as
-remote. Wherever the caller cannot be known it counts as remote: a trusted proxy that reports no usable address, forwarded headers from a peer that is not
-a trusted proxy, and anything that rests on ``NVR_TRUST_FORWARDED_FOR``, which any sender could write.
+when the NVR is reachable through the proxy alone, and Settings says so.
+
+Whether a caller is *remote* or *local* is decided by ``classify``, the first of these that fits its address (#458):
+
+1. inside ``NVR_REMOTE_NETWORKS``: remote. This wins over everything below; it is how a VPN or site-to-site link that uses private
+   addresses is made to count as outside.
+2. inside ``NVR_LOCAL_NETWORKS``: local. The administrator said so.
+3. inside a tunnel's range: remote. A tunnel's range is one named in ``NVR_TUNNEL_NETWORKS`` (the WireGuard overlay names its own) or
+   the network of a tunnel interface on this machine (``wg*``, ``tun*``, ``tap*``). People on a tunnel are not at the site, though
+   their addresses are private ones; listing the range in ``NVR_LOCAL_NETWORKS`` (rule 2) is how an administrator says they are.
+4. loopback, a private range or a link-local range: local. Tailscale's range is not among them.
+5. anything else: remote. An address that cannot be read counts as remote.
+
+Wherever the caller cannot be known it counts as remote: a trusted proxy that reports no usable address, forwarded headers from a peer that
+is not a trusted proxy, and anything that rests on ``NVR_TRUST_FORWARDED_FOR``, which any sender could write.
 """
 from __future__ import annotations
 
 import ipaddress
 import os
 import re
+import time
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -32,9 +44,32 @@ MAX_HOPS = 10
 _HOST = re.compile(r"^(?:[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*|\[[0-9a-f:.]+\])(?::\d{1,5})?$")
 
 
+TUNNEL_INTERFACE = re.compile(r"^(wg|tun|tap)")  # WireGuard, and the interfaces OpenVPN and others make
+_INTERFACES_FOR_SECONDS = 60.0
+_interfaces_read: tuple[float, list[tuple[Network, str]]] | None = None
+
+
+def interfaces() -> list[tuple[Network, str]]:
+    """The IPv4 network and name of each interface this machine has an address on, loopback left out. Read at most once a minute (it is
+    asked for on requests). Linux only, and best effort: an empty list when they cannot be read."""
+    global _interfaces_read
+    now = time.monotonic()
+    if _interfaces_read is None or now - _interfaces_read[0] > _INTERFACES_FOR_SECONDS:
+        found = []
+        for entry in _read_interfaces():
+            text, _, name = entry.partition(" (")
+            found.append((ipaddress.ip_network(text), name.rstrip(")")))
+        _interfaces_read = (now, found)
+    return _interfaces_read[1]
+
+
 def interface_networks() -> list[str]:
     """The IPv4 networks this machine has an address on, loopback left out ("192.0.2.0/24 (eth0)"), for saying where the interface can be
-    reached from (#541). Linux only, and best effort: an empty list when they cannot be read."""
+    reached from (#541)."""
+    return _read_interfaces()
+
+
+def _read_interfaces() -> list[str]:
     import fcntl
     import socket
     import struct
@@ -80,7 +115,56 @@ def trusted_proxies() -> list[Network]:
 
 
 def local_networks() -> list[Network]:
-    return parse_networks(",".join(DEFAULT_LOCAL_NETWORKS))[0] + parse_networks(os.environ.get("NVR_LOCAL_NETWORKS", ""))[0]
+    return parse_networks(",".join(DEFAULT_LOCAL_NETWORKS))[0] + listed_local_networks()
+
+
+def listed_local_networks() -> list[Network]:
+    return parse_networks(os.environ.get("NVR_LOCAL_NETWORKS", ""))[0]
+
+
+def remote_networks() -> list[Network]:
+    """Ranges that count as remote whatever else is true of them (``NVR_REMOTE_NETWORKS``)."""
+    return parse_networks(os.environ.get("NVR_REMOTE_NETWORKS", ""))[0]
+
+
+def tunnel_networks() -> list[Network]:
+    """Ranges people reach the NVR from through a tunnel: those named in ``NVR_TUNNEL_NETWORKS``, and the network of each tunnel
+    interface on this machine."""
+    named = parse_networks(os.environ.get("NVR_TUNNEL_NETWORKS", ""))[0]
+    return named + [network for network, name in interfaces() if TUNNEL_INTERFACE.match(name)]
+
+
+def host_networks() -> list[Network]:
+    """The networks this machine is on directly, tunnels left out: where "at the site" physically is."""
+    return [network for network, name in interfaces() if not TUNNEL_INTERFACE.match(name)]
+
+
+# Why an address was counted as it was, in words for Settings
+REASONS = {
+    "unreadable": "its address could not be read, and what cannot be known counts as remote",
+    "listed_remote": "its address is inside NVR_REMOTE_NETWORKS",
+    "listed_local": "its address is inside NVR_LOCAL_NETWORKS",
+    "tunnel": "its address is in a tunnel's range, and people on a tunnel count as remote unless that range is listed in NVR_LOCAL_NETWORKS",
+    "private_range": "its address is in a private, loopback or link-local range",
+    "public": "its address is not in any local range",
+    "unknown_caller": "it came through a proxy that is not trusted or did not say who the caller is, and a caller that cannot be known counts as remote",
+}
+
+
+def classify(address: str) -> tuple[bool, str]:
+    """Whether an address counts as remote, and the rule that decided it (a key of ``REASONS``). The order is the module docstring's."""
+    parsed = _ip(address)
+    if parsed is None:
+        return True, "unreadable"
+    if _within(parsed, remote_networks()):
+        return True, "listed_remote"
+    if _within(parsed, listed_local_networks()):
+        return False, "listed_local"
+    if _within(parsed, tunnel_networks()):
+        return True, "tunnel"
+    if _within(parsed, parse_networks(",".join(DEFAULT_LOCAL_NETWORKS))[0]):
+        return False, "private_range"
+    return True, "public"
 
 
 def legacy_forwarded_trust() -> bool:
@@ -151,9 +235,8 @@ def client_address(connection: HTTPConnection) -> str:
 
 
 def is_remote(address: str) -> bool:
-    """Whether an address is outside the local networks. One that cannot be read is treated as remote."""
-    parsed = _ip(address)
-    return parsed is None or not _within(parsed, local_networks())
+    """Whether an address counts as remote (``classify``). One that cannot be read is treated as remote."""
+    return classify(address)[0]
 
 
 FORWARDED_HEADERS = ("x-forwarded-for", "x-forwarded-proto", "x-forwarded-host", "forwarded")
@@ -166,10 +249,16 @@ def has_forwarded_headers(connection: HTTPConnection) -> bool:
 def request_is_remote(connection: HTTPConnection) -> bool:
     """Whether the caller is outside the local network, failing towards remote: forwarded headers from a peer that is not a trusted proxy come
     through a proxy the NVR was not told about, and a trusted proxy may report nothing usable, so in both the caller is unknown and counts as remote."""
+    return request_class(connection)[0]
+
+
+def request_class(connection: HTTPConnection) -> tuple[bool, str]:
+    """``request_is_remote`` with the rule that decided it."""
     if trusted_proxies() and peer_is_trusted_proxy(connection):
         # A trusted proxy that does not say who the caller is (no header, one that is malformed or too long) leaves the caller unknown.
-        return forwarded_for(connection) is None or is_remote(client_address(connection))
-    return is_remote(peer_address(connection)) or has_forwarded_headers(connection)
+        return (True, "unknown_caller") if forwarded_for(connection) is None else classify(client_address(connection))
+    remote, rule = classify(peer_address(connection))
+    return (True, "unknown_caller") if not remote and has_forwarded_headers(connection) else (remote, rule)
 
 
 def scheme(connection: HTTPConnection) -> str:
@@ -217,9 +306,16 @@ def describe(connection: HTTPConnection) -> dict[str, Any]:
     """How this request reached the NVR, for Settings: the facts, not yet the warnings."""
     proxies, invalid = parse_networks(os.environ.get("NVR_TRUSTED_PROXIES", ""))
     address = client_address(connection)
+    remote, rule = request_class(connection)
+    parsed, on_site = _ip(address), host_networks()
     return {
         "client_address": address, "peer_address": peer_address(connection), "peer_is_trusted_proxy": peer_is_trusted_proxy(connection),
-        "remote": request_is_remote(connection), "https": scheme(connection) == "https", "host": host(connection),
+        "remote": remote, "classed_by": rule, "classed_reason": REASONS[rule],
+        "remote_networks": [str(network) for network in remote_networks()], "tunnel_networks": [str(network) for network in tunnel_networks()],
+        "host_networks": [str(network) for network in on_site],
+        # None when this machine's networks could not be read, or the address is not IPv4 (only IPv4 networks are read)
+        "on_host_network": _within(parsed, on_site) if parsed is not None and parsed.version == 4 and on_site else None,
+        "https": scheme(connection) == "https", "host": host(connection),
         "forwarded": {name: connection.headers.get(header, "")[:200] or None for name, header in
                       (("for", "x-forwarded-for"), ("proto", "x-forwarded-proto"), ("host", "x-forwarded-host"))},
         "trusted_proxies": [str(network) for network in proxies], "invalid_trusted_proxies": invalid, "legacy_forwarded_trust": legacy_forwarded_trust(),

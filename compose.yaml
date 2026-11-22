@@ -47,6 +47,9 @@ services:
       NVR_TRUSTED_PROXIES: ${NVR_TRUSTED_PROXIES:-}
       # Networks that count as "local" besides loopback, private, link-local and Tailscale addresses, and extra browser origins allowed to open the live video socket.
       NVR_LOCAL_NETWORKS: ${NVR_LOCAL_NETWORKS:-}
+      # A VPN or a link between sites that uses private addresses: list its range here so the people on it count as remote (#458).
+      NVR_REMOTE_NETWORKS: ${NVR_REMOTE_NETWORKS:-}
+      NVR_TUNNEL_NETWORKS: ${NVR_TUNNEL_NETWORKS:-}
       NVR_ALLOWED_ORIGINS: ${NVR_ALLOWED_ORIGINS:-}
       NVR_OIDC_TENANT_ID: ${NVR_OIDC_TENANT_ID:-}
       NVR_OIDC_CLIENT_ID: ${NVR_OIDC_CLIENT_ID:-}

@@ -25,7 +25,19 @@ The proxies the overrides use run on the host network and reach the NVR on `127.
 
 ## Where "local" ends
 
-A caller is *remote* when its address is outside the local networks: loopback, private (`10/8`, `172.16/12`, `192.168/16`), link-local and IPv6 unique-local. Add more with `NVR_LOCAL_NETWORKS`. **Tailscale's range (`100.64/10`) and a WireGuard tunnel's addresses are not local unless you list them**, so the second factor for remote sessions applies to people on a tailnet or tunnel; listing the range treats them as being at the site. An address that cannot be read counts as remote.
+Whether a caller is *remote* or *local* is decided by the first of these that fits its address:
+
+1. **Inside `NVR_REMOTE_NETWORKS`: remote.** This wins over everything below.
+2. **Inside `NVR_LOCAL_NETWORKS`: local.** You said so.
+3. **In a tunnel's range: remote.** A tunnel's range is one named in `NVR_TUNNEL_NETWORKS` (the WireGuard overlay names its own, below), or the network of a tunnel interface on the host (`wg*`, `tun*`, `tap*`), which the NVR finds by itself.
+4. **Loopback, private (`10/8`, `172.16/12`, `192.168/16`), link-local and IPv6 unique-local: local.** Tailscale's range (`100.64/10`) is not among them.
+5. **Anything else: remote.** An address that cannot be read counts as remote.
+
+So **people on a tunnel count as remote unless you say otherwise**: the second factor for remote sessions applies to them, and a first factor cannot be set up from there. To treat a tunnel's people as being at the site, list its range in `NVR_LOCAL_NETWORKS` (for the WireGuard overlay, `WG_LOCAL_NETWORKS`).
+
+> **Any other VPN or link between sites that uses private addresses must be listed in `NVR_REMOTE_NETWORKS`.** The NVR cannot tell such addresses from the building's own: a site-to-site VPN, a remote-access VPN on the router, or a proxy that adds no forwarded headers all arrive from a private address, and rule 4 counts them as local. Until the range is listed, the second factor for remote sessions is not asked of the people on it. Settings, Remote access says how your own request was counted and by which rule, and warns when a "local" request comes from a private address that is on none of the host's networks.
+
+**Upgrading with a tunnel already in use:** before this rule, every private address counted as local, a tunnel's included. After the upgrade people on the tunnel count as remote. If the second factor for remote sessions is on, each of them needs a factor, and one without a factor cannot set a first one up over the tunnel. Either have them set a factor up at the site first, or set `WG_LOCAL_NETWORKS` (or `NVR_LOCAL_NETWORKS`) to the tunnel's range to keep things as they were.
 
 ## The live video socket
 
@@ -33,11 +45,12 @@ Browsers must send an `Origin` when they open the live video WebSocket, and the 
 
 ## Settings > Remote access
 
-Administrators see how the page reached the NVR (the caller's address and whether it is inside the local network, HTTPS or plain HTTP, the host, the peer and whether it is a trusted proxy, the trusted proxies, the public address, the session cookie) and these warnings, worst first:
+Administrators see how the page reached the NVR (the caller's address, whether it was counted as local or remote and by which rule, HTTPS or plain HTTP, the host, the peer and whether it is a trusted proxy, the trusted proxies, the public address, the session cookie) and these warnings, worst first:
 
 - **Plain HTTP from outside the local network.** Passwords and video can be read on the way.
 - **No second factor expected from remote sessions** while the NVR is exposed (reached from outside, behind a trusted proxy, or given an `NVR_PUBLIC_URL`).
 - **Forwarded headers from a peer that is not a trusted proxy**, which were ignored: everybody behind it looks like one address, and HTTPS cannot be seen.
+- **A private address that is on none of the host's networks, counted as local,** while the second factor for remote sessions is on: probably a VPN or a link between sites that should be in `NVR_REMOTE_NETWORKS`.
 - `NVR_TRUST_FORWARDED_FOR` without trusted proxies; entries of `NVR_TRUSTED_PROXIES` that are not addresses; an `NVR_PUBLIC_URL` that is plain `http://`; the session cookie not marked Secure over HTTPS (set `NVR_COOKIE_SECURE=true`).
 
 **Require a second factor for sessions from outside the local network** makes a local account without a passkey or authenticator app reach only enrolment when it signs in from outside, and asks a session started locally as soon as it is used from outside (it is checked on every request). Set up your own factor first. **While this is on, a first factor can be set up only from the local network**: someone outside with only an account's password is told to set it up on site or ask an administrator, so a stolen password cannot be used to set up an intruder's own factor and lock the owner out. An account that already has a factor can add another from anywhere (after its password). Users & access shows "None" against a local account with no factor yet. People who already have one are asked for it as always. It applies to browser sessions of local accounts: Microsoft Entra accounts (their tenant's multi-factor), API tokens and video-wall sessions are unchanged, as they are for the policy in Users & access. The change is audited (`remote_mfa_changed`).
@@ -47,7 +60,9 @@ Administrators see how the page reached the NVR (the caller's address and whethe
 | Variable | Meaning |
 | --- | --- |
 | `NVR_TRUSTED_PROXIES` | Addresses or networks whose forwarded headers are believed |
-| `NVR_LOCAL_NETWORKS` | Further networks counted as local |
+| `NVR_LOCAL_NETWORKS` | Further networks counted as local, a tunnel's range among them if you choose |
+| `NVR_REMOTE_NETWORKS` | Networks counted as remote though their addresses are private: a VPN or a link between sites. Wins over everything else |
+| `NVR_TUNNEL_NETWORKS` | A tunnel's address range: remote unless also listed as local. Set by the WireGuard overlay |
 | `NVR_ALLOWED_ORIGINS` | Further origins allowed to open the live video socket and to make requests that change something |
 | `NVR_MAX_REQUEST_BYTES` | The largest request body accepted (default 8 MiB; evidence packages uploaded for checking have their own 2 GiB limit). Set the same limit at your reverse proxy |
 | `NVR_PUBLIC_URL` | The address people use (also allowed for the live socket, and used for passkeys and links) |
@@ -81,7 +96,7 @@ A value that is not an IP address (a name, a network, an address with a port) st
 
 ## WireGuard
 
-The site dials out to a hub (a small host with a public address, which you run); your devices connect to the same hub. Nothing is opened at the site; the hub needs one UDP port. Put the site's client configuration (with `PersistentKeepalive = 25`, the NVR's tunnel address, and `AllowedIPs` covering your devices' tunnel addresses) at `deploy/wireguard/wg_confs/wg0.conf` and start `compose.wireguard.yaml`. Browse to `http://<NVR tunnel address>:8280`: the tunnel encrypts it, so there is no proxy to trust. By default people on the tunnel count as outside the local network, so Settings shows a plain-HTTP warning (which the tunnel makes harmless) and the second factor can be required of them; set `WG_LOCAL_NETWORKS` to the tunnel's addresses to treat them as local instead, which silences the warning and lifts that requirement. (Passkeys need an HTTPS address; use Tailscale or Cloudflare if you want them.) Keep the private keys out of the repository; `deploy/wireguard/` is for your own configuration.
+The site dials out to a hub (a small host with a public address, which you run); your devices connect to the same hub. Nothing is opened at the site; the hub needs one UDP port. Put the site's client configuration (with `PersistentKeepalive = 25`, the NVR's tunnel address, and `AllowedIPs` covering your devices' tunnel addresses) at `deploy/wireguard/wg_confs/wg0.conf` and start `compose.wireguard.yaml`. Browse to `http://<NVR tunnel address>:8280`: the tunnel encrypts it, so there is no proxy to trust. By default people on the tunnel count as outside the local network, so Settings shows a plain-HTTP warning (which the tunnel makes harmless) and the second factor can be required of them; set `WG_LOCAL_NETWORKS` to the tunnel's addresses to treat them as local instead, which silences the warning and lifts that requirement. The overlay tells the NVR the tunnel's range with `WG_TUNNEL_NETWORKS`, `10.13.13.0/24` unless you set it in `.env`; the NVR also reads the range from the host's `wg0` interface, so a tunnel on another range is still recognised. (Passkeys need an HTTPS address; use Tailscale or Cloudflare if you want them.) Keep the private keys out of the repository; `deploy/wireguard/` is for your own configuration.
 
 ## What the NVR does not do
 

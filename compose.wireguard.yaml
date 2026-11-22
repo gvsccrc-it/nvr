@@ -7,6 +7,9 @@
 # the NVR is opened over plain HTTP at its WireGuard address and there is no proxy to trust. By default people on the tunnel count as outside the local
 # network: Settings shows a plain-HTTP warning (the tunnel does encrypt it) and a second factor can be required of them. To treat them as local instead,
 # set WG_LOCAL_NETWORKS to the tunnel's addresses (for example 10.13.13.0/24), which also silences the warning and lifts that requirement.
+#
+# The NVR knows the tunnel's range two ways: WG_TUNNEL_NETWORKS below (the guide's example range unless you set it), and the network of any
+# wg* interface it finds on the host. If your tunnel uses another range, set WG_TUNNEL_NETWORKS to it in .env.
 services:
   wireguard:
     image: lscr.io/linuxserver/wireguard:1.0.20260223-r0-ls130@sha256:10db56ad834f94541307d5dfdbe87370e26d155bb341a5bf65789f970f24ab5c  # Pinned (#384); Dependabot proposes updates
@@ -30,3 +33,4 @@ services:
   nvr:
     environment:
       NVR_LOCAL_NETWORKS: ${WG_LOCAL_NETWORKS:-}
+      NVR_TUNNEL_NETWORKS: ${WG_TUNNEL_NETWORKS:-10.13.13.0/24}

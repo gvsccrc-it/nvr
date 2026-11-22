@@ -36,7 +36,9 @@ The `nvr-data` volume stores the database and account/session state. `nvr-secret
 | `NVR_WEBAUTHN_RP_ID` | unset | Optional parent domain for passkeys, to share them between hosts |
 | `NVR_TRUST_FORWARDED_FOR` | false | Count sign-in attempts by the last `X-Forwarded-For` address; only behind a proxy you control (older; prefer `NVR_TRUSTED_PROXIES`) |
 | `NVR_TRUSTED_PROXIES` | none | Addresses or networks of your reverse proxy or tunnel: forwarded client address, HTTPS and host are believed only from these; see [remote access](docs/remote-access.md) |
-| `NVR_LOCAL_NETWORKS` | none | Networks counted as local besides private, loopback, link-local and Tailscale ranges |
+| `NVR_LOCAL_NETWORKS` | none | Networks counted as local besides the private, loopback and link-local ranges. Listing a tunnel's range here is how people on that tunnel are made to count as at the site |
+| `NVR_REMOTE_NETWORKS` | none | Networks counted as remote even though they are private ranges: a VPN or a link between sites. Wins over everything else |
+| `NVR_TUNNEL_NETWORKS` | none | A tunnel's address range. People in it count as remote unless the range is also in `NVR_LOCAL_NETWORKS`. The WireGuard overlay sets it (`WG_TUNNEL_NETWORKS`, `10.13.13.0/24` unless changed); the network of any `wg*`, `tun*` or `tap*` interface on the host is found by itself |
 | `NVR_HWACCEL` | auto | Graphics-chip video work: `auto`, `none`, or `nvenc`, `qsv`, `vaapi`; see [H.265 and hardware acceleration](docs/hevc-and-acceleration.md) |
 | `NVR_VAAPI_DEVICE` | first render device | The `/dev/dri/renderD*` device VAAPI and Quick Sync use |
 | `NVR_ALLOWED_ORIGINS` | none | Extra browser origins allowed to open the live video socket and to make requests that change something (`NVR_PUBLIC_URL` is always allowed) |
