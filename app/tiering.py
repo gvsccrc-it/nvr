@@ -469,7 +469,13 @@ def move_segment(segment_id: int, now: datetime | None = None, opener: Callable[
             return reason
         source = _hot_candidate(row["relative_path"])
         if not source.is_file():
-            return "unavailable"
+            # Remembered, with when: it is not picked again for MISSING_RETRY, so it cannot use up every pass, and it is counted for the
+            # tier's status (#485). If the file comes back (a volume that was away) the next try moves it and clears this.
+            with connect() as db:
+                db.execute("INSERT INTO tier_moves(segment_id,tier_id,tier_key,state,last_error,updated_at) VALUES(?,?,?,'copying',?,?) "
+                           "ON CONFLICT(segment_id) DO UPDATE SET last_error=excluded.last_error,updated_at=excluded.updated_at",
+                           (segment_id, tier.id, key, f"{MISSING_ERROR}: it is looked for again in an hour", now.isoformat()))
+            return "missing"
         sha, size = file_sha256(source), source.stat().st_size
         with connect() as db:
             link = db.execute("SELECT sha256 FROM footage_chain WHERE kind='segment' AND segment_id=? AND relative_path=? ORDER BY seq DESC LIMIT 1", (segment_id, row["relative_path"])).fetchone()
@@ -546,14 +552,46 @@ def sweep_switched() -> int:
     return done
 
 
+MISSING_ERROR = "The footage file is missing from its volume"
+MISSING_RETRY = timedelta(hours=1)  # A file that is not there is looked for again this often, not on every pass
+
+
 def candidates(db: sqlite3.Connection, policy: sqlite3.Row, now: datetime, limit: int) -> list[int]:
+    """The policy's oldest segments that can move now. Footage that is held or in an export, and footage whose file was missing when it
+    was last tried, is left out here, as retention and headroom leave held footage out: a pass took the 20 oldest whatever they were,
+    so 20 held segments at the front were picked again on every pass and nothing behind them ever moved (#485)."""
     cutoff = (now - timedelta(days=int(policy["after_days"]))).isoformat()
     return [row[0] for row in db.execute(
         "SELECT s.id FROM recording_segments s JOIN cameras c ON c.id=s.camera_id LEFT JOIN camera_groups g ON g.id=c.group_id "
         "WHERE s.tier_id IS NULL AND s.unavailable_at IS NULL AND s.ends_at<? AND COALESCE(g.storage_volume_id,'default')=? "
-        "AND NOT EXISTS (SELECT 1 FROM tier_moves m WHERE m.segment_id=s.id AND (m.last_error LIKE 'The footage no longer matches%' OR (m.last_error IS NOT NULL AND m.updated_at>?))) "
+        "AND NOT EXISTS (SELECT 1 FROM tier_moves m WHERE m.segment_id=s.id AND (m.last_error LIKE 'The footage no longer matches%' OR (m.last_error IS NOT NULL AND m.updated_at>?) "
+        "OR (m.last_error LIKE ? AND m.updated_at>?))) "
+        "AND NOT EXISTS (SELECT 1 FROM recording_holds h WHERE h.segment_id=s.id AND h.released_at IS NULL AND (h.expires_at IS NULL OR h.expires_at>?)) "
+        "AND NOT EXISTS (SELECT 1 FROM export_sources x JOIN exports e ON e.id=x.export_id WHERE x.segment_id=s.id AND e.status IN ('queued','running')) "
         "ORDER BY s.ends_at LIMIT ?",
-        (cutoff, policy["volume_id"], (now - timedelta(minutes=5)).isoformat(), limit))]
+        (cutoff, policy["volume_id"], (now - timedelta(minutes=5)).isoformat(), MISSING_ERROR + "%", (now - MISSING_RETRY).isoformat(), now.isoformat(), limit))]
+
+
+def set_aside(db: sqlite3.Connection, policy: sqlite3.Row, now: datetime, limit: int) -> dict[str, int]:
+    """How many of the policy's due segments a pass leaves because they are held or in an export, counted up to ``limit`` of each: what a
+    pass reports, now that it no longer picks them."""
+    cutoff = (now - timedelta(days=int(policy["after_days"]))).isoformat()
+    due = ("FROM recording_segments s JOIN cameras c ON c.id=s.camera_id LEFT JOIN camera_groups g ON g.id=c.group_id "
+           "WHERE s.tier_id IS NULL AND s.unavailable_at IS NULL AND s.ends_at<? AND COALESCE(g.storage_volume_id,'default')=? AND ")
+    held = "EXISTS (SELECT 1 FROM recording_holds h WHERE h.segment_id=s.id AND h.released_at IS NULL AND (h.expires_at IS NULL OR h.expires_at>?))"
+    exporting = "EXISTS (SELECT 1 FROM export_sources x JOIN exports e ON e.id=x.export_id WHERE x.segment_id=s.id AND e.status IN ('queued','running'))"
+    counts = {
+        "held": db.execute(f"SELECT COUNT(*) FROM (SELECT 1 {due}{held} LIMIT ?)", (cutoff, policy["volume_id"], now.isoformat(), limit)).fetchone()[0],
+        "exporting": db.execute(f"SELECT COUNT(*) FROM (SELECT 1 {due}NOT {held} AND {exporting} LIMIT ?)", (cutoff, policy["volume_id"], now.isoformat(), limit)).fetchone()[0],
+    }
+    return {name: count for name, count in counts.items() if count}
+
+
+def missing_files(db: sqlite3.Connection, tier_id: str | None = None) -> int:
+    """How many segments could not be moved because their file was not on the volume when last tried."""
+    if tier_id is None:
+        return db.execute("SELECT COUNT(*) FROM tier_moves WHERE last_error LIKE ?", (MISSING_ERROR + "%",)).fetchone()[0]
+    return db.execute("SELECT COUNT(*) FROM tier_moves WHERE tier_id=? AND last_error LIKE ?", (tier_id, MISSING_ERROR + "%")).fetchone()[0]
 
 
 def run_once(now: datetime | None = None, limit: int = BATCH, opener: Callable[[Tier], Any] = open_store) -> dict[str, int]:
@@ -577,6 +615,8 @@ def run_once(now: datetime | None = None, limit: int = BATCH, opener: Callable[[
             continue
         with connect() as db:
             chosen = candidates(db, policy, now, limit)
+            for reason, number in set_aside(db, policy, now, limit).items():
+                outcomes[reason] = outcomes.get(reason, 0) + number
         for segment_id in chosen:
             count(move_segment(segment_id, now, opener))
     return outcomes

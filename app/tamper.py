@@ -47,6 +47,22 @@ MAX_SAMPLE_GAP = timedelta(seconds=max(4 * SAMPLE_SECONDS, 90))  # Longer withou
 GRAB_TIMEOUT_SECONDS = 20
 STREAM_PROTOCOLS: str | None = None  # Camera protocols only; the tests widen it to read generated files.
 CONCURRENT_GRABS = 2
+# How often each camera is really sampled: the time from one pass's start to the next, as the sampler last measured it (None before it
+# has). A pass grabs one frame a camera, two at a time, so with many cameras, or a few that do not answer, it takes far longer than
+# SAMPLE_SECONDS. A pending change was dropped whenever two samples were more than MAX_SAMPLE_GAP apart, so once a pass took longer
+# than that (about 75 cameras, or ten offline) every sample began the count again and a covered camera was never reported (#467).
+_measured_period: float | None = None
+SLOW_AFTER_SECONDS = 60.0  # A camera sampled less often than this is "slower than intended": said in an incident
+UNREACHABLE_WAIT_MAX = 600.0  # A camera that gives no picture is tried again after longer and longer, up to this
+SLOW_KEY = "tamper:sampling"
+
+
+def allowed_gap() -> timedelta:
+    """The longest time between two samples of a camera that still counts as watching it: MAX_SAMPLE_GAP, or twice the real sampling
+    period when that is more. A gap longer than this (the worker was down) still starts a pending change over."""
+    if _measured_period is None:
+        return MAX_SAMPLE_GAP
+    return max(MAX_SAMPLE_GAP, timedelta(seconds=2 * _measured_period + SAMPLE_SECONDS))
 KINDS = ("covered", "moved", "defocused")
 SUMMARY = {"covered": "Camera covered", "moved": "Camera moved", "defocused": "Camera defocused"}
 # A reference this flat says nothing about what a change would look like, so these guards stay quiet for it.
@@ -206,7 +222,7 @@ def _advance(db: sqlite3.Connection, camera_id: str, sample: Features, now: date
     if not row["enabled"] or (taken_at is not None and row["reset_at"] and taken_at < _parse(row["reset_at"])):
         return state
     changes: dict[str, Any] = {"last_sample_at": _stamp(now)}
-    if state not in KINDS and row["candidate_since"] and row["last_sample_at"] and now - _parse(row["last_sample_at"]) > MAX_SAMPLE_GAP:
+    if state not in KINDS and row["candidate_since"] and row["last_sample_at"] and now - _parse(row["last_sample_at"]) > allowed_gap():
         changes.update(candidate=None, candidate_since=None)  # Time nobody was watching does not count towards a change lasting.
         row = {**dict(row), "candidate": None, "candidate_since": None}
     reference = Features.from_json(json.loads(row["reference_json"])) if row["reference_json"] else None
@@ -388,6 +404,9 @@ class TamperManager:
         self.interval = SAMPLE_SECONDS if interval is None else interval
         self.task: asyncio.Task[None] | None = None
         self.stopping = False
+        self._unreachable: dict[str, tuple[int, float]] = {}  # Camera -> (passes in a row with no picture, when to try it again)
+        self._slow_reported = False
+        self._patient = False
 
     async def start(self) -> None:
         self.stopping = False
@@ -401,8 +420,22 @@ class TamperManager:
         self.task = None
 
     async def _run(self) -> None:
+        global _measured_period
+        loop = asyncio.get_running_loop()
+        began: float | None = None
         while not self.stopping:
+            started = loop.time()
+            if began is not None:
+                _measured_period = started - began  # What "every sample" really means here: the gap rule and the incident go by it
+                try:
+                    await asyncio.to_thread(self._report_pace, _measured_period)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:  # noqa: BLE001 - saying so must never stop the sampling
+                    logger.exception("The tamper sampling pace could not be reported")
+            began = started
             try:
+                self._patient = True  # The running loop: cameras that keep giving no picture are left for a while
                 await self.sample_all()
             except asyncio.CancelledError:
                 raise
@@ -410,12 +443,52 @@ class TamperManager:
                 logger.exception("A tamper detection pass failed")
             await asyncio.sleep(self.interval)
 
+    def _report_pace(self, period: float) -> None:
+        """Raise an incident while cameras are sampled less often than intended, and recover it when they are not. Written only when it changes."""
+        slow = period > SLOW_AFTER_SECONDS
+        if slow == self._slow_reported:
+            return
+        with connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                sync_incident(db, incident_key=SLOW_KEY, camera_id=None, fault_type="tamper_sampling_slow", active=slow,
+                              summary=(f"Tamper detection is sampling each camera only every {round(period)} seconds (it aims for {round(SAMPLE_SECONDS)}): a covered or moved "
+                                       "camera is reported that much later. Fewer cameras with tamper detection on, or fewer that are offline, brings it back.")
+                              if slow else "Tamper detection is sampling at its usual pace again", details={"period_seconds": round(period)})
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            db.execute("COMMIT")
+        self._slow_reported = slow
+
+    def _due(self, camera_id: str, at: float) -> bool:
+        waiting = self._unreachable.get(camera_id)
+        return waiting is None or at >= waiting[1]
+
+    def _note(self, camera_id: str, answered: bool, at: float) -> None:
+        if answered:
+            self._unreachable.pop(camera_id, None)
+            return
+        misses = self._unreachable.get(camera_id, (0, 0.0))[0] + 1
+        # The first miss costs nothing more; after that the camera is left for twice as long each time. An unreachable camera held a grab
+        # slot for its whole time-out (up to 20 s) on every pass: ten of them alone made every pass too slow to detect anything (#467).
+        wait = 0.0 if misses < 2 else min(UNREACHABLE_WAIT_MAX, max(self.interval, 1.0) * 2 ** (misses - 1))
+        self._unreachable[camera_id] = (misses, at + wait)
+
     async def sample_all(self, now: datetime | None = None) -> int:
+        """One pass over the cameras with detection on. The running loop leaves out, for now, cameras that have given no picture several
+        passes in a row; a pass asked for directly tries every camera."""
+        patient = self._patient
         def read() -> list[str]:
             with connect() as db:
                 _release_ineligible(db)
                 return _eligible(db)
         cameras = await asyncio.to_thread(read)
+        clock = asyncio.get_running_loop().time
+        if patient:
+            for gone in set(self._unreachable) - set(cameras):
+                del self._unreachable[gone]
+            cameras = [camera_id for camera_id in cameras if self._due(camera_id, clock())]
         slots = asyncio.Semaphore(CONCURRENT_GRABS)
 
         async def one(camera_id: str) -> bool:
@@ -423,6 +496,7 @@ class TamperManager:
                 try:
                     taken_at = datetime.now(timezone.utc)
                     frame = await self.grabber(camera_id)
+                    self._note(camera_id, frame is not None, clock())
                     if frame is None:
                         return False  # No picture is the recorder's fault to report, not a tamper.
                     await asyncio.to_thread(self._judge, camera_id, frame, now, taken_at)
@@ -431,6 +505,7 @@ class TamperManager:
                     raise
                 except Exception:  # noqa: BLE001 - one camera's trouble must not stop the others
                     logger.exception("Tamper detection failed for camera %s", camera_id)
+                    self._note(camera_id, False, clock())
                     return False
         return sum(await asyncio.gather(*(one(camera_id) for camera_id in cameras)))
 

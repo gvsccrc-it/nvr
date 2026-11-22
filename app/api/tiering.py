@@ -81,11 +81,13 @@ class PolicyInput(BaseModel):
     enabled: bool = True
 
 
-def _tier_view(row, counts: dict[str, tuple[int, int]]) -> dict[str, Any]:
+def _tier_view(row, counts: dict[str, tuple[int, int]], missing: dict[str, int]) -> dict[str, Any]:
     segments, size = counts.get(row["id"], (0, 0))
     return {"id": row["id"], "name": row["name"], "kind": row["kind"], "local_path": row["local_path"], "s3_endpoint": row["s3_endpoint"], "s3_bucket": row["s3_bucket"],
             "s3_region": row["s3_region"], "s3_prefix": row["s3_prefix"], "has_credentials": row["credentials_ciphertext"] is not None, "allow_private": bool(row["allow_private"]),
-            "last_checked_at": row["last_checked_at"], "last_error": row["last_error"], "failures": row["failures"], "segments": segments, "bytes": size, "created_at": row["created_at"]}
+            "last_checked_at": row["last_checked_at"], "last_error": row["last_error"], "failures": row["failures"], "segments": segments, "bytes": size, "created_at": row["created_at"],
+            # Segments due to move whose file was not on the volume when last tried (#485): looked for again hourly, never in the way of others
+            "missing_files": missing.get(row["id"], 0)}
 
 
 def _view(db) -> dict[str, Any]:
@@ -93,7 +95,8 @@ def _view(db) -> dict[str, Any]:
     pending = db.execute("SELECT COUNT(*) FROM tier_moves").fetchone()[0]
     cache = tiering.cache_dir()
     cached = sum(path.stat().st_size for path in cache.glob("*.mp4")) if cache.is_dir() else 0
-    return {"tiers": [_tier_view(row, counts) for row in db.execute("SELECT * FROM cold_tiers ORDER BY name COLLATE NOCASE,id")],
+    missing = {row[0]: row[1] for row in db.execute("SELECT tier_id,COUNT(*) FROM tier_moves WHERE last_error LIKE ? GROUP BY tier_id", (tiering.MISSING_ERROR + "%",))}
+    return {"tiers": [_tier_view(row, counts, missing) for row in db.execute("SELECT * FROM cold_tiers ORDER BY name COLLATE NOCASE,id")],
             "policies": [dict(row) | {"enabled": bool(row["enabled"])} for row in db.execute("SELECT * FROM tier_policies ORDER BY volume_id")],
             "volumes": sorted(configured_volumes()), "moves_in_progress": pending, "cache": {"bytes": cached, "limit_bytes": tiering.cache_limit()}}
 
