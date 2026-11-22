@@ -31,6 +31,9 @@ SECRET = "failover-shared-secret-0123456789"
 PASSPHRASE = "failover-backup-passphrase-123456"
 
 
+real_connect = sqlite3.connect
+
+
 def at(seconds: float) -> datetime:
     return datetime.now(timezone.utc) + timedelta(seconds=seconds)
 
@@ -183,6 +186,56 @@ class GateTests(FailoverCase):
         failover.standby_handback_complete(1, 2, 800)  # Said twice: nothing changes
         with self.assertRaises(failover.PeerError):
             failover.standby_handback_complete(9, 0, 0)
+
+    def test_a_standby_asked_to_hand_back_takes_over_again_when_the_primary_goes_silent_again(self):
+        """The primary came back for one renewal and failed again before it had collected the footage (#498): the standby used to wait for ever."""
+        self.configure("standby")
+        failover.standby_lease({})
+        self.assertEqual(failover.check_takeover(at(60)), 1)
+        first_start = datetime.fromisoformat(self.state()["takeover_started_at"])
+        first = self.add_live_segment(self.d1, first_start + timedelta(seconds=1), name="first.mp4")
+        self.assertEqual(failover.standby_lease({})["state"], "stopping")  # One renewal: the standby stops recording
+        self.assertEqual(self.state()["takeover_active"], 0)
+        self.assertIn("has stopped recording", self.incident()["summary"])
+        self.assertNotIn("recording in its place", self.incident()["summary"])
+
+        # A live primary: the two-second pass changes nothing and needs no write lock.
+        holder = sqlite3.connect(os.environ["NVR_DB_PATH"], isolation_level=None)
+        holder.execute("BEGIN IMMEDIATE")
+        try:
+            with mock.patch("app.store.sqlite3.connect", side_effect=lambda *args, **kwargs: real_connect(*args, **{**kwargs, "timeout": 0.2})):
+                self.assertIsNone(failover.check_takeover(at(5)))
+        finally:
+            holder.execute("ROLLBACK")
+            holder.close()
+
+        # Then silence, for longer than the standby waits: it records again, under a new epoch, and says so.
+        self.assertEqual(failover.check_takeover(at(60)), 2)
+        self.assertEqual((self.state()["takeover_active"], self.state()["epoch"]), (1, 2))
+        self.assertEqual(self.policy().get("held"), None)
+        self.assertIn("recording in its place", self.incident()["summary"])
+        with connect() as db:
+            db.execute("UPDATE failover_episodes SET started_at=? WHERE epoch=2", ((first_start + timedelta(seconds=30)).isoformat(),))
+        second = self.add_live_segment(self.d2, first_start + timedelta(seconds=31), name="second.mp4")
+
+        # The primary returns for good. The standby stops, then offers the earlier takeover's footage first, and each takeover holds its own.
+        self.assertEqual(failover.standby_lease({})["state"], "stopping")
+        with connect() as db:
+            db.execute("UPDATE cameras SET recording_status='stopped'")
+        answer = failover.standby_lease({})
+        self.assertEqual((answer["granted"], answer["handback"]["epoch"], answer["handback"]["segments"]), (True, 1, 1))
+        self.assertEqual([item["id"] for item in failover.standby_footage(1)], [first])
+        self.assertEqual([item["id"] for item in failover.standby_footage(2)], [second])
+        failover.standby_handback_complete(1, 1, 400)
+        self.assertEqual(self.incident()["state"], "active", "footage of the second takeover is still to be collected")
+        self.assertIn("has stopped recording", self.incident()["summary"])
+        answer = failover.standby_lease({})
+        self.assertEqual((answer["handback"]["epoch"], answer["handback"]["segments"]), (2, 1))
+        failover.standby_handback_complete(2, 1, 400)
+        self.assertEqual(self.incident()["state"], "recovered")
+        self.assertEqual((failover.standby_lease({})["granted"], failover.standby_lease({})["handback"]), (True, None))
+        with connect() as db:
+            self.assertEqual([row[0] for row in db.execute("SELECT state FROM failover_episodes ORDER BY epoch")], ["done", "done"])
 
     def test_a_handback_cannot_be_completed_while_the_standby_is_still_recording(self):
         self.configure("standby")

@@ -211,8 +211,10 @@ YIELD_KEY = "failover:yield"
 YIELD_LIMIT_SECONDS = 300.0
 
 
-def _takeover_incident(db: sqlite3.Connection, role: str, active: bool, details: dict[str, Any]) -> None:
-    summary = ("The primary NVR stopped answering: this standby is recording in its place" if role == "standby"
+def _takeover_incident(db: sqlite3.Connection, role: str, active: bool, details: dict[str, Any], *, waiting: bool = False) -> None:
+    """``waiting``: the standby has stopped recording for a primary that is back, and still holds footage the primary has not collected."""
+    summary = ("The primary NVR is back: this standby has stopped recording and is keeping the footage it recorded until the primary has collected it" if waiting
+               else "The primary NVR stopped answering: this standby is recording in its place" if role == "standby"
                else "The standby NVR recorded while this primary was away: its footage is being brought back") if active else \
               ("The primary NVR is back and recording again: the standby has handed back" if role == "standby" else "The standby's footage is back in this NVR and it is recording again")
     sync_incident(db, incident_key=TAKEOVER_KEY, camera_id=None, fault_type="failover", summary=summary, active=active, details={"role": role, **details})
@@ -251,8 +253,10 @@ def recorders_idle(db: sqlite3.Connection) -> bool:
 
 def _segments_of(db: sqlite3.Connection, episode: sqlite3.Row) -> list[sqlite3.Row]:
     """Footage the standby recorded since it took over (a segment that began just before is its own: the recorder starts a segment when it starts)."""
+    # Up to the next takeover, if there was one before this episode's footage was collected (#498): that footage is the next episode's.
+    following = db.execute("SELECT MIN(started_at) FROM failover_episodes WHERE role='standby' AND epoch>?", (episode["epoch"],)).fetchone()[0]
     return db.execute("SELECT id,camera_id,relative_path,starts_at,ends_at,size_bytes FROM recording_segments WHERE source='live' AND unavailable_at IS NULL AND ends_at>? AND starts_at<? "
-                      "ORDER BY starts_at,id", (episode["started_at"], episode["ended_at"] or "9999")).fetchall()
+                      "ORDER BY starts_at,id", (episode["started_at"], following or episode["ended_at"] or "9999")).fetchall()
 
 
 def standby_lease(payload: dict[str, Any]) -> dict[str, Any]:
@@ -272,7 +276,8 @@ def standby_lease(payload: dict[str, Any]) -> dict[str, Any]:
                 _set_state(db, takeover_active=0, handback_requested_at=_stamp(now))
                 answer = {"granted": False, "state": "stopping", "lease_seconds": lease, "epoch": state["epoch"], "handback": None}
             else:
-                episode = db.execute("SELECT * FROM failover_episodes WHERE role='standby' AND state='handback' ORDER BY epoch DESC LIMIT 1").fetchone()
+                # The oldest first: after a second takeover there are two to collect, one a renewal (#498).
+                episode = db.execute("SELECT * FROM failover_episodes WHERE role='standby' AND state='handback' ORDER BY epoch LIMIT 1").fetchone()
                 if episode is None:
                     answer = {"granted": True, "state": "watching", "lease_seconds": lease, "epoch": state["epoch"], "handback": None}
                 else:
@@ -285,6 +290,7 @@ def standby_lease(payload: dict[str, Any]) -> dict[str, Any]:
                                   "handback": {"epoch": episode["epoch"], "takeover_started_at": episode["started_at"], "silent_since": episode["silent_since"], "segments": len(segments)}}
             if answer["state"] == "stopping" and state["takeover_active"]:
                 db.execute("UPDATE failover_episodes SET state='handback' WHERE role='standby' AND epoch=?", (state["epoch"],))
+                _takeover_incident(db, "standby", True, {"epoch": state["epoch"]}, waiting=True)  # It is no longer recording: the text says so
         except BaseException:
             db.execute("ROLLBACK")
             raise
@@ -334,8 +340,12 @@ def standby_handback_complete(epoch: int, imported: int, imported_bytes: int) ->
                 raise PeerError(409, "The takeover is still going on: the standby has not been asked to stop")
             if episode["state"] != "done":
                 db.execute("UPDATE failover_episodes SET state='done',ended_at=?,segments_imported=?,bytes_imported=? WHERE id=?", (_stamp(), imported, imported_bytes, episode["id"]))
-                _takeover_incident(db, "standby", False, {"epoch": epoch, "segments_handed_back": imported})
-                _set_state(db, handback_requested_at=None, watching_since=_stamp(), last_error=None)
+                more = db.execute("SELECT 1 FROM failover_episodes WHERE role='standby' AND state='handback' LIMIT 1").fetchone() is not None
+                if more:  # An earlier or later takeover's footage is still to be collected
+                    _takeover_incident(db, "standby", True, {"epoch": epoch, "segments_handed_back": imported}, waiting=True)
+                else:
+                    _takeover_incident(db, "standby", False, {"epoch": epoch, "segments_handed_back": imported})
+                _set_state(db, handback_requested_at=None if not more else read_state(db)["handback_requested_at"], watching_since=_stamp(), last_error=None)
         except BaseException:
             db.execute("ROLLBACK")
             raise
@@ -369,7 +379,10 @@ def check_takeover(now: datetime | None = None) -> int | None:
         db.execute("BEGIN IMMEDIATE")
         try:
             settings, state = read_settings(db), read_state(db)
-            if settings["role"] != "standby" or state["takeover_active"] or db.execute("SELECT 1 FROM failover_episodes WHERE role='standby' AND state='handback'").fetchone():
+            # A standby that has stopped for a primary that came back is waiting for a primary that is alive. If that primary goes silent
+            # again before it has collected the footage, the standby records again: it used to wait for ever, with neither NVR
+            # recording and an incident that said this one was (#498). The earlier takeover's footage stays on offer.
+            if settings["role"] != "standby" or state["takeover_active"]:
                 db.execute("ROLLBACK")
                 return None
             if not state["watching_since"]:
