@@ -196,6 +196,13 @@ def _database(out: _Output) -> None:
         size = 0
     out.family("nvr_database_bytes", "gauge", "The size of the database file.")
     out.sample("nvr_database_bytes", size)
+    from . import db_size
+
+    tables = db_size.report()["tables"]
+    if tables is not None:
+        out.family("nvr_database_table_bytes", "gauge", "Bytes each of the database's largest tables holds, with its indexes, as measured after the last nightly check.")
+        for table in tables:
+            out.sample("nvr_database_table_bytes", table["bytes"], table=table["name"])
     out.family("nvr_database_log_bytes", "gauge", "The size of the database's write-ahead log file.")
     out.sample("nvr_database_log_bytes", log_bytes())
     from . import run_folders
@@ -206,6 +213,17 @@ def _database(out: _Output) -> None:
         out.sample("nvr_recordings_unindexed_bytes", unindexed["unindexed_bytes"])
         out.family("nvr_recordings_unindexed_files", "gauge", "Segment files in old run folders that have no row in the index.")
         out.sample("nvr_recordings_unindexed_files", unindexed["unindexed_files"])
+    try:
+        from . import track_pictures
+
+        with connect() as db:
+            pictures = track_pictures.totals(db)
+        out.family("nvr_track_picture_bytes", "gauge", "Bytes of objects' first pictures kept as files on the recordings volumes.")
+        out.sample("nvr_track_picture_bytes", sum(item["bytes"] for item in pictures.values()))
+        out.family("nvr_track_picture_files", "gauge", "Objects' first pictures kept as files on the recordings volumes.")
+        out.sample("nvr_track_picture_files", sum(item["files"] for item in pictures.values()))
+    except sqlite3.Error:
+        pass
     out.family("nvr_database_log_limit_bytes", "gauge", "The size the write-ahead log file is brought back to once it can be reset.")
     out.sample("nvr_database_log_limit_bytes", log_limit_bytes())
 

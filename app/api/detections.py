@@ -7,10 +7,10 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, HTTPException, Query
 
-from app import privacy, track_privacy
+from app import detection_thinning, privacy, track_privacy
 from app.principal import CurrentUser
 from app.store import connect
-from app.tracks import detection_view, iter_unanalyzed, track_view
+from app.tracks import detection_view, iter_unanalyzed, track_view, with_models
 
 router = APIRouter()
 
@@ -60,7 +60,8 @@ def list_detections(
             f"SELECT d.* FROM ai_detections d WHERE {' AND '.join(clauses)} AND {visible} ORDER BY d.detected_at,d.id LIMIT ?", (*values, *visible_values, limit)
         ).fetchall()
         unanalyzed = list(iter_unanalyzed(db, camera_id, start_text, end_text))
-    return {"camera_id": camera_id, "start": start_text, "end": end_text, "detections": [detection_view(row) for row in rows],
+        detections = with_models(db, [detection_view(row) for row in rows])
+    return {"camera_id": camera_id, "start": start_text, "end": end_text, "detections": detections,
             "truncated": len(rows) == limit, "unanalyzed": unanalyzed, "coverage_note": COVERAGE_NOTE}
 
 
@@ -102,9 +103,10 @@ def get_track(track_id: str, user: CurrentUser) -> dict[str, object]:
         visible, visible_values = track_privacy.detection_visible_sql(zones, "d")
         rows = db.execute(f"SELECT d.* FROM ai_detections d WHERE d.track_id=? AND {visible} ORDER BY d.detected_at,d.id LIMIT 5000", (track_id, *visible_values)).fetchall()
         shown = track_privacy.project(db, [track_view(track)], zones)
+        detections = with_models(db, [detection_view(row) for row in rows])
     if not shown:  # Nothing of it may be seen: the same answer as for a track that never existed
         raise HTTPException(status_code=404, detail="Track not found")
-    return {**shown[0], "detections": [detection_view(row) for row in rows]}
+    return {**shown[0], "detections": detections}
 
 
 OVERLAY_LIMIT = 5000
@@ -158,8 +160,12 @@ def playback_overlay(
         if (end_time - start_time).total_seconds() > MAX_OVERLAY_WINDOW_SECONDS:
             raise HTTPException(status_code=422, detail=f"Ask for at most {MAX_OVERLAY_WINDOW_SECONDS // 60} minutes at a time")
         zones = _overlay_zones(user, camera_id, start_time, unmasked)
-        rows = db.execute("SELECT * FROM ai_detections WHERE camera_id=? AND detected_at>=? AND detected_at<? ORDER BY detected_at,id LIMIT ?",
-                          (camera_id, start_text, end_text, OVERLAY_LIMIT)).fetchall()
+        # A still object's rows are thinned once they are old (#512): each stands for the analysed frames up to the object's next row.
+        # Read from a hold before the window and given back as a frame for each, so a standing object is drawn all the way through.
+        reach = (start_time - timedelta(seconds=detection_thinning.HOLD_SECONDS)).isoformat()
+        stored = db.execute("SELECT * FROM ai_detections WHERE camera_id=? AND detected_at>=? AND detected_at<? ORDER BY detected_at,id LIMIT ?",
+                            (camera_id, reach, end_text, OVERLAY_LIMIT)).fetchall()
+        rows = [row for row in detection_thinning.expand(db, stored) if start_time <= datetime.fromisoformat(row["detected_at"]) < end_time]
         unanalyzed = list(iter_unanalyzed(db, camera_id, start_text, end_text))
     frames: list[dict[str, Any]] = []
     for row in rows:
@@ -172,7 +178,7 @@ def playback_overlay(
         if pose:
             item["pose"] = pose
         frames[-1]["boxes"].append(item)
-    return {"camera_id": camera_id, "start": start_text, "end": end_text, "frames": frames, "truncated": len(rows) == OVERLAY_LIMIT,
+    return {"camera_id": camera_id, "start": start_text, "end": end_text, "frames": frames, "truncated": len(stored) == OVERLAY_LIMIT,
             "unanalyzed": unanalyzed, "coverage_note": COVERAGE_NOTE}
 
 

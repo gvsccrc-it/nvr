@@ -11,7 +11,7 @@ from app.version import APP_VERSION
 from app.workers import liveness, supervised
 from app.principal import Administrator
 from app.store import connect, database_path
-from app import acceleration, diagnostics, self_test
+from app import acceleration, db_size, diagnostics, self_test
 
 router = APIRouter()
 
@@ -51,6 +51,7 @@ def system_status(request: Request, user: Administrator) -> dict[str, object]:
         "configured_administrators": admin_count,
         "configured_cameras": camera_count,
         "storage": storage,
+        "database_size": db_size.report(),
         "self_test": self_test.latest(),
         "acceleration": acceleration.current(),
         "live": _live(request),

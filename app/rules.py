@@ -47,7 +47,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterable
 
-from . import occupancy
+from . import detection_thinning, occupancy
 from .alarms import PLATE_LABEL_PREFIX, create_alarm
 from .scheduling import mode_at
 from .store import connect
@@ -278,8 +278,8 @@ def load_rules(db: sqlite3.Connection) -> list[Rule]:
 
 
 def _track_path(db: sqlite3.Connection, track_id: str) -> list[PathPoint]:
-    return path_from_rows(db.execute(
-        "SELECT id,detected_at,box_x,box_y,box_width,box_height FROM ai_detections WHERE track_id=? ORDER BY detected_at,id", (track_id,)))
+    # A point for each analysed frame: a still object's thinned rows stand for the frames between them (#512).
+    return path_from_rows(detection_thinning.expand(db, db.execute(_ROW_SQL + " ORDER BY detected_at,id", (track_id,))))
 
 
 class _Follower:
@@ -298,7 +298,7 @@ class _Follower:
         self.count = 0  # Points fed so far; equal to the track's stored count when nothing was missed or removed
         self.last: tuple[str, int] | None = None  # (detected_at as stored, id) of the last point fed: the path's order
 
-    def feed(self, rule: Rule, rows: Iterable[sqlite3.Row]) -> None:
+    def feed(self, rule: Rule, rows: Iterable[Any]) -> None:
         for row in rows:
             key = (row["detected_at"], row["id"])
             if self.last is not None and key <= self.last:
@@ -320,7 +320,7 @@ MAX_FOLLOWERS = 20_000  # Rules times objects in view; the least recently used g
 MAX_REMEMBERED_MOMENTS = 1_000  # For an object that meets a condition again and again while the rule is cooling down
 _followers: dict[tuple[str, str, str], _Follower] = {}
 _followers_lock = threading.Lock()
-_ROW_SQL = "SELECT id,detected_at,box_x,box_y,box_width,box_height FROM ai_detections WHERE track_id=?"
+_ROW_SQL = "SELECT id,track_id,detected_at,box_x,box_y,box_width,box_height,stands_for FROM ai_detections WHERE track_id=?"
 
 
 def _track_moments(db: sqlite3.Connection, database: str, track: sqlite3.Row, watching: list[Rule]) -> list[tuple[Rule, list[PathPoint]]]:
@@ -354,10 +354,12 @@ def _follow(db: sqlite3.Connection, database: str, track: sqlite3.Row, watching:
     fewest = _stored_count(db, track["id"])
     if followers and all(start is not None for start in starts):
         earliest = min(start[0] for start in starts if start is not None)
-        rows = db.execute(_ROW_SQL + " AND detected_at>=? ORDER BY detected_at,id", (track["id"], earliest)).fetchall()
-        whole: list[sqlite3.Row] | None = None
+        # New rows stand only for themselves, so this is what was stored; thinned rows (read again after a restart) come back as the
+        # frames they stand for, which is what a track's count counts.
+        rows = detection_thinning.expand(db, db.execute(_ROW_SQL + " AND detected_at>=? ORDER BY detected_at,id", (track["id"], earliest)))
+        whole: list[Any] | None = None
     else:
-        rows = whole = db.execute(everything, (track["id"],)).fetchall()
+        rows = whole = detection_thinning.expand(db, db.execute(everything, (track["id"],)))
     most = _stored_count(db, track["id"])
     found = []
     for rule, follower in followers:
@@ -366,7 +368,7 @@ def _follow(db: sqlite3.Connection, database: str, track: sqlite3.Row, watching:
             if not fewest <= follower.count <= most:
                 # A point was stored out of order, or points were removed: what it remembers is not the stored path. Start again from all of it.
                 if whole is None:
-                    whole = db.execute(everything, (track["id"],)).fetchall()
+                    whole = detection_thinning.expand(db, db.execute(everything, (track["id"],)))
                 follower = _followers[(database, rule.id, track["id"])] = _Follower(rule)
                 follower.feed(rule, whole)
         except Exception:  # noqa: BLE001 - one unreadable rule must not stop the others
@@ -785,6 +787,8 @@ class RulesManager:
             pass
 
     async def _run(self) -> None:
+        loop = asyncio.get_running_loop()
+        thinned = loop.time()
         while True:
             try:
                 await asyncio.to_thread(self._drain)
@@ -792,6 +796,17 @@ class RulesManager:
                 raise
             except Exception:  # noqa: BLE001 - keep evaluating; the next pass retries the batch
                 logger.exception("Rule evaluation failed")
+            if loop.time() - thinned >= detection_thinning.PASS_SECONDS:
+                # Here, after the rules have seen what is new: only frames they have evaluated, and old enough, are thinned (#512).
+                thinned = loop.time()
+                try:
+                    looked = (await asyncio.to_thread(detection_thinning.thin_pending))["looked"]
+                    if looked >= detection_thinning.BATCH * detection_thinning.STEPS_PER_PASS:
+                        thinned -= detection_thinning.PASS_SECONDS  # A full pass: more is waiting, so again on the next turn
+                except asyncio.CancelledError:
+                    raise
+                except Exception:  # noqa: BLE001 - thinning is housekeeping: it never stops rule evaluation
+                    logger.exception("Thinning stored detections failed")
             try:
                 await asyncio.wait_for(self._wake.wait(), timeout=self.poll_seconds)
             except asyncio.TimeoutError:

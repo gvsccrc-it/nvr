@@ -21,8 +21,8 @@ A box that touches a privacy-masked area is never sent to the browser, and neith
 
 ## API
 
-- `GET /api/playback/overlay?camera_id=&start=&end=` (at most 10 minutes): the stored detections of one camera, one entry for each analysed frame (`frames[].at` and `frames[].boxes[]` with `track_id`, `label`, `confidence`, `box`), with `unanalyzed` (intervals not analysed, with why) and `truncated`.
-- `GET /api/playback/overlay/tracks/{track_id}`: the whole stored path of one object, `points[]` (`at`, `box`, and `run`: a trail is not drawn between points of different runs).
+- `GET /api/playback/overlay?camera_id=&start=&end=` (at most 10 minutes): the stored detections of one camera, one entry for each analysed frame (`frames[].at` and `frames[].boxes[]` with `track_id`, `label`, `confidence`, `box`). A still object's older rows are thinned ([docs/ai-detection.md](ai-detection.md)); its frames are given back from the row that stands for them, so it is drawn all the way through, with `unanalyzed` (intervals not analysed, with why) and `truncated`.
+- `GET /api/playback/overlay/tracks/{track_id}`: the whole stored path of one object, `points[]` (`at`, `box`, and `run`: a trail is not drawn between points of different runs). These are the rows as stored: where the object stood still there is a point at least every 30 seconds, not one for each frame.
 
 Both accept `unmasked=true` with an administrator's grant, as video does.
 

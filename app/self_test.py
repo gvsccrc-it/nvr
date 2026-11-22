@@ -240,7 +240,11 @@ class SelfTestManager:
             return  # The file is damaged: the full check would only take minutes to say the same
         if due():
             run("scheduled")
+            from . import db_health, db_size
             from .store import shrink_log
+
+            if not db_health.damage_reported():
+                db_size.measure()  # Which tables hold the space (#512): every page was just read by the check, so this is the cheap moment
 
             before, after = shrink_log()  # The check held the log open for as long as it read (#493)
             logger.info("The database's write-ahead log was %.1f MB after the nightly check and is %.1f MB now", before / (1 << 20), after / (1 << 20))
