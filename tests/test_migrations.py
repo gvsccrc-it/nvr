@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import sqlite3
 import tempfile
+import time
 import types
 import unittest
 from pathlib import Path
@@ -331,6 +333,144 @@ class MigrationTests(unittest.TestCase):
             migrations._pre_migration_copy(FullDisk(), self.path, 1, 2)  # type: ignore[arg-type]
         self.assertEqual(self._copies(), [])
         self.assertEqual(list(self.path.parent.glob("*-journal")), [])
+
+
+class CopyRotationTests(unittest.TestCase):
+    """Which copies are made and which are kept (#455, #529)."""
+
+    setUp = MigrationTests.setUp
+    tearDown = MigrationTests.tearDown
+    _copies = MigrationTests._copies
+
+    def _earlier_copies(self, *ages_in_days: float) -> list[Path]:
+        made = []
+        for index, age in enumerate(ages_in_days):
+            copy = self.path.with_name(f"{self.path.name}.pre-migration-v{index + 1}-to-v{index + 2}-2026110{index + 1}T000000000000Z")
+            shutil.copyfile(self.path, copy)
+            when = time.time() - age * 86400
+            os.utime(copy, (when, when))
+            made.append(copy)
+        return made
+
+    def _failing_step(self):
+        def broken(db):
+            raise ValueError("deliberate failure")
+
+        version = migrations.latest_version() + 1
+        return mock.patch.object(migrations, "MIGRATIONS", [*migrations.MIGRATIONS, (version, types.SimpleNamespace(NAME="broken", upgrade=broken))])
+
+    def _filled(self) -> None:
+        initialize()
+        db = sqlite3.connect(self.path)
+        db.execute("INSERT INTO users(id,username,password_hash,role) VALUES(1,'admin','unused','administrator')")
+        db.execute("CREATE TABLE filler(id INTEGER PRIMARY KEY, body TEXT)")
+        db.executemany("INSERT INTO filler(body) VALUES(?)", [("x" * 300,) for _ in range(3000)])
+        db.commit()
+        db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        db.close()
+
+    def _zero_page(self, number: int) -> None:
+        with self.path.open("r+b") as handle:
+            handle.seek((number - 1) * 4096)
+            handle.write(bytes(4096))
+
+    def test_a_migration_that_keeps_failing_copies_once_and_keeps_the_earlier_versions_copies(self):
+        self._filled()
+        earlier = self._earlier_copies(0.3, 0.2, 0.1)
+        hooks = []
+        with self._failing_step(), mock.patch.object(migrations, "pre_migration_hooks", [hooks.append]):
+            for start in range(4):
+                with self.assertRaises(migrations.MigrationError) as failed, self.assertLogs(migrations.logger, level="INFO") as logged:
+                    initialize()
+                if start:
+                    self.assertTrue(any("using the copy it made" in line for line in logged.output), logged.output)
+                self.assertIn("pre-migration copy is", str(failed.exception))
+        copies = self._copies()
+        self.assertEqual(len(hooks), 1, "the configuration backup was not made again either")
+        self.assertEqual(len(copies), 3)
+        self.assertEqual(sum(1 for copy in copies if f"-to-v{migrations.latest_version() + 1}-" in copy.name), 1, "one copy of the failing step")
+        self.assertEqual([copy for copy in earlier if copy.exists()], earlier[1:], "the usual pruning, once")
+
+    def test_a_copy_from_a_failed_start_is_not_used_for_another_file_or_another_upgrade(self):
+        self._filled()
+        with self._failing_step():
+            with self.assertRaises(migrations.MigrationError):
+                initialize()
+            replaced = self.path.with_name("restored.sqlite3")
+            shutil.copyfile(self.path, replaced)
+            os.replace(replaced, self.path)  # What a restore does: another file under the same name
+            with self.assertRaises(migrations.MigrationError):
+                initialize()
+        self.assertEqual(len(self._copies()), 2)
+
+    def test_a_successful_upgrade_forgets_the_failed_attempt(self):
+        self._filled()
+        with self._failing_step(), self.assertRaises(migrations.MigrationError):
+            initialize()
+        self.assertTrue(migrations._attempt_file(self.path).exists())
+        version = migrations.latest_version() + 1
+        with mock.patch.object(migrations, "MIGRATIONS", [*migrations.MIGRATIONS, (version, types.SimpleNamespace(NAME="fixed", upgrade=lambda db: None))]):
+            initialize()
+        self.assertFalse(migrations._attempt_file(self.path).exists())
+        self.assertEqual(len(self._copies()), 1)
+
+    def test_a_file_that_fails_the_probe_is_not_copied_and_removes_no_copy(self):
+        self._filled()
+        earlier = self._earlier_copies(3, 2, 1)
+        db = sqlite3.connect(self.path)
+        root = db.execute("SELECT rootpage FROM sqlite_master WHERE name='filler'").fetchone()[0]
+        db.close()
+        self._zero_page(root)
+        with self._database_with_a_pending_migration_step(), self.assertLogs(migrations.logger, level="ERROR") as logged:
+            initialize()
+        self.assertIn("no pre-migration copy was made", logged.output[0])
+        self.assertEqual(self._copies(), earlier)
+
+    def test_a_copy_with_a_lost_page_is_set_aside_and_the_healthy_copies_stay(self):
+        from app import db_health
+
+        self._filled()
+        earlier = self._earlier_copies(3, 2, 1)
+        self._zero_page(self.path.stat().st_size // 4096 - 1)  # Deep in the last table: the probe cannot see it
+        self.assertTrue(db_health.check(full=False, path=self.path).ok)
+        with self._database_with_a_pending_migration_step(), self.assertLogs(migrations.logger, level="ERROR") as logged:
+            initialize()
+        self.assertEqual(self._copies(), earlier)
+        self.assertIn("THE DATABASE FILE IS DAMAGED", logged.output[0])
+        aside = list(self.path.parent.glob(f"{self.path.name}.damaged-copy-*"))
+        self.assertEqual(len(aside), 1)
+        self.assertIn(aside[0].name, logged.output[0])
+        self.assertEqual(db_health.damage_reported()["where"], "pre-migration copy")
+        with self._database_with_a_pending_migration_step(1), self.assertLogs(migrations.logger, level="ERROR"):
+            initialize()
+        self.assertEqual(len(list(self.path.parent.glob(f"{self.path.name}.damaged-copy-*"))), 1, "one damaged copy is enough for a salvage")
+
+    def test_one_copy_at_least_a_day_older_than_the_newest_is_kept_beside_the_newest_three(self):
+        self._filled()
+        earlier = self._earlier_copies(5, 2, 0.02, 0.01)
+        with self._database_with_a_pending_migration_step():
+            initialize()
+        copies = self._copies()
+        self.assertEqual(len(copies), 4)
+        self.assertEqual([copy.exists() for copy in earlier], [False, True, True, True], "the two-day-old copy stays; the five-day-old one goes")
+
+    def test_a_long_step_says_it_is_still_running(self):
+        self._filled()
+
+        def slow(db):
+            db.execute("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<400000) SELECT COUNT(*) FROM n").fetchone()
+
+        version = migrations.latest_version() + 1
+        with mock.patch.object(migrations, "MIGRATIONS", [*migrations.MIGRATIONS, (version, types.SimpleNamespace(NAME="slow", upgrade=slow))]), \
+                mock.patch.object(migrations, "STEP_PROGRESS_SECONDS", 0.0), self.assertLogs(migrations.logger, level="INFO") as logged:
+            initialize()
+        self.assertTrue(any(re.search(rf"Schema migration {version} \(slow\) is still running after \d+ s", line) for line in logged.output), logged.output)
+
+    def _database_with_a_pending_migration_step(self, offset: int = 0):
+        first = migrations.latest_version() + 1
+        return mock.patch.object(migrations, "MIGRATIONS", [*migrations.MIGRATIONS, *[
+            (number, types.SimpleNamespace(NAME=f"step{number}", upgrade=lambda db: None)) for number in range(first, first + offset + 1)]])
+
 
 if __name__ == "__main__":
     unittest.main()

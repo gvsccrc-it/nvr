@@ -11,6 +11,7 @@ it did not create.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
@@ -106,6 +107,11 @@ MIGRATIONS: list[tuple[int, ModuleType]] = [
 ]
 
 PRE_MIGRATION_COPIES_KEPT = 3
+# Beside those, the newest copy at least this much older than the newest of all is kept too: damage found late must not leave only copies
+# made after it. On the reporting site all three copies were two days old and hours from being replaced by copies of the damaged file (#455).
+OLDER_COPY_SECONDS = 24 * 3600.0
+DAMAGED_COPIES_KEPT = 1  # Copies that failed their check, kept under another name for salvage only
+STEP_PROGRESS_SECONDS = 30.0  # A long migration step says it is still running this often
 
 # Called with the database path before pending migrations run on a database that
 # holds data. Configuration backups register here; a failing hook is logged and the
@@ -148,9 +154,9 @@ def migrate(path: Path, connect: Callable[[], sqlite3.Connection]) -> list[int]:
         if holds_data:
             # Both copies take time in proportion to the database's size, and the NVR answers nothing until they are done: say how long (#418).
             started = time.monotonic()
-            copy_path = _pre_migration_copy(db, path, max(applied, default=0), pending[-1][0])
+            copy_path, fresh = _copy_for(db, path, max(applied, default=0), pending[-1][0])
             logger.info("The pre-migration copy took %.1f s", time.monotonic() - started)
-            for hook in pre_migration_hooks:
+            for hook in pre_migration_hooks if fresh else []:
                 started = time.monotonic()
                 try:
                     hook(path)
@@ -170,15 +176,37 @@ def migrate(path: Path, connect: Callable[[], sqlite3.Connection]) -> list[int]:
                 _apply(db, version, module)
             except Exception as exc:
                 where = f"; the pre-migration copy is {copy_path}" if copy_path else ""
+                if copy_path and not done:  # The file is as the copy left it: the next start need not copy it again
+                    _remember_attempt(path, max(applied, default=0), pending[-1][0], copy_path)
                 raise MigrationError(
                     f"Schema migration {version} ({module.NAME}) failed: {exc}{where}"
                 ) from exc
             logger.info("Applied schema migration %s (%s)", version, module.NAME)
             done.append(version)
+        _attempt_file(path).unlink(missing_ok=True)
         return done
 
 
 def _apply(db: sqlite3.Connection, version: int, module: ModuleType) -> None:
+    """One step, saying every half minute that it is still running: a slow index build on a large database is not a hang (#529)."""
+    started = time.monotonic()
+    said = {"at": started}
+
+    def progress() -> int:
+        now = time.monotonic()
+        if now - said["at"] >= STEP_PROGRESS_SECONDS:
+            said["at"] = now
+            logger.info("Schema migration %s (%s) is still running after %.0f s", version, module.NAME, now - started)
+        return 0
+
+    db.set_progress_handler(progress, 100_000)
+    try:
+        _apply_step(db, version, module)
+    finally:
+        db.set_progress_handler(None, 0)
+
+
+def _apply_step(db: sqlite3.Connection, version: int, module: ModuleType) -> None:
     record = "INSERT INTO schema_migrations(version,name,applied_at) VALUES(?,?,?)"
     values = (version, module.NAME, _now())
     if getattr(module, "TRANSACTIONAL", True):
@@ -234,7 +262,104 @@ def _make_room(path: Path, needed: int) -> int:
     return free
 
 
-def _pre_migration_copy(db: sqlite3.Connection, path: Path, from_version: int, to_version: int) -> Path:
+def _attempt_file(path: Path) -> Path:
+    return path.with_name(f".{path.name}.migration-attempt.json")
+
+
+def _same_file(path: Path) -> list[int]:
+    status = path.stat()
+    return [status.st_dev, status.st_ino]
+
+
+def _remember_attempt(path: Path, from_version: int, to_version: int, copy_path: Path) -> None:
+    """A step failed before anything was applied. The container is restarted and tries again: that start uses this copy, and so do the ones
+    after it, so a migration that keeps failing neither fills the disk nor pushes out the copies of earlier versions (#529)."""
+    try:
+        _attempt_file(path).write_text(json.dumps({"from": from_version, "to": to_version, "copy": copy_path.name, "file": _same_file(path)}), encoding="utf-8")
+    except OSError:
+        logger.warning("Could not note the failed upgrade; the next start makes a new copy")
+
+
+def _copy_from_last_attempt(path: Path, from_version: int, to_version: int) -> Path | None:
+    try:
+        noted = json.loads(_attempt_file(path).read_text(encoding="utf-8"))
+        copy_path = path.with_name(str(noted["copy"]))
+        if (noted["from"], noted["to"], noted["file"]) == (from_version, to_version, _same_file(path)) and copy_path.parent == path.parent and copy_path.is_file():
+            return copy_path
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return None
+
+
+def _damaged(db: sqlite3.Connection) -> str | None:
+    """What the light probe (the start of every table) or the record of damage found while running says, or None."""
+    from app import db_health
+
+    try:
+        db_health._probe(db)
+    except sqlite3.DatabaseError as exc:
+        if not db_health.is_damage(exc):
+            raise
+        return str(exc)
+    found = db_health.damage_reported()
+    return str(found.get("error")) if found else None
+
+
+def _copy_for(db: sqlite3.Connection, path: Path, from_version: int, to_version: int) -> tuple[Path | None, bool]:
+    """The copy this upgrade can be undone with, and whether it was made now. A file known to be damaged is not copied: a copy of it would
+    take the place of a healthy one, and the healthy ones are what a recovery needs (#455, #529)."""
+    again = _copy_from_last_attempt(path, from_version, to_version)
+    if again is not None:
+        logger.info("The last start failed at this same upgrade: using the copy it made, %s", again.name)
+        return again, False
+    damage = _damaged(db)
+    if damage is not None:
+        logger.error("The database file is damaged (%s): no pre-migration copy was made of it and the older copies are all kept", damage)
+        return None, False
+    made = _pre_migration_copy(db, path, from_version, to_version)
+    return made, made is not None
+
+
+def _check_copy(target: Path) -> list[str]:
+    """Every page of the new copy, read once: the copy is made page by page without looking inside them, so a lost page is copied as it is."""
+    check = sqlite3.connect(target)
+    try:
+        found = [str(row[0]) for row in check.execute("PRAGMA quick_check(5)").fetchall()]
+    except sqlite3.DatabaseError as exc:
+        found = [str(exc)]
+    finally:
+        check.close()
+    return [] if found == ["ok"] else found
+
+
+def _set_aside(path: Path, target: Path, found: list[str]) -> None:
+    """A copy that failed its check is renamed so that nothing offers it for a restore, and it never counts among the copies kept."""
+    from app import db_health
+
+    aside = path.with_name(target.name.replace(".pre-migration-", ".damaged-copy-", 1))
+    os.replace(target, aside)
+    for stale in sorted(path.parent.glob(f"{path.name}.damaged-copy-*"), key=lambda item: item.stat().st_mtime)[:-DAMAGED_COPIES_KEPT]:
+        stale.unlink(missing_ok=True)
+    summary = "; ".join(" ".join(line.split()) for line in found)
+    logger.error("THE DATABASE FILE IS DAMAGED (%s). The copy made before this upgrade is damaged too: it was renamed %s and the older copies are all kept. %s",
+                 summary, aside.name, db_health.ADVICE)
+    db_health.report_damage(sqlite3.DatabaseError(summary), "pre-migration copy")
+
+
+def _prune_copies(path: Path) -> None:
+    """Keep the newest few, and the newest of those at least a day older than the newest of all."""
+    copies = _copies_of(path)
+    if not copies:
+        return
+    newest = copies[-1].stat().st_mtime
+    older = [item for item in copies if newest - item.stat().st_mtime >= OLDER_COPY_SECONDS]
+    kept = set(copies[-PRE_MIGRATION_COPIES_KEPT:]) | set(older[-1:])
+    for stale in copies:
+        if stale not in kept:
+            stale.unlink(missing_ok=True)
+
+
+def _pre_migration_copy(db: sqlite3.Connection, path: Path, from_version: int, to_version: int) -> Path | None:
     needed = _database_bytes(path) + SPACE_MARGIN
     free = _make_room(path, needed)
     if free < needed:
@@ -255,8 +380,11 @@ def _pre_migration_copy(db: sqlite3.Connection, path: Path, from_version: int, t
         raise
     copy.close()
     os.chmod(target, 0o600)
-    for stale in _copies_of(path)[:-PRE_MIGRATION_COPIES_KEPT]:
-        stale.unlink(missing_ok=True)
+    found = _check_copy(target)
+    if found:
+        _set_aside(path, target, found)
+        return None
+    _prune_copies(path)
     logger.info("Saved pre-migration database copy to %s", target)
     return target
 

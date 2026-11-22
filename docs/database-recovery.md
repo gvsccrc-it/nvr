@@ -15,6 +15,8 @@ The probe is light on purpose, so damage deeper in a table passes it. Since #453
 - the log carries one line, `THE DATABASE FILE IS DAMAGED`, from each process that met it, and a short reminder every five minutes, not a traceback on every pass;
 - a worker that cannot start because of the damage is tried again every five minutes, not every few seconds. **Recording may be stopped while this lasts**: restore the database as below.
 
+**Lost pages are looked for every five minutes (#455).** The background worker checks the structure of the two busiest tables (cameras and the coverage record) and then as many of the other tables, in turn, as fit in a few seconds, so the whole file is gone over many times a day, not once a night. Damage it finds is logged once, raises the incident **Self-test failed: The database file is damaged** and fails the health check as above.
+
 The record is cleared each time the NVR starts. If the file is still damaged, it is found and recorded again as soon as the damaged part is read.
 
 A busy database ("database is locked") is not damage and is reported differently.
@@ -39,6 +41,8 @@ Run these from the folder with the compose file. If Docker says permission denie
    ```
    You should see `nvr.sqlite3` and files named `nvr.sqlite3.pre-migration-vA-to-vB-<time>`. The NVR saves one before every upgrade that changes the database. Configuration backups, if they are turned on, are in the `nvr-backups` volume and anywhere you copy them.
 
+   **Which copies are kept.** The newest three, and beside them the newest copy that is at least a day older than the newest of all, so damage that is found late does not leave only copies made after it. Every new copy is read through once when it is made. A copy that fails that check is renamed `nvr.sqlite3.damaged-copy-...`: it is never one to restore, it is kept (one at most) only because a salvage can use it, and no healthy copy is removed to make way for it. A file that already fails the start-up probe is not copied at all. If an upgrade fails and the container restarts, the later starts use the copy the first one made; they do not make another.
+
 3. **Copy the whole folder somewhere safe before anything else is tried.** Use a folder with enough free space (each copy of a large database is as big as the database).
    ```
    mkdir -p ~/nvr-data-rescue
@@ -60,9 +64,21 @@ Run these from the folder with the compose file. If Docker says permission denie
    EOF
    ```
 
-5. **Restore the newest healthy copy.** The damaged file is renamed, not deleted, so it can still be examined. Replace the copy's name with the one from step 2.
+5. **Put a healthy file in place.** There are two ways. Either way the damaged file is renamed, not deleted, together with its two side files (`-wal` and `-shm`) if they exist: a side file left beside a different database would be applied to it and damage it.
+
+   **5a. Salvage (loses least).** When only a few pages are lost, almost every row of the damaged file still reads. The salvage command writes a new file with every table that reads cleanly copied whole, every readable row of a damaged table, and only the unreadable rows taken from a healthy copy. It opens both files read-only and prints what it did for each table. Replace the copy's name with the newest one that passed step 4.
    ```
-   docker run --rm -v nvr_nvr-data:/data --entrypoint sh ghcr.io/gvsccrc-it/nvr:edge -c 'cd /data && mv nvr.sqlite3 nvr.sqlite3.damaged && cp nvr.sqlite3.pre-migration-v56-to-v59-20261110T142411614532Z nvr.sqlite3 && ls -la'
+   docker run --rm -v nvr_nvr-data:/data --entrypoint python ghcr.io/gvsccrc-it/nvr:edge -m app.db_salvage /data/nvr.sqlite3 /data/nvr.sqlite3.salvaged --fill-from /data/nvr.sqlite3.pre-migration-v56-to-v59-20261110T142411614532Z
+   ```
+   It ends with "The salvaged file passed its integrity check" and a line for each damaged table: how many rows were read, and how many came from the copy. Rows from the copy are as they were when the copy was made. If it says "Not salvaged", nothing was changed: use 5b. Then put the salvaged file in place:
+   ```
+   docker run --rm -v nvr_nvr-data:/data --entrypoint sh ghcr.io/gvsccrc-it/nvr:edge -c 'cd /data && for f in nvr.sqlite3 nvr.sqlite3-wal nvr.sqlite3-shm; do [ -e $f ] && mv $f $f.damaged; done; mv nvr.sqlite3.salvaged nvr.sqlite3 && ls -la'
+   ```
+   On the reporting site this kept all but 29 rows' latest changes where a plain restore would have lost 45 hours of the recording index and settings. (SQLite's own `.recover` does a similar job, but Ubuntu's `sqlite3` is built without it, which is why the NVR carries its own.)
+
+   **5b. Restore the newest healthy copy (simplest).** Everything written after the copy was made is lost. Replace the copy's name with the one from step 2.
+   ```
+   docker run --rm -v nvr_nvr-data:/data --entrypoint sh ghcr.io/gvsccrc-it/nvr:edge -c 'cd /data && for f in nvr.sqlite3 nvr.sqlite3-wal nvr.sqlite3-shm; do [ -e $f ] && mv $f $f.damaged; done; cp nvr.sqlite3.pre-migration-v56-to-v59-20261110T142411614532Z nvr.sqlite3 && ls -la'
    ```
    Make sure there is room: the NVR takes another full copy when it starts and migrates the restored file.
 
@@ -71,11 +87,11 @@ Run these from the folder with the compose file. If Docker says permission denie
    docker compose up -d nvr
    docker compose logs -f nvr
    ```
-   Sign in and check the cameras, groups, rules and users. Everything written to the database after the copy was made is gone (settings changes, alarm actions, sessions); recorded video is not affected.
+   Sign in and check the cameras, groups, rules and users. After a restore (5b), everything written to the database after the copy was made is gone (settings changes, alarm actions, sessions); after a salvage (5a), only the rows the command reported. Recorded video is not affected either way.
 
 7. **Find the cause** (host disk errors, snapshots or checkpoints, host crashes, storage), turn on configuration backups, and copy them to another machine. A backup on the same disk does not protect against a failed disk. A backup needs free space for one copy of the database on the data disk while it runs; if there is not enough, it is refused with a message saying how much is needed where. Restoring one needs the same room, and is refused before anything changes when there is not.
 
-If every copy is damaged, keep the files and ask for help before deleting anything: part of a damaged file can often be recovered with SQLite's `.recover` command.
+If every copy is damaged, run the salvage (5a) without `--fill-from`: it keeps every row that still reads and counts the ones that are lost. Keep all the files and ask for help before deleting anything.
 
 ## Keep the credential key with the data
 
