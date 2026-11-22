@@ -39,3 +39,14 @@ A camera that does not answer the backchannel request, or offers no G.711 track,
 - "One talker" is enforced inside one NVR process. A second recorder serving the same camera (failover) does not know about the first.
 - The talk goes through the camera's recording stream address, so a camera that limits RTSP sessions may need a spare one.
 - Tested here with a stand-in camera that implements the backchannel (digest sign-in, G.711 both ways) and a browser journey with a made-up microphone. It has not been tried against a real camera: see the acceptance checklist.
+
+## A camera that asks for its password unprotected
+
+Two-way audio runs over plain RTSP. A camera can ask for its password in one of two ways: **Digest**, where the password itself never crosses the network, or **Basic**, where the user name and password are sent merely encoded and anything that can see the traffic, or that answers at the camera's address, can read them.
+
+The NVR answers Digest. It **does not answer a request for Basic** sign-in: the talk ends with "The camera asked for its password to be sent unprotected… so it was not sent". When a camera offers both, Digest is used.
+
+For an older camera that can do nothing else, an administrator can tick **Allow unprotected sign-in for two-way audio** in that camera's Talk tab. The change is written to the security log (`camera_talk_unprotected_sign_in_allowed`, and `…_refused` when it is turned off again), and the camera is listed on the hardening page for as long as the tick is on. Leaving the setting out of a change keeps it as it was.
+
+**The recording stream is not covered by this yet.** The NVR's recording and live video are read by FFmpeg, and FFmpeg answers a request for Basic sign-in on plain RTSP (checked with FFmpeg 6.1; see #476).
+

@@ -420,8 +420,11 @@ def report(db: sqlite3.Connection, now: datetime | None = None) -> dict[str, Any
         (acknowledged if row["acknowledged_at"] else findings).append(entry)
     anchor = settings["last_run_at"] or settings["scheduled_from"]
     configured = networks(db)
+    # Standing, for as long as the allowance lasts: these cameras' passwords go unprotected when they ask during two-way audio (#476)
+    unprotected = [{"camera_id": row["id"], "camera_name": row["name"]} for row in db.execute(
+        "SELECT c.id,c.name FROM camera_talk t JOIN cameras c ON c.id=t.camera_id WHERE t.allow_basic=1 AND c.archived_at IS NULL ORDER BY c.name COLLATE NOCASE")]
     return {
-        "listening": listening(),
+        "listening": listening(), "unprotected_talk": unprotected,
         "as_of": now.isoformat(), "last_run_at": settings["last_run_at"], "last_run_kind": settings["last_run_kind"],
         "next_run_at": (_parse(anchor) + SCHEDULE).isoformat() if anchor else None,
         "camera_networks": [str(network) for network in configured], "network_check": bool(configured), "probes_enabled": bool(settings["probes_enabled"]),

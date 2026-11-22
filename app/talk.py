@@ -143,11 +143,19 @@ def _digest(challenge: str, username: str, password: str, method: str, uri: str)
     return f'Digest username="{username}", realm="{realm}", nonce="{nonce}", uri="{uri}", response="{response}"{extra}{opaque}'
 
 
+UNPROTECTED_REFUSED = ("The camera asked for its password to be sent unprotected (Basic sign-in over plain RTSP), so it was not sent. If this "
+                      "camera can do nothing else, an administrator can allow it for this camera under Cameras, Talk.")
+
+
 class RtspBackchannel:
     """One RTSP session in which this process sends audio to a camera. Use ``connect`` then ``send`` then ``close``."""
 
-    def __init__(self, url: str) -> None:
+    def __init__(self, url: str, *, allow_basic: bool = False) -> None:
         parts = urlsplit(url)
+        # Whether a request for Basic sign-in may be answered. Talking runs over plain RTSP only, where Basic is the user name and
+        # password merely encoded: answered, anything at the camera's address that asks for it is handed them (#476). Off unless an
+        # administrator allowed it for this camera.
+        self.allow_basic = allow_basic
         if parts.scheme != "rtsp" or not parts.hostname:
             raise BackchannelUnsupported("Talking needs a plain rtsp:// camera address")
         self.host, self.port = parts.hostname, parts.port or 554
@@ -186,7 +194,11 @@ class RtspBackchannel:
                 head = first + await reader.readuntil(b"\r\n\r\n")
                 lines = head.decode("latin-1").split("\r\n")
                 status = int(lines[0].split()[1]) if len(lines[0].split()) > 1 else 0
-                headers = {key.strip().lower(): value.strip() for key, _, value in (line.partition(":") for line in lines[1:] if ":" in line)}
+                headers: dict[str, str] = {}
+                for key, _, value in (line.partition(":") for line in lines[1:] if ":" in line):
+                    name = key.strip().lower()
+                    # A camera may offer several ways to sign in, one header each: keep them all, so Digest is chosen when it is offered
+                    headers[name] = f"{headers[name]}\n{value.strip()}" if name == "www-authenticate" and name in headers else value.strip()
                 body = await reader.readexactly(int(headers.get("content-length", "0") or 0))
                 future = self._responses.pop(int(headers.get("cseq", "0") or 0), None)
                 if future is not None and not future.done():
@@ -210,7 +222,7 @@ class RtspBackchannel:
         if authorise and self._challenge and self.username:
             if self._challenge.lower().startswith("digest"):
                 lines.append(f"Authorization: {_digest(self._challenge, self.username, self.password, method, url)}")
-            else:
+            elif self.allow_basic:  # Chosen only where an administrator allowed it for this camera (_choose)
                 lines.append("Authorization: Basic " + base64.b64encode(f"{self.username}:{self.password}".encode()).decode())
         lines += [f"{key}: {value}" for key, value in (headers or {}).items()]
         future: asyncio.Future | None = None
@@ -231,11 +243,21 @@ class RtspBackchannel:
     async def _authorised(self, method: str, url: str, headers: dict[str, str] | None = None) -> tuple[int, dict[str, str], bytes]:
         status, response, body = await self._request(method, url, headers)
         if status == 401 and response.get("www-authenticate") and self.username:
-            self._challenge = response["www-authenticate"]
+            self._challenge = self._choose(response["www-authenticate"])
             status, response, body = await self._request(method, url, headers)
         if status == 401:
             raise BackchannelError("The camera refused the sign-in")
         return status, response, body
+
+    def _choose(self, offered: str) -> str:
+        """The sign-in to answer, of those the camera offered: Digest when offered, Basic only where this camera is allowed it."""
+        ways = [way.strip() for way in offered.split("\n") if way.strip()]
+        digest = next((way for way in ways if way.lower().startswith("digest")), None)
+        if digest:
+            return digest
+        if self.allow_basic:
+            return ways[0]
+        raise BackchannelError(UNPROTECTED_REFUSED)
 
     # -- the session
     async def connect(self) -> AudioTrack:
@@ -359,14 +381,14 @@ talkers = Talkers()
 # --- settings and the record --------------------------------------------------------------------------------------------------------
 
 def settings(db, camera_id: str) -> dict[str, object]:
-    row = db.execute("SELECT enabled,roles_json,record_audio FROM camera_talk WHERE camera_id=?", (camera_id,)).fetchone()
+    row = db.execute("SELECT enabled,roles_json,record_audio,allow_basic FROM camera_talk WHERE camera_id=?", (camera_id,)).fetchone()
     if row is None:
-        return {"enabled": False, "roles": ["administrator"], "record_audio": False}
+        return {"enabled": False, "roles": ["administrator"], "record_audio": False, "allow_basic": False}
     try:
         roles = [role for role in json.loads(row["roles_json"]) if role in ROLES]
     except (TypeError, ValueError):
         roles = []
-    return {"enabled": bool(row["enabled"]), "roles": roles, "record_audio": bool(row["record_audio"])}
+    return {"enabled": bool(row["enabled"]), "roles": roles, "record_audio": bool(row["record_audio"]), "allow_basic": bool(row["allow_basic"])}
 
 
 def allowed(config: dict[str, object], role: str) -> bool:
