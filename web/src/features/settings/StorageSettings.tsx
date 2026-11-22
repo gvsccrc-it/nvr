@@ -32,6 +32,48 @@ interface CameraForecast {
 }
 interface Forecast { cameras: CameraForecast[]; disks: { volume_ids: string[]; free_bytes: number; budget_bytes: number; needed_bytes: number; fits: boolean }[]; warn_days: number; window_hours: number; note: string }
 
+/** States that need more than their one word (#479): the folder is there but the disk the NVR recorded to is not. */
+const VOLUME_STATE: Record<string, string> = { disk_not_mounted: "disk not mounted", wrong_disk: "another NVR's disk", read_only: "read only" };
+
+/**
+ * A volume the NVR is refusing to use, and the one way to tell it the disk was replaced on purpose.
+ * Nothing is recorded to such a volume and none of its footage is removed until its disk is back or this is confirmed.
+ */
+function ReplacedDisk({ volume, onDone }: { volume: Volume; onDone: () => void }) {
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState<number | null>(null);
+  async function replace() {
+    if (!window.confirm(`Use the disk now mounted for “${volume.id}” as a new, empty disk? The NVR will forget the footage that was on the old disk: it can no longer be played or exported from this NVR, even if the old disk is connected again.`)) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await api<{ footage_rows_removed: number }>(`/api/storage/${encodeURIComponent(volume.id)}/new-disk`, { method: "POST" });
+      setDone(result.footage_rows_removed);
+      onDone();
+    } catch (problem) {
+      setError(failureText(problem, "The disk could not be taken into use."));
+    }
+    setBusy(false);
+  }
+  if (done !== null) return <p className="notice" data-tone="good" role="status">The disk mounted for {volume.id} is now its recordings disk. {done} recording{done === 1 ? "" : "s"} from the old disk were forgotten.</p>;
+  return (
+    <div className="notice" data-tone="warn" role="alert" aria-label={`Recordings disk for ${volume.id}`}>
+      <p>
+        {volume.state === "wrong_disk"
+          ? <>The disk mounted for <strong>{volume.id}</strong> belongs to another NVR.</>
+          : <>The disk <strong>{volume.id}</strong> recorded to is not mounted: its folder is there, but its footage is not.</>}
+        {" "}Nothing is being recorded to it, and none of its footage is being removed. Check that the right disk is connected and mounted on the NVR host; recording carries on by itself when it is back.
+      </p>
+      <p>Only if you replaced the disk on purpose:</p>
+      <div className="field-actions">
+        <button type="button" className="button" data-variant="danger" disabled={busy} onClick={() => void replace()}>{busy ? "Working…" : `This is a new, empty disk for ${volume.id}`}</button>
+        {error ? <span className="field-error" role="alert">{error}</span> : null}
+      </div>
+    </div>
+  );
+}
+
 const DISK_STATE = { healthy: "Healthy", warning: "Warning", failing: "Failing", unavailable: "Not available" } as const;
 
 const size = (bytes: number | null | undefined) => {
@@ -160,7 +202,7 @@ export function StorageSettings() {
               {storage.data.volumes.map(volume => (
                 <tr key={volume.id} data-state={volume.state}>
                   <td>{volume.id}{volume.relative_path ? <span className="muted mono"> · {volume.relative_path}</span> : null}</td>
-                  <td>{volume.state}{volume.retention_at_risk ? <span className="field-error"> · retention at risk</span> : null}</td>
+                  <td>{VOLUME_STATE[volume.state] ?? volume.state}{volume.retention_at_risk ? <span className="field-error"> · retention at risk</span> : null}</td>
                   <td>{size(volume.free_bytes)}{volume.capacity_bytes ? ` of ${size(volume.capacity_bytes)}` : ""}</td>
                   <td>{volume.write_latency_ms === null ? "—" : `${volume.write_latency_ms} ms`}</td>
                   <td>{volume.cameras.length}</td>
@@ -169,6 +211,9 @@ export function StorageSettings() {
             </tbody>
           </table>
         ) : <p className="muted">{storage.error ? failureText(storage.error) : "Loading…"}</p>}
+        {(storage.data?.volumes ?? []).filter(volume => volume.state === "disk_not_mounted" || volume.state === "wrong_disk").map(volume => (
+          <ReplacedDisk key={volume.id} volume={volume} onDone={() => { void client.invalidateQueries({ queryKey: ["storage"] }); void client.invalidateQueries({ queryKey: ["incidents"] }); }} />
+        ))}
         <p className="muted field-hint">Volumes are configured on the NVR host. Assign a policy group to a volume in Groups &amp; Policies.</p>
       </section>
 

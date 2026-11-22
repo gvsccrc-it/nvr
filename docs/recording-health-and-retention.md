@@ -20,6 +20,22 @@ The default Compose file provides a separate `archive` volume mounted at `/recor
 
 Administrators can inspect `/api/storage` and assign a group through `GET/PUT /api/camera-groups/{id}/storage-volume`. Storage status includes mount, write-probe latency, capacity, free space, and affected cameras. Low free space and unavailable or slow volumes report affected cameras and retention risk.
 
+## A recordings disk that is not mounted
+
+When the host disk behind a recordings folder fails to mount (after a reboot, a loose cable, a failed disk), the folder is still there, but empty, on the disk underneath it, which is usually the small system disk. Left alone, the NVR would record onto that disk until it filled and then "remove" its oldest footage to make room, forgetting footage that is safe on the disk that is not there.
+
+So every volume, the default one included, carries a small marker file at its root (`.nvr-volume.json`). Do not delete or copy it.
+
+- **The marker is there:** the volume is used as normal.
+- **No marker, and the NVR has no footage on the volume:** a first use. The marker is written.
+- **No marker, but recorded files are there:** an installation from before markers, or a marker deleted by hand. The footage is the proof and the marker is written. Nothing needs doing on upgrade.
+- **No marker and none of the recorded files:** the disk is not mounted. The volume shows as **disk not mounted**, an incident is raised, nothing is recorded to it, and none of its footage is removed by retention, headroom or tiering. **Mount the disk**; recording carries on by itself within a few seconds.
+- **A marker from another NVR:** the volume shows as **another NVR's disk** and is treated the same way.
+
+**If you replaced the disk on purpose,** open **Settings › Recording & storage › Volumes** in a browser as an administrator and choose **This is a new, empty disk** for that volume. The NVR writes a marker on the new disk and forgets the footage that was on the old one (it can no longer be played or exported from this NVR). The action is recorded in the security log (`storage_disk_replaced`) and cannot be done with an API token.
+
+After a configuration **restore**, the disks mounted at that moment are taken as the installation's own, and footage they do not hold is marked unavailable, as before.
+
 ## Storage headroom
 
 Storage space comes before the retention policy. A recorder fills its disks by design, so each storage volume keeps a **headroom** of free space. When free space falls below it, the **oldest footage on that volume is deleted, across all its cameras and even if it is still inside its retention policy**, until the headroom is free again. This keeps recording running and leaves room for exports to be written, instead of a full disk stopping recording and failing exports with "No space left on device".
