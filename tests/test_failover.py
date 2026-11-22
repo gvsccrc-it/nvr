@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 import unittest
 import uuid
 from contextlib import contextmanager
@@ -452,6 +453,98 @@ class ConfigurationCopyTests(FailoverCase):
                     self.assertEqual(db.execute("SELECT COUNT(*) FROM users").fetchone()[0], 0)  # Users are not copied: the standby has its own
                 # Copied again: the same result
                 self.assertEqual(failover.apply_configuration(archive)["cameras"], 4)
+
+    # --- the export made for a standby (#501) ---------------------------------------------------------------------------------------------
+
+    def export(self, directory: str) -> Path:
+        """What the primary sends a standby that asks, as its route makes it."""
+        self.configure("primary")
+        with mock.patch.dict(os.environ, {"NVR_BACKUP_PATH": directory}):
+            return failover.backup_for_standby()
+
+    def many_segments(self, count: int) -> None:
+        with connect() as db:
+            db.executemany("INSERT INTO recording_segments(camera_id,relative_path,starts_at,ends_at,size_bytes) VALUES(?,?,?,?,?)",
+                           [(self.d1, f"{self.d1}/segment-{index:06d}.mp4", "2026-11-01T00:00:00+00:00", "2026-11-01T00:01:00+00:00", 1000) for index in range(count)])
+
+    def test_what_a_standby_is_sent_does_not_grow_with_the_footage_index_and_copies_as_a_backup_did(self):
+        key = Path(os.environ["NVR_CREDENTIAL_KEY_PATH"])
+        with tempfile.TemporaryDirectory() as backups:
+            small = self.export(backups).stat().st_size
+            self.many_segments(40_000)
+            with connect() as db:
+                db.execute("UPDATE cameras SET name='Renamed at the primary' WHERE id=?", (self.d1,))
+            os.utime(next(Path(backups).glob("*-failover*")), (1, 1))  # Not the one from a moment ago
+            archive = self.export(backups)
+            self.assertLess(archive.stat().st_size, small + 4096, "40,000 more segments, and the export is the size it was")
+            self.assertLess(archive.stat().st_size, Path(os.environ["NVR_DB_PATH"]).stat().st_size / 4)
+            with another_installation(key):
+                counts = failover.apply_configuration(archive)
+                self.assertEqual((counts["cameras"], counts["groups"]), (4, 2))
+                with connect() as db:
+                    self.assertEqual(db.execute("SELECT name FROM cameras WHERE id=?", (self.d1,)).fetchone()[0], "Renamed at the primary")
+                    self.assertEqual(db.execute("SELECT COUNT(*) FROM recording_segments").fetchone()[0], 0, "the primary's footage index is not sent")
+
+    def test_two_requests_at_once_make_one_export(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        self.configure("primary")
+        with tempfile.TemporaryDirectory() as backups, mock.patch.dict(os.environ, {"NVR_BACKUP_PATH": backups}):
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                found = list(pool.map(lambda _: failover.backup_for_standby(), range(4)))
+            self.assertEqual(len(set(found)), 1)
+            self.assertEqual(len(list(Path(backups).glob("*-failover*"))), 1)
+
+    def test_nothing_is_written_to_the_systems_temporary_folder_during_a_sync(self):
+        key = Path(os.environ["NVR_CREDENTIAL_KEY_PATH"])
+        with tempfile.TemporaryDirectory() as backups, tempfile.TemporaryDirectory() as system:
+            written: list[str] = []
+            real = tempfile.mkdtemp
+
+            def watched(*args, **kwargs):
+                made = real(*args, **kwargs)
+                written.append(made)
+                return made
+
+            with mock.patch.object(tempfile, "tempdir", system), mock.patch.object(tempfile, "mkdtemp", watched):
+                archive = self.export(backups)
+                data = Path(os.environ["NVR_DB_PATH"]).parent
+                self.assertTrue(written and all(data in Path(made).parents for made in written), written)  # Under the data folder, every one
+                with another_installation(key):
+                    standby_data = Path(os.environ["NVR_DB_PATH"]).parent
+                    before = len(written)
+                    failover.apply_configuration(archive)
+                    self.assertTrue(written[before:] and all(Path(made).parent == standby_data for made in written[before:]), written[before:])
+                    self.assertEqual(list(standby_data.glob(".failover-*")), [], "and its working folder is gone afterwards")
+            self.assertEqual(os.listdir(system), [])
+
+    def test_a_sync_is_refused_up_front_when_there_is_not_room_and_leftovers_are_removed_at_the_next_start(self):
+        key = Path(os.environ["NVR_CREDENTIAL_KEY_PATH"])
+        with tempfile.TemporaryDirectory() as backups:
+            archive = self.export(backups)
+            with another_installation(key):
+                data = Path(os.environ["NVR_DB_PATH"]).parent
+                full = mock.patch.object(failover.shutil, "disk_usage", return_value=types.SimpleNamespace(total=100, used=100, free=1 << 20))
+                with full, self.assertRaisesRegex(failover.SyncError, r"not enough room.*1 MB free.*MB needed"):
+                    failover.apply_configuration(archive)
+                self.assertEqual(list(data.glob(".failover-*")), [])
+                (data / ".failover-killed").mkdir()
+                (data / ".failover-killed" / "credentials.key").write_bytes(b"left by a killed sync")
+                (data / "nvr-other-file").write_bytes(b"not ours")
+                self.assertEqual(failover.remove_leftovers(), 1)
+                self.assertEqual(list(data.glob(".failover-*")), [])
+                self.assertTrue((data / "nvr-other-file").exists())
+
+    def test_an_export_for_a_standby_cannot_be_restored_as_a_backup(self):
+        with tempfile.TemporaryDirectory() as backups:
+            archive = self.export(backups)
+            users_before = None
+            with connect() as db:
+                users_before = db.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+            with self.assertRaisesRegex(backup.BackupError, "configuration export for a failover standby"):
+                backup.restore(archive, force=True)
+            with connect() as db:
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM users").fetchone()[0], users_before, "nothing was replaced")
 
     def test_a_backup_of_another_nvr_a_wrong_passphrase_or_a_damaged_file_is_refused(self):
         with tempfile.TemporaryDirectory() as backups:

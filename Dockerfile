@@ -56,6 +56,10 @@ RUN apt-get update \
 COPY --chown=nvr:nvr app ./app
 COPY --from=web --chown=nvr:nvr /app/web_dist ./app/web_dist
 COPY --chown=nvr:nvr scripts ./scripts
+# The commit this image was built from (CI passes it): the Updates page names the exact image to go back to by it (#540).
+# Set last, so a new commit does not rebuild the layers above.
+ARG NVR_BUILD_COMMIT=""
+ENV NVR_BUILD_COMMIT=${NVR_BUILD_COMMIT}
 USER nvr
 EXPOSE 8280
 # The start period covers an upgrade: before a schema change the NVR copies the database, and backs it up when backups are on, and answers

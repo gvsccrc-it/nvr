@@ -27,7 +27,7 @@ from app import backup
 from app.audit import record
 from app.migrations import latest_version
 from app.store import connect, database_path
-from app.version import APP_VERSION
+from app.version import APP_VERSION, build_commit, build_tag
 
 DEFAULT_FEED = "https://api.github.com/repos/gvsccrc-it/nvr/releases?per_page=30"
 DEFAULT_IMAGE = "ghcr.io/gvsccrc-it/nvr"
@@ -227,14 +227,17 @@ def state() -> dict[str, object]:
     with connect() as db:
         row = _settings(db)
         history = [{"at": item["at"], "from_version": item["from_version"], "to_version": item["to_version"], "from_schema": item["from_schema"],
-                    "to_schema": item["to_schema"], "migrations": json.loads(item["migrations_json"])}
+                    "to_schema": item["to_schema"], "migrations": json.loads(item["migrations_json"]),
+                    "from_build": item["from_build"], "to_build": item["to_build"]}
                    for item in db.execute("SELECT * FROM update_history ORDER BY id DESC LIMIT 10")]
         applied = [{"version": item["version"], "name": item["name"], "applied_at": item["applied_at"]}
                    for item in db.execute("SELECT version,name,applied_at FROM schema_migrations ORDER BY version DESC LIMIT 10")]
         allowed = checking_allowed(db)
     checked = _parse_time(row["last_checked_at"])
     return {
-        "version": APP_VERSION, "schema_version": latest_version(), "image": f"{image_repository()}:{APP_VERSION}",
+        # The image is named by its build when that is known: that tag exists for every build of main, a version tag only for a release (#540).
+        "version": APP_VERSION, "schema_version": latest_version(), "build": build_commit() or None,
+        "image": f"{image_repository()}:{build_tag() or APP_VERSION}",
         "check_enabled": bool(row["check_enabled"]), "disabled_by_environment": disabled_by_environment(), "checking": allowed,
         "last_checked_at": row["last_checked_at"], "last_error": row["last_error"], "stale": checked is None or datetime.now(timezone.utc) - checked > STALE_AFTER,
         "available": _latest(row), "prepared": prepared_view(row), "history": history, "applied_migrations": applied,
@@ -270,15 +273,19 @@ def _note_start() -> None:
         db.execute("BEGIN IMMEDIATE")
         try:
             row = _settings(db)
-            before_version, before_schema = row["seen_version"], row["seen_schema"]
-            if before_version is not None and (before_version != APP_VERSION or before_schema != schema):
+            before_version, before_schema, before_build = row["seen_version"], row["seen_schema"], row["seen_build"]
+            build = build_commit() or None
+            # A new build of the same version and schema is an upgrade too (an installation following the latest build of main): it is
+            # listed, so the way back names the build that ran before. Counted only when both builds are known.
+            another_build = bool(before_build and build and before_build != build)
+            if before_version is not None and (before_version != APP_VERSION or before_schema != schema or another_build):
                 applied = [{"version": item["version"], "name": item["name"]} for item in
                            db.execute("SELECT version,name FROM schema_migrations WHERE version>? ORDER BY version", (before_schema or 0,))]
-                db.execute("INSERT INTO update_history(at,from_version,to_version,from_schema,to_schema,migrations_json) VALUES(?,?,?,?,?,?)",
-                           (_now(), before_version, APP_VERSION, before_schema, schema, json.dumps(applied)))
+                db.execute("INSERT INTO update_history(at,from_version,to_version,from_schema,to_schema,migrations_json,from_build,to_build) VALUES(?,?,?,?,?,?,?,?)",
+                           (_now(), before_version, APP_VERSION, before_schema, schema, json.dumps(applied), before_build, build))
                 record(db, None, "version_changed", "settings", "updates", from_version=before_version, to_version=APP_VERSION, migrations=[item["version"] for item in applied])
                 db.execute("UPDATE update_settings SET prepared_at=NULL,prepared_run_id=NULL,prepared_version=NULL,prepared_without_backup=0 WHERE singleton_id=1")  # That update is done
-            db.execute("UPDATE update_settings SET seen_version=?,seen_schema=? WHERE singleton_id=1", (APP_VERSION, schema))
+            db.execute("UPDATE update_settings SET seen_version=?,seen_schema=?,seen_build=? WHERE singleton_id=1", (APP_VERSION, schema, build))
             db.execute("COMMIT")
         except BaseException:
             db.execute("ROLLBACK")
@@ -355,7 +362,7 @@ def plan() -> dict[str, object]:
         "backup_destination": str(backup.destination()) if run is not None else None,
         "without_backup": run is None,
         "upgrade": upgrade_commands(str(target["version"])),
-        "rollback": rollback_steps(APP_VERSION, None, target["has_migrations"] is not False),
+        "rollback": rollback_steps(APP_VERSION, None, target["has_migrations"] is not False, build_commit()),
         "pre_migration_copies": pre_migration_copies(),
         "will_migrate": target["has_migrations"],
         "note": "These commands are for you to run on the machine that runs the NVR. The NVR cannot run them and has no access to Docker.",
@@ -366,7 +373,7 @@ def upgrade_commands(version: str) -> list[str]:
     repository = image_repository()
     return [
         "# Run these in the folder that holds the NVR's compose.yaml, on the host.",
-        "docker compose images nvr                       # note the image you are replacing",
+        "docker compose images nvr                       # note the image you are replacing: write its tag and image ID down",
         f"# In compose.yaml set:   image: {repository}:{version}",
         "docker compose pull nvr",
         "docker compose up -d nvr",
@@ -380,11 +387,15 @@ def last_upgrade_rollback(history: list[dict[str, object]]) -> dict[str, object]
         return None
     last = history[0]
     wanted = [copy for copy in pre_migration_copies() if copy["to_schema"] == last["to_schema"] and (last["from_schema"] is None or copy["from_schema"] == last["from_schema"])]
-    return rollback_steps(str(last["from_version"]), wanted[0] if wanted else None, bool(last["migrations"]))
+    return rollback_steps(str(last["from_version"]), wanted[0] if wanted else None, bool(last["migrations"]), last.get("from_build"))
 
 
-def rollback_steps(previous_version: str, copy: dict[str, object] | None, migrates: bool) -> dict[str, object]:
-    """How to go back: the previous image, and when the upgrade changed the database, the database as it was before (``copy``, the one made for that upgrade)."""
+def rollback_steps(previous_version: str, copy: dict[str, object] | None, migrates: bool, previous_build: object = None) -> dict[str, object]:
+    """How to go back: the previous image, and when the upgrade changed the database, the database as it was before (``copy``, the one made for that upgrade).
+
+    The previous image is named by the build it was (``sha-<commit>``, a tag published for every build of main) when that is known. A
+    version tag exists only for a released version, and an installation that followed the latest build never ran one (#540)."""
+    tag = build_tag(str(previous_build)) if previous_build and re.fullmatch(r"[0-9a-f]{7,40}", str(previous_build)) else None
     repository = image_repository()
     database = database_path()
     quote = shlex.quote
@@ -396,5 +407,11 @@ def rollback_steps(previous_version: str, copy: dict[str, object] | None, migrat
     elif migrates:
         steps += ["# This upgrade changes the database. The copy of the database made just before its migrations does not exist yet: the new version makes it when it first starts,",
                   "# and Settings, Updates then names it here. Until then the pre-update backup above is the way back."]
-    steps += [f"# In compose.yaml set the previous image back:   image: {repository}:{previous_version}", "docker compose up -d nvr"]
-    return {"steps": steps, "copy": copy["file"] if copy else None, "has_copy": copy is not None, "previous_image": f"{repository}:{previous_version}", "will_migrate": migrates}
+    if tag:
+        steps += [f"# In compose.yaml set the previous image back (version {previous_version}, that exact build):   image: {repository}:{tag}"]
+    else:
+        steps += ["# In compose.yaml set the previous image back: the one you noted before upgrading. The NVR does not know which build that was",
+                  f"# (it was made before builds were recorded). If it was the {previous_version} release:   image: {repository}:{previous_version}"]
+    steps += ["docker compose pull nvr", "docker compose up -d nvr"]
+    return {"steps": steps, "copy": copy["file"] if copy else None, "has_copy": copy is not None, "previous_image": f"{repository}:{tag}" if tag else None,
+            "previous_build": tag, "will_migrate": migrates}

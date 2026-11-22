@@ -1,7 +1,9 @@
 services:
   nvr:
-    image: ghcr.io/gvsccrc-it/nvr:edge
-    pull_policy: always
+    # A released version, on purpose (#540): restarting the stack never changes the version it runs. To upgrade, follow Settings,
+    # Updates (docs/guided-updates.md) and change this line. The "edge" tag is the build of the latest merge to main: for a test
+    # machine only, never a production server.
+    image: ghcr.io/gvsccrc-it/nvr:0.1.0
     # Camera discovery, ONVIF event delivery, and stream access use the host's
     # camera-network interfaces directly. This is the tested deployment mode.
     network_mode: host

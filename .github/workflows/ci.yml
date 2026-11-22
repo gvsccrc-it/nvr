@@ -210,6 +210,7 @@ jobs:
         # This image is the one published from main (#385): the publish job loads it rather than building again.
         run: |
           docker build --tag ghcr.io/gvsccrc-it/nvr:edge \
+            --build-arg NVR_BUILD_COMMIT="${{ github.sha }}" \
             --label org.opencontainers.image.source="${{ github.server_url }}/${{ github.repository }}" \
             --label org.opencontainers.image.revision="${{ github.sha }}" .
       - name: Benchmark and validate bundled CPU detection model
@@ -218,6 +219,8 @@ jobs:
         run: docker run --rm ghcr.io/gvsccrc-it/nvr:edge python -m scripts.check_plate_models
       - name: Smoke test Compose health and persistence
         run: |
+          # compose.yaml names a released version; the image under test is the one just built, given that name for this machine only.
+          docker tag ghcr.io/gvsccrc-it/nvr:edge "$(docker compose config --images | head -n 1)"
           NVR_PORT=8080 docker compose up --pull never -d
           NVR_CI_TEST_PASSWORD="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
           export NVR_CI_TEST_PASSWORD
@@ -309,8 +312,10 @@ jobs:
         run: |
           echo "unit tests: $UNIT_TESTS, build: $BUILD"
           test "$UNIT_TESTS" = success && test "$BUILD" = success
+  # Published only when the browser journeys passed as well as the unit tests and the build (#540): edge and sha-<commit> are what test
+  # machines run and what a release is made from. On a push to main the browser job always runs (see "changes").
   publish:
-    needs: verify
+    needs: [verify, camera-browser-acceptance]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:

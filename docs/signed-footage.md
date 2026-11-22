@@ -12,6 +12,21 @@ Deletions the NVR makes are recorded as links too, so they are expected rather t
 
 Footage recorded before signing was turned on (before this version was installed) is reported as **not signed**, not as tampered.
 
+## How long the chain is kept
+
+The chain does not grow for ever. Once an hour the background worker drops what is past the kept period, a bounded amount at a time:
+
+- **Footage still on disk always keeps its link**, however old it is (footage held for a case, for example), and so does everything recorded after it.
+- **Footage the NVR removed keeps its links for 365 days after the removal.** `NVR_FOOTAGE_CHAIN_KEEP_DAYS` changes the period, between 90 days and 10 years (3650).
+- **Older links are replaced by a checkpoint**: the newest signed link before which everything is past the period. That link and its signature stay, and the chain that remains verifies from it exactly as it verified from any signature before. The checkpoint is in the `footage_chain_checkpoints` table.
+- **Signatures:** every one (one a minute) for the last 30 days, and one an hour for older ones. A link older than 30 days is then checked within an hour's stretch of the chain between two signatures, where a newer one is checked within a minute's.
+
+Verifying a range that begins before the checkpoint answers `before_kept_chain: true` with `kept_from`, the time the kept chain begins. That is information, not a failure: such a range is never reported as tampered for that reason.
+
+An evidence package carries its own extract of the chain, so a package made before its links were dropped still verifies, offline or by upload, for as long as the package is kept.
+
+One thing to know: a segment that vanished without the NVR removing it is reported as **missing** for as long as its link is kept. Once its link is past the period it is dropped like the others, and the range is then simply before the kept chain.
+
 ## Verifying a camera's footage
 
 In **Cameras**, open a camera's **Health & History** tab, choose a range under **Verify footage**, and choose **Verify footage**. The API equivalent is:
