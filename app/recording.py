@@ -325,6 +325,8 @@ class RecordingManager:
         self._indexed_lines: dict[Path, tuple[int, str]] = {}  # Per FFmpeg segment list: how many lines have been dealt with, and the last of them (#334)
         self.storage_task: asyncio.Task[None] | None = None
         self.stopping = False
+        self._database_warned = float("-inf")
+        self._unindexed: list[tuple[str, Path, Path]] = []  # Runs that ended while the database could not be written: (camera, list, folder)
 
     async def start(self) -> None:
         self.stopping = False
@@ -470,6 +472,8 @@ class RecordingManager:
                 await asyncio.gather(*(self.sync_camera(row["id"]) for row in rows))
                 # Each camera's coverage check writes, and a write waits for the database's lock: in a thread, as the watch does.
                 await asyncio.to_thread(self._sync_all_coverage, [row["id"] for row in rows])
+                if self._unindexed:
+                    await asyncio.to_thread(self._index_leftovers)
             except asyncio.CancelledError:
                 raise
             except sqlite3.Error:
@@ -856,11 +860,17 @@ class RecordingManager:
         while not self.stopping:
             await assembler.poll()
             # A write waits for the database's lock: in a thread, so that a wait never stops every camera's recording and the heartbeat.
-            if await asyncio.to_thread(newest_is_fresh, spool, "segment-*.ts"):
-                await asyncio.to_thread(self._mark_video_fresh, camera_id)
+            try:
+                if await asyncio.to_thread(newest_is_fresh, spool, "segment-*.ts"):
+                    await asyncio.to_thread(self._mark_video_fresh, camera_id)
+            except sqlite3.Error as exc:
+                self._database_unavailable(camera_id, exc)  # Not written this time; the buffer is filling normally and is left running (#483)
             if proc.returncode is not None:
                 fault = await _stream_fault(source)
-                await asyncio.to_thread(self._set_status, camera_id, "reconnecting", "Camera stream buffer interrupted; retrying", fault=fault)
+                try:
+                    await asyncio.to_thread(self._set_status, camera_id, "reconnecting", "Camera stream buffer interrupted; retrying", fault=fault)
+                except sqlite3.Error as exc:
+                    self._database_unavailable(camera_id, exc)
                 break
             await asyncio.sleep(1)
 
@@ -962,8 +972,46 @@ class RecordingManager:
         recording is current ("recording") or has stalled (the start of the fault is kept)."""
         while process.returncode is None and not self.stopping:
             # Its writes wait for the database's lock: in a thread, so that a wait never stops every camera's recording and the heartbeat.
-            await asyncio.to_thread(self._watch_pass, camera_id, list_path, output_dir, segment_duration)
+            try:
+                await asyncio.to_thread(self._watch_pass, camera_id, list_path, output_dir, segment_duration)
+            except sqlite3.Error as exc:
+                # The database could not be read or written this time. FFmpeg is recording normally: ending it here, as this used to, cost
+                # every camera a gap at the same moment for a ten-second stall of the one database they share (#483). The segments finished
+                # meanwhile are indexed by the next pass that gets through.
+                self._database_unavailable(camera_id, exc)
             await asyncio.sleep(2)
+
+    def _database_unavailable(self, camera_id: str, error: sqlite3.Error) -> None:
+        """Say that a recording's status could not be written, once a minute for the whole recorder and not once a pass per camera."""
+        from . import db_health
+
+        log = logging.getLogger("nvr.recording")
+        if db_health.is_damage(error):
+            log.error("The recording of camera %s could not be indexed", camera_id, exc_info=error)  # The damage filter makes this one clear line (#453)
+            return
+        now = time.monotonic()
+        if now - self._database_warned >= 60:
+            self._database_warned = now
+            log.warning("The database could not be written (%s): recording carries on, and the footage is indexed when it can be (camera %s, and any others)", error, camera_id)
+
+    def _index_rest(self, camera_id: str, list_path: Path, output_dir: Path) -> None:
+        """Index what is left of a run's list as the run ends, whichever way it ends. If the database still cannot be written the list is
+        kept and tried again every few seconds: the run's folder is never read again otherwise, and its last segments stayed on disk with
+        no row (#483)."""
+        try:
+            self._index_csv(camera_id, list_path, output_dir)
+        except sqlite3.Error as exc:
+            self._database_unavailable(camera_id, exc)
+            self._unindexed.append((camera_id, list_path, output_dir))
+            return
+        self._indexed_lines.pop(list_path, None)  # Each run writes a new list
+        remove_run_folder_if_empty(output_dir)
+
+    def _index_leftovers(self) -> None:
+        """Try again the lists that could not be indexed when their run ended. Blocking: the five-second pass runs it in a thread."""
+        waiting, self._unindexed = self._unindexed, []
+        for camera_id, list_path, output_dir in waiting:
+            self._index_rest(camera_id, list_path, output_dir)
 
     def _watch_pass(self, camera_id: str, list_path: Path, output_dir: Path, segment_duration: int) -> None:
         """One pass of the watch over a running recording. Blocking, so the watch runs it in a thread."""
@@ -1011,6 +1059,7 @@ class RecordingManager:
             env["TZ"] = "UTC"
             process: asyncio.subprocess.Process | None = None
             progress_task: asyncio.Task[None] | None = None
+            indexed = False
             try:
                 process = await asyncio.create_subprocess_exec(
                     *args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
@@ -1025,14 +1074,14 @@ class RecordingManager:
                 began = time.monotonic()
                 await self._watch_continuous_output(camera_id, process, list_path, output_dir, segment_duration)
                 await self._end_ffmpeg(process)
-                await asyncio.to_thread(self._index_csv, camera_id, list_path, output_dir)
+                await asyncio.to_thread(self._index_rest, camera_id, list_path, output_dir)
+                indexed = True
                 if self.stopping:
                     return
                 failures = failures_after(failures, time.monotonic() - began)
                 await self._status(camera_id, "reconnecting", "Camera stream interrupted; retrying", fault=await _stream_fault(source))
             except asyncio.CancelledError:
                 await self._end_ffmpeg(process)
-                self._index_csv(camera_id, list_path, output_dir)
                 raise
             except OSError:
                 failures += 1
@@ -1045,10 +1094,11 @@ class RecordingManager:
                 except sqlite3.Error:
                     pass
             finally:
-                # However the watch ended, the FFmpeg this pass started is ended before another is started beside it (#335).
+                # However the watch ended, the FFmpeg this pass started is ended before another is started beside it (#335), and what it
+                # finished writing is indexed (#483). Not in a thread: this also runs as the recording is cancelled, and must not be cut short.
                 await self._end_ffmpeg(process)
-                self._indexed_lines.pop(list_path, None)  # Each run writes a new list
-                remove_run_folder_if_empty(output_dir)
+                if not indexed:
+                    self._index_rest(camera_id, list_path, output_dir)
                 if progress_task:
                     progress_task.cancel()
                     await asyncio.gather(progress_task, return_exceptions=True)
