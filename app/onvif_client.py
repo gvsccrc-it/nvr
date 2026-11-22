@@ -362,8 +362,10 @@ class OnvifClient:
                 return url
             self._note(operation="Locate", service="device", auth="none", outcome="not_onvif", status=response.status_code, ms=int((time.monotonic() - started) * 1000), port=urlsplit(url).port)
         if device_service_url:
-            raise OnvifError("unreachable", f"No ONVIF service answered at the device service address for {self.host}: check the address, that ONVIF is enabled on the camera, and the ONVIF port")
-        raise OnvifError("unreachable", f"No ONVIF service answered at {self.host} on port {', '.join(str(port) for port in ports)}: check the address, that ONVIF is enabled on the camera, and the ONVIF port")
+            # No host in either message (#471): this text is stored and shown to operators and read-only tokens, who may not know a
+            # camera's address. An administrator sees the address beside it.
+            raise OnvifError("unreachable", "No ONVIF service answered at the device service address: check the address, that ONVIF is enabled on the camera, and the ONVIF port")
+        raise OnvifError("unreachable", f"No ONVIF service answered on port {', '.join(str(port) for port in ports)}: check the address, that ONVIF is enabled on the camera, and the ONVIF port")
 
     async def device_information(self, device_url: str) -> DeviceInfo:
         self._device_url = device_url
