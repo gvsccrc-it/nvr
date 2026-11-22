@@ -16,6 +16,12 @@ services:
         max-size: "20m"
         max-file: "5"
     stop_grace_period: 30s
+    # How many files, pipes and connections the NVR may have open at once (#546). Docker's own default is often 1,024, which a large
+    # site's recorder and a busy web interface can both reach. Each worker also raises its own limit as far as this allows.
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     # Hardening (#384). The NVR runs as an unprivileged user and needs no Linux capabilities: all are dropped, and nothing in the
     # container can gain privileges. An init process reaps anything orphaned when a worker is killed, so no zombies are left.
     # (Disk health is the one exception: the commented cap_add below adds back only what smartctl needs.)
@@ -41,6 +47,9 @@ services:
       NVR_TRUSTED_PROXIES: ${NVR_TRUSTED_PROXIES:-}
       # Networks that count as "local" besides loopback, private, link-local and Tailscale addresses, and extra browser origins allowed to open the live video socket.
       NVR_LOCAL_NETWORKS: ${NVR_LOCAL_NETWORKS:-}
+      # A VPN or a link between sites that uses private addresses: list its range here so the people on it count as remote (#458).
+      NVR_REMOTE_NETWORKS: ${NVR_REMOTE_NETWORKS:-}
+      NVR_TUNNEL_NETWORKS: ${NVR_TUNNEL_NETWORKS:-}
       NVR_ALLOWED_ORIGINS: ${NVR_ALLOWED_ORIGINS:-}
       NVR_OIDC_TENANT_ID: ${NVR_OIDC_TENANT_ID:-}
       NVR_OIDC_CLIENT_ID: ${NVR_OIDC_CLIENT_ID:-}
@@ -87,6 +96,8 @@ services:
       NVR_DB_LOG_LIMIT_MB:
       NVR_DB_SYNCHRONOUS:
       NVR_STOP_GRACE_SECONDS:
+      NVR_WEB_MAX_CONNECTIONS:
+      NVR_WEB_FIRST_REQUEST_SECONDS:
       NVR_WORKER_START_SECONDS:
       NVR_ONVIF_TIMEOUT_SECONDS:
       NVR_TAMPER_SAMPLE_SECONDS:

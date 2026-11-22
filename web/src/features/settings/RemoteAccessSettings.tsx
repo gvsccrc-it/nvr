@@ -6,6 +6,7 @@ type Policy = "off" | "administrators" | "all";
 interface RemoteWarning { severity: "bad" | "warn"; code: string; message: string }
 interface RemoteAccess {
   client_address: string;
+  classed_reason: string;
   peer_address: string;
   peer_is_trusted_proxy: boolean;
   remote: boolean;
@@ -46,6 +47,8 @@ export function RemoteAccessSettings() {
         <dl className="detail-list">
           <dt>From</dt>
           <dd>{data.client_address} · {data.remote ? "outside the local network" : "the local network"}</dd>
+          <dt>Counted as</dt>
+          <dd>{data.remote ? "Remote" : "Local"}, because {data.classed_reason}.</dd>
           <dt>Over</dt>
           <dd>{data.https ? "HTTPS" : "Plain HTTP"}{data.host ? ` to ${data.host}` : ""}</dd>
           <dt>Through</dt>

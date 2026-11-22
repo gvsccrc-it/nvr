@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from app import backup, db_health, env_numbers, failover, folder_check, logforward, migrations, setup_code
+from app import backup, db_health, env_numbers, failover, folder_check, logforward, migrations, open_files, setup_code
 from app.detection import mark_analysis_interrupted
 from app.incidents import sync_incident
 from app.store import connect, initialize
@@ -322,6 +322,7 @@ def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     logforward.install("supervisor")
     db_health.install_log_filter("supervisor")
+    open_files.raise_limit()  # Inherited by every worker it starts; each also raises its own
     db_health.clear_damage_report()  # A new start, after a restore, begins clean; damage still there is found again within moments
     os.umask(0o077)
     if backup.pre_migration_backup not in migrations.pre_migration_hooks:

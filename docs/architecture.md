@@ -33,6 +33,8 @@ FFmpeg copies the camera's H.264 video without re-encoding it, except for camera
 
 `quality=low` uses the configured substream and falls back to the main stream. Refusals send a JSON message and close with a code that mirrors HTTP: `4401`/`4403` authentication, `4404` unknown camera, `4410` archived, `4415` unsupported codec, `4429` no free viewer slot, `4502` camera stream failure. An unsupported-codec refusal (for example H.265, detected from the probed codec or the initialization segment) names the MJPEG `fallback` URL. The existing MJPEG and MP3 endpoints remain, and the sixteen video and sixteen audio slots are shared across both transports.
 
+Beneath those limits sits one on connections themselves (`app/connection_guard.py`, #546): the web worker holds at most 512 at once (`NVR_WEB_MAX_CONNECTIONS`; a live socket is one of them) and closes a connection that has not sent a whole first request, its request line and headers, within 10 seconds (`NVR_WEB_FIRST_REQUEST_SECONDS`). At the limit a new connection takes the place of the one that has waited longest without a request, so the health check keeps answering through a flood of idle connections; when every connection is doing real work a new one is turned away, except for sixteen more from the machine itself. Every process raises its own open-file limit at start (`app/open_files.py`), and `compose.yaml` gives the container 65,536.
+
 ## Composition
 
 - `app.main` is the ASGI app the web worker serves. It only builds the application with `create_app()`.
