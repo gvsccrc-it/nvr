@@ -89,17 +89,13 @@ def _check_database(full: bool) -> dict[str, Any]:
 def _record_damaged(kind: str, started: datetime, database: dict[str, Any]) -> dict[str, Any]:
     """A damaged file ends the run at once: the other checks read the same file, and recovering their incidents on a run that skipped them would be wrong.
     The incident and the run are written if the file still allows it; the log line and the returned result stand either way."""
-    logger.error("Self-test: %s", database["detail"])
-    from . import db_health
-
-    db_health.report_damage(sqlite3.DatabaseError("; ".join(database.get("lines", [])) or "the integrity check failed"), "self-test")  # The health check fails from now on (#453)
     finished = _now()
+    _announce_damage(database, "self-test")
     try:
         with connect() as db:
             db.execute("BEGIN IMMEDIATE")
             try:
-                sync_incident(db, incident_key=f"{FAULT_TYPE}:database", camera_id=None, fault_type=FAULT_TYPE,
-                              summary=f"Self-test failed: {database['detail']}", active=True, details={"check": "database", "detail": database["detail"], "lines": database.get("lines", [])})
+                _damage_incident(db, database)
                 db.execute("INSERT INTO self_test_runs(kind,started_at,finished_at,passed,results_json) VALUES(?,?,?,0,?)",
                            (kind, started.isoformat(), finished.isoformat(), json.dumps([database])))
             except BaseException:
@@ -109,6 +105,51 @@ def _record_damaged(kind: str, started: datetime, database: dict[str, Any]) -> d
     except sqlite3.Error:
         logger.exception("The damaged-database result could not be written to the database itself")
     return {"kind": kind, "started_at": started.isoformat(), "finished_at": finished.isoformat(), "passed": False, "results": [database]}
+
+
+def _announce_damage(database: dict[str, Any], where: str) -> None:
+    """One log line, and the record that fails the health check from now on (#453)."""
+    from . import db_health
+
+    logger.error("Self-test: %s", database["detail"])
+    db_health.report_damage(sqlite3.DatabaseError("; ".join(database.get("lines", [])) or "the integrity check failed"), where)
+
+
+def _damage_incident(db: sqlite3.Connection, database: dict[str, Any]) -> None:
+    sync_incident(db, incident_key=f"{FAULT_TYPE}:database", camera_id=None, fault_type=FAULT_TYPE,
+                  summary=f"Self-test failed: {database['detail']}", active=True, details={"check": "database", "detail": database["detail"], "lines": database.get("lines", [])})
+
+
+_patrol = None
+
+
+def patrol() -> bool:
+    """Every few minutes: check the structure of the database's hot tables, and of the others in turn (#455). Damage is logged once, fails
+    the health check and raises the same incident as the nightly check, which is also what recovers it. Returns False when damage was found."""
+    from . import db_health
+
+    global _patrol
+    if _patrol is None:
+        _patrol = db_health.Patrol()
+    if not _patrol.due() or db_health.damage_reported():
+        return True  # Already known: nothing to add until the NVR is started again on a restored file
+    outcome = _patrol.run()
+    if outcome.ok:
+        return True
+    database = _result("database", "database", "Database", False, f"The database file is damaged ({outcome.summary}). {db_health.ADVICE}", lines=outcome.lines)
+    _announce_damage(database, "database patrol")
+    try:
+        with connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                _damage_incident(db, database)
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            db.execute("COMMIT")
+    except sqlite3.Error:
+        logger.exception("The damaged-database incident could not be written to the database itself")
+    return False
 
 
 def run(kind: str = "manual") -> dict[str, Any]:
@@ -195,6 +236,8 @@ class SelfTestManager:
     def process_once() -> None:
         from .coverage import publish_weekly_report
 
+        if not patrol():
+            return  # The file is damaged: the full check would only take minutes to say the same
         if due():
             run("scheduled")
         publish_weekly_report()

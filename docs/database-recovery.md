@@ -15,6 +15,8 @@ The probe is light on purpose, so damage deeper in a table passes it. Since #453
 - the log carries one line, `THE DATABASE FILE IS DAMAGED`, from each process that met it, and a short reminder every five minutes, not a traceback on every pass;
 - a worker that cannot start because of the damage is tried again every five minutes, not every few seconds. **Recording may be stopped while this lasts**: restore the database as below.
 
+**Lost pages are looked for every five minutes (#455).** The background worker checks the structure of the two busiest tables (cameras and the coverage record) and then as many of the other tables, in turn, as fit in a few seconds, so the whole file is gone over many times a day, not once a night. Damage it finds is logged once, raises the incident **Self-test failed: The database file is damaged** and fails the health check as above.
+
 The record is cleared each time the NVR starts. If the file is still damaged, it is found and recorded again as soon as the damaged part is read.
 
 A busy database ("database is locked") is not damage and is reported differently.
@@ -38,6 +40,8 @@ Run these from the folder with the compose file. If Docker says permission denie
    docker run --rm -v nvr_nvr-data:/data --entrypoint ls ghcr.io/gvsccrc-it/nvr:edge -la /data
    ```
    You should see `nvr.sqlite3` and files named `nvr.sqlite3.pre-migration-vA-to-vB-<time>`. The NVR saves one before every upgrade that changes the database. Configuration backups, if they are turned on, are in the `nvr-backups` volume and anywhere you copy them.
+
+   **Which copies are kept.** The newest three, and beside them the newest copy that is at least a day older than the newest of all, so damage that is found late does not leave only copies made after it. Every new copy is read through once when it is made. A copy that fails that check is renamed `nvr.sqlite3.damaged-copy-...`: it is never one to restore, it is kept (one at most) only because a salvage can use it, and no healthy copy is removed to make way for it. A file that already fails the start-up probe is not copied at all. If an upgrade fails and the container restarts, the later starts use the copy the first one made; they do not make another.
 
 3. **Copy the whole folder somewhere safe before anything else is tried.** Use a folder with enough free space (each copy of a large database is as big as the database).
    ```

@@ -85,6 +85,74 @@ def _probe(db: sqlite3.Connection) -> list[str]:
     return []
 
 
+# --- the patrol: lost pages noticed within minutes (#455) ---------------------------------------------------------------------------------
+#
+# Twice the virtual disk under the reporting site returned 4 KiB of zeros where a page of the most rewritten tables had been. The light
+# probe cannot see that and the full check runs once a night, so the damage was found by whatever read the page next. Every few minutes the
+# background worker now checks the structure of the hot tables, and then of as many of the others, in turn, as fit in a few seconds, so
+# the whole file is gone over many times a day. It only reads: a table's check holds a read snapshot for as long as it runs.
+
+HOT_TABLES = ("cameras", "coverage_intervals")  # Rewritten all day: where pages were lost both times
+PATROL_SECONDS = 300.0  # Between passes
+PATROL_BUDGET_SECONDS = 3.0  # Once the hot tables are done, further tables are started only while the pass has taken less than this
+PATROL_TABLE_SECONDS = 20.0  # One table's check is given up after this (the nightly check still reads it all)
+_PROGRESS_STEPS = 50_000
+
+
+class Patrol:
+    def __init__(self) -> None:
+        self._next = 0  # Where the round of the other tables continues
+        self._last = float("-inf")
+
+    def due(self, now: float | None = None) -> bool:
+        return (time.monotonic() if now is None else now) - self._last >= PATROL_SECONDS
+
+    def run(self, path: Path | str | None = None) -> Outcome:
+        """Check the hot tables and the next few others. ``Outcome.lines`` holds what was found, each line starting with its table."""
+        started = time.monotonic()
+        self._last = started
+        lines: list[str] = []
+        try:
+            db = _open(path)
+            try:
+                names = [row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").fetchall()]
+                hot = [name for name in HOT_TABLES if name in names]
+                others = [name for name in names if name not in hot]
+                for name in hot:
+                    lines += self._table(db, name)
+                for done in range(len(others)):
+                    if lines or (done and time.monotonic() - started >= PATROL_BUDGET_SECONDS):
+                        break  # At least one a pass, so the round always moves on
+                    self._next %= len(others)
+                    lines += self._table(db, others[self._next])
+                    self._next += 1
+            finally:
+                db.close()
+        except sqlite3.DatabaseError as exc:
+            if not is_damage(exc):
+                raise
+            lines.append(str(exc))
+        return Outcome(ok=not lines, full=False, seconds=round(time.monotonic() - started, 2), lines=lines[:_LINES_SHOWN])
+
+    @staticmethod
+    def _table(db: sqlite3.Connection, name: str) -> list[str]:
+        deadline = time.monotonic() + PATROL_TABLE_SECONDS
+        db.set_progress_handler(lambda: time.monotonic() > deadline, _PROGRESS_STEPS)
+        try:
+            found = [str(row[0]) for row in db.execute(f'PRAGMA quick_check("{name}")').fetchall()]
+        except sqlite3.OperationalError as exc:
+            if "interrupt" in str(exc).lower():
+                return []  # Too large for a pass: left to the nightly check
+            raise
+        except sqlite3.DatabaseError as exc:
+            if not is_damage(exc):
+                raise
+            return [f"{name}: {exc}"]
+        finally:
+            db.set_progress_handler(None, 0)
+        return [] if found == ["ok"] else [f"{name}: {' '.join(line.split())}" for line in found]
+
+
 def log_at_startup() -> bool:
     """One clear line in the log when the file is damaged, instead of a traceback from every worker. Returns True when the file is fine."""
     try:
