@@ -419,7 +419,11 @@ class ReviewTests(RedactionCase):
         stopped, used, old = self.review(), self.analysed(), self.analysed(self.review())
         with connect() as db:
             db.execute("UPDATE redaction_reviews SET state='analysing' WHERE id=?", (stopped["id"],))
-            db.execute("INSERT INTO exports(id,camera_ids_json,requested_start,requested_end,status,created_at,updated_at) VALUES('live',?,?,?,'running','x','x')", (json.dumps([self.camera]), START, END))
+            # A running export that showed life just now. Its times must be real ones: the export worker this test's application runs looks
+            # every two seconds for a running export nobody is rendering, and calls one silent for a minute abandoned, an unreadable time
+            # counting as silent. With 'x' here it was failed whenever that look came before the expiry below, and the review went with it.
+            now = datetime.now(timezone.utc).isoformat()
+            db.execute("INSERT INTO exports(id,camera_ids_json,requested_start,requested_end,status,created_at,updated_at) VALUES('live',?,?,?,'running',?,?)", (json.dumps([self.camera]), START, END, now, now))
             db.execute("UPDATE redaction_reviews SET state='used',export_id='live' WHERE id=?", (used["id"],))
         redaction.recover()
         failed = self.client.get(f"/api/redaction/reviews/{stopped['id']}").json()
