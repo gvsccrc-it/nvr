@@ -56,6 +56,8 @@ RUN apt-get update \
 COPY --chown=nvr:nvr app ./app
 COPY --from=web --chown=nvr:nvr /app/web_dist ./app/web_dist
 COPY --chown=nvr:nvr scripts ./scripts
+# The licence statement and the third-party notices (#552): FFmpeg (GPL as Debian builds it) and each model, with its licence and source
+COPY LICENSE THIRD_PARTY_NOTICES.md ./
 # The commit this image was built from (CI passes it): the Updates page names the exact image to go back to by it (#540).
 # Set last, so a new commit does not rebuild the layers above.
 ARG NVR_BUILD_COMMIT=""
