@@ -64,6 +64,36 @@ class ColdSourcesTests(HeadroomCase):
         self.assertEqual(self.fetched, [(path, True) for path in self.paths])
         self.assertEqual(len(acquired), 2)
 
+    def test_no_cold_file_is_looked_for_again_while_the_lock_is_held(self):
+        # Finding a cold file takes two database connections; for 5,000 segments that held the lock for 18 s, longer than any writer waits (#506).
+        from app import tiering
+
+        real = tiering.cold_path
+        looked: list[bool] = []
+
+        def noting(relative_path):
+            looked.append(self.can_write())
+            return real(relative_path)
+
+        cold = self.root.parent / "cold"
+        with connect() as db:  # The footage has really moved: its files are on a local tier and no longer on the hot disk
+            db.execute("INSERT INTO cold_tiers(id,name,kind,local_path) VALUES('cold-1','Cold','local',?)", (str(cold),))
+        for path in self.paths:
+            (cold / path).parent.mkdir(parents=True, exist_ok=True)
+            (self.root / path).rename(cold / path)
+        job = exports._claim_export("job-1")
+        acquired: list[Path] = []
+        with patch.object(tiering, "cold_path", noting):
+            try:
+                per_camera, total = exports._reserve_sources(job, acquired)
+            finally:
+                for path in acquired:
+                    release_playback(path)
+        self.assertEqual(total, 2)
+        self.assertEqual(looked, [True, True])  # Once each, before the lock
+        self.assertEqual(acquired, [(cold / path).resolve() for path in self.paths])  # The cold files are the ones leased
+        self.assertNotIn("tier_id", per_camera[0]["segments"][0])
+
     def test_only_footage_that_has_moved_is_fetched_ahead(self):
         with connect() as db:
             db.execute("UPDATE recording_segments SET tier_id=NULL,tier_key=NULL,tier_sha256=NULL WHERE id=?", (self.segments[0],))

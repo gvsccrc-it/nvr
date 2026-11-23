@@ -301,18 +301,46 @@ def _covered_seconds(segments: list[sqlite3.Row], start: datetime, end: datetime
     return total
 
 
-def add_clip(db: sqlite3.Connection, row: sqlite3.Row, user: Any, camera_id: str, start: datetime, end: datetime, label: str = "") -> str:
-    """A camera and a time range of recorded footage, which is held for as long as the case is open and the clip stays in it."""
-    _open_case(row)
-    _room(db, row["id"])
-    camera = _camera(db, user, camera_id)
+def _check_clip_range(start: datetime, end: datetime) -> None:
     if start.tzinfo is None or end.tzinfo is None or end <= start:
         raise CaseError("A clip needs a start and an end with a time zone, the end after the start")
     if end - start > MAX_CLIP:
         raise CaseError("A clip is at most 24 hours; add several for a longer stretch")
     if end > _now() + timedelta(seconds=5):
         raise CaseError("A clip must be of footage already recorded")
-    segments = _available_segments(db, camera_id, start, end)
+
+
+def clip_footage(db: sqlite3.Connection, user: Any, camera_id: str, start: datetime, end: datetime) -> list[sqlite3.Row] | None:
+    """The segments of a clip about to be added whose file is there, found before the caller takes the write lock (#506).
+
+    A day of footage is 1,440 files to look for, and one that has moved to a cold tier costs two database connections: done under the lock, no
+    other process could write for seconds or minutes. None when the clip will be refused anyway (a camera this person may not see, a range that
+    is not allowed), so that ``add_clip`` refuses it with the usual answer and nothing is looked for."""
+    try:
+        _check_clip_range(start, end)
+    except CaseError:
+        return None
+    if not user.access.can_see(camera_id):
+        return None
+    return _available_segments(db, camera_id, start, end)
+
+
+def add_clip(db: sqlite3.Connection, row: sqlite3.Row, user: Any, camera_id: str, start: datetime, end: datetime, label: str = "",
+             found: list[sqlite3.Row] | None = None) -> str:
+    """A camera and a time range of recorded footage, which is held for as long as the case is open and the clip stays in it.
+
+    ``found`` is ``clip_footage``'s answer, worked out before the write lock was taken; of it, only segments still in the index are held."""
+    _open_case(row)
+    _room(db, row["id"])
+    camera = _camera(db, user, camera_id)
+    _check_clip_range(start, end)
+    if found is None:
+        segments = _available_segments(db, camera_id, start, end)
+    else:
+        found_ids = {segment["id"] for segment in found}
+        segments = [segment for segment in db.execute(
+            "SELECT id,starts_at,ends_at,relative_path FROM recording_segments WHERE camera_id=? AND starts_at<? AND ends_at>? AND unavailable_at IS NULL ORDER BY starts_at",
+            (camera_id, _iso(end), _iso(start))) if segment["id"] in found_ids]
     if not segments:
         raise CaseError("No recorded footage is available in that range")
     covered = _covered_seconds(segments, start, end)
@@ -408,9 +436,11 @@ def remove_item(db: sqlite3.Connection, row: sqlite3.Row, user: Any, item_id: st
     db.execute("UPDATE case_items SET removed_at=?,removed_by=? WHERE id=?", (_iso(_now()), int(user["id"]), item_id))
     released = 0
     if item["kind"] == "clip":
-        needed: set[int] = set()
-        for clip in db.execute("SELECT * FROM case_items WHERE case_id=? AND kind='clip' AND removed_at IS NULL", (row["id"],)):
-            needed |= {segment["id"] for segment in _available_segments(db, clip["camera_id"], _parse(clip["starts_at"]), _parse(clip["ends_at"]))}
+        # The holds the remaining clips need, from the index alone (#506): which segments overlap them. Looking for each segment's file here
+        # held the write lock for as long as thousands of file checks took; a segment whose file has gone keeps its hold until the case lets go.
+        needed = {segment_id for (segment_id,) in db.execute(
+            "SELECT s.id FROM case_items c JOIN recording_segments s ON s.camera_id=c.camera_id AND s.starts_at<c.ends_at AND s.ends_at>c.starts_at "
+            "AND s.unavailable_at IS NULL WHERE c.case_id=? AND c.kind='clip' AND c.removed_at IS NULL", (row["id"],))}
         released = release_holds(db, row["id"], int(user["id"]), keep=needed)
     audit(db, row["id"], int(user["id"]), "item_removed", item=item_id, kind=item["kind"], holds_released=released)
 

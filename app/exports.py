@@ -798,7 +798,7 @@ def _reserve_sources(job: "_ExportJob", acquired: list[Path]) -> tuple[list[dict
     audio_camera_id = job.audio_camera_id
     start = job.start
     end = job.end
-    fetch_cold_sources(camera_ids, start, end)  # Downloads happen here, before the lock (#358)
+    cold = fetch_cold_sources(camera_ids, start, end)  # Downloads happen here, before the lock (#358), and where each file is found (#506)
     with connect() as db:
         # Retention also takes this write lock before unlinking a segment.
         # Keep it until the in-memory lease is installed for every source.
@@ -811,7 +811,7 @@ def _reserve_sources(job: "_ExportJob", acquired: list[Path]) -> tuple[list[dict
             if camera is None:
                 raise RuntimeError("A selected camera was removed before export started")
             segments = _contiguous_segments([dict(item) for item in db.execute(
-                "SELECT id,relative_path,starts_at,ends_at,size_bytes FROM recording_segments "
+                "SELECT id,relative_path,starts_at,ends_at,size_bytes,tier_id FROM recording_segments "
                 "WHERE camera_id=? AND starts_at<? AND ends_at>? AND unavailable_at IS NULL ORDER BY starts_at",
                 (camera_id, end.isoformat(), start.isoformat()),
             ).fetchall()])
@@ -841,7 +841,9 @@ def _reserve_sources(job: "_ExportJob", acquired: list[Path]) -> tuple[list[dict
                 raise RuntimeError("Audio export requires at least one administrator-enabled camera audio source")
         for camera in per_camera:
             for segment in camera["segments"]:
-                path = recording_file_path(segment["relative_path"])
+                # A cold segment is read from where it was found before the lock; one that moved since is looked for again here.
+                path = cold.get(segment["relative_path"]) if segment.pop("tier_id") is not None else None
+                path = path or recording_file_path(segment["relative_path"])
                 if not path.is_file():
                     raise RuntimeError("A source recording is unavailable; no partial export was produced")
                 acquire_playback(path)

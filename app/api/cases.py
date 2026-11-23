@@ -141,6 +141,9 @@ def remove_member(case_id: str, user_id: int, user: CurrentUser) -> dict[str, ob
 @requires_scope("export")
 def add_item(case_id: str, payload: ItemAdd, user: CurrentUser) -> dict[str, object]:
     with connect() as db:
+        found = None
+        if payload.kind == "clip" and payload.camera_id and payload.start is not None and payload.end is not None and cases.find(db, case_id, user) is not None:
+            found = cases.clip_footage(db, user, payload.camera_id, payload.start, payload.end)  # Before the lock: one look for each file (#506)
         db.execute("BEGIN IMMEDIATE")
         row = _open(db, case_id, user)
 
@@ -148,7 +151,7 @@ def add_item(case_id: str, payload: ItemAdd, user: CurrentUser) -> dict[str, obj
             if payload.kind == "clip":
                 if not payload.camera_id or payload.start is None or payload.end is None:
                     raise cases.CaseError("A clip needs a camera, a start and an end")
-                return cases.add_clip(db, row, user, payload.camera_id, payload.start, payload.end, payload.text)
+                return cases.add_clip(db, row, user, payload.camera_id, payload.start, payload.end, payload.text, found=found)
             if payload.kind == "mark":
                 if not payload.camera_id or payload.at is None:
                     raise cases.CaseError("A mark needs a camera and a time")
