@@ -41,11 +41,16 @@ def live_counts() -> tuple[int, int]:
 
 
 def transcode_counts(hub: LiveHub | None = None) -> tuple[int, int]:
-    """Conversions of H.265 to H.264 with viewers, and the viewers they serve. Given the hub, the first number is every conversion
+    """Re-encodes (H.265 conversions and masked streams, #488) with viewers, and the viewers they serve. Given the hub, the first number is every conversion
     running, including one that is closing because its last viewer has just left."""
     with _live_view_lock:
         watched, viewers = set(_transcodes), sum(_transcodes.values())
     return len(watched | {stream.key for stream in hub.conversions()} if hub is not None else watched), viewers
+
+
+def _converts(variant: Any) -> bool:
+    """Whether a live stream is re-encoded here: an H.265 conversion, or the NVR's privacy mask drawn in."""
+    return bool(variant.transcode or variant.video_filter)
 
 
 def _count_transcode(key: tuple[str, ...], limit: int) -> bool:
@@ -435,9 +440,11 @@ async def _take_places(camera_id: str, variant: Any, conversion_key: tuple[str, 
     either is refused."""
     if not _acquire_live_view(camera_id):
         return _Refusal(CLOSE_BUSY, {"type": "busy", "detail": "All live-view slots are in use; close another view and retry"})
-    if variant.transcode and not await _acquire_transcode(conversion_key, hub):
+    # A masked stream is re-encoded as an H.265 conversion is, and shares its limit (#488). At the limit the viewer is refused: a masked camera
+    # is never shown unmasked to get round it.
+    if _converts(variant) and not await _acquire_transcode(conversion_key, hub):
         _release_live_view(camera_id)
-        return _Refusal(CLOSE_BUSY, {"type": "busy", "detail": "All video conversion slots are in use; close another converted view and retry"})
+        return _Refusal(CLOSE_BUSY, {"type": "busy", "detail": "All video conversion slots are in use; close another converted or masked view and retry"})
     return None
 
 
@@ -633,7 +640,7 @@ async def live_stream(
     stream = hub.join(conversion_key, source, variant.include_audio, viewer, mark_fresh, variant.video_filter, variant.transcode, variant.hevc_copy)
     wait: dict[str, object] = {"camera_id": camera_id, "at": datetime.now(timezone.utc).isoformat(), "profile": variant.profile, "mode": variant.mode,
                                "joined_running": joined_running}
-    session = _LiveViewer(websocket, camera_id, hub, stream, viewer, conversion_key if variant.transcode else None, listening, variant.include_audio,
+    session = _LiveViewer(websocket, camera_id, hub, stream, viewer, conversion_key if _converts(variant) else None, listening, variant.include_audio,
                           asyncio.create_task(websocket.receive()))
     watching = viewing_audit.LiveSession(principal.id, camera_id, quality)
     try:

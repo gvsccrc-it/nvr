@@ -284,9 +284,10 @@ class LiveStream:
         self.viewers.discard(viewer)
         self._waiting.discard(viewer)
         if not self.viewers and self.linger is None:
-            # A conversion from H.265 is a full decode and re-encode: it is never kept for the next viewer, whatever "keep live video ready"
-            # says, or someone clicking through H.265 cameras leaves one running for ten minutes behind each (#344).
-            seconds = LINGER_SECONDS if self.transcode or self.linger_seconds is None else self.linger_seconds
+            # A conversion from H.265, or a stream with the NVR's privacy mask drawn in, is a full decode and re-encode: it is never kept for
+            # the next viewer, whatever "keep live video ready" says, or someone clicking through such cameras leaves one running for ten
+            # minutes behind each (#344, #488). A stream that is only copied keeps the longer linger.
+            seconds = LINGER_SECONDS if self.converts or self.linger_seconds is None else self.linger_seconds
             self.linger = asyncio.get_running_loop().call_later(seconds, on_idle)
 
     def _broadcast(self, item: object, keyframe: bool = False) -> None:
@@ -474,8 +475,9 @@ class LiveHub:
         stream.remove(viewer, close_if_idle)
 
     def conversions(self) -> list[LiveStream]:
-        """The H.265 conversions running now, including one whose last viewer has just left and that has not closed yet."""
-        return [stream for stream in self.streams.values() if stream.transcode and not stream.failed]
+        """The re-encodes running now (H.265 conversions and masked streams, #488), including one whose last viewer has just left and that
+        has not closed yet."""
+        return [stream for stream in self.streams.values() if stream.converts and not stream.failed]
 
     async def evict(self, stream: LiveStream) -> None:
         """Close a stream nobody is watching now, without waiting for it to close itself."""
@@ -496,7 +498,7 @@ class LiveHub:
 
     def snapshot(self) -> list[dict[str, object]]:
         return [{"key": list(stream.key), "viewers": sum(1 for viewer in stream.viewers if not isinstance(viewer, SinkViewer)), "held_ready": any(isinstance(viewer, SinkViewer) for viewer in stream.viewers), "camera_connections": stream.connections,
-                 "ready": stream.init is not None, "failed": stream.failed, "transcoded": stream.transcode,
+                 "ready": stream.init is not None, "failed": stream.failed, "transcoded": stream.transcode, "masked": stream.video_filter is not None,
                  "accelerated": stream.accelerated} for stream in self.streams.values()]
 
 

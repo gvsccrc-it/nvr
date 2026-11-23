@@ -22,12 +22,17 @@ class DiagnosticCaptureRequest(BaseModel):
 
 
 def _live(request: Request) -> dict[str, int]:
-    """Live video being served from this process: streams and viewers, and the H.265 conversions running (one that is closing after
-    its last viewer left still uses the processor, so it is counted)."""
+    """Live video being served from this process: streams and viewers, and the re-encodes running, H.265 conversions and masked streams
+    together, with how many of them are masked (#488). One that is closing after its last viewer left still uses the processor, so it is
+    counted."""
     from app.api.live_media import live_counts, transcode_counts
+    from app.viewing import MAX_LIVE_TRANSCODES
+    hub = getattr(request.app.state, "live_hub", None)
     viewers, listeners = live_counts()
-    conversions, converted = transcode_counts(getattr(request.app.state, "live_hub", None))
-    return {"viewers": viewers, "audio_listeners": listeners, "conversions": conversions, "converted_viewers": converted}
+    conversions, converted = transcode_counts(hub)
+    masked = sum(1 for stream in hub.conversions() if stream.video_filter is not None) if hub is not None else 0
+    return {"viewers": viewers, "audio_listeners": listeners, "conversions": conversions, "masked_conversions": masked, "conversion_limit": MAX_LIVE_TRANSCODES,
+            "converted_viewers": converted}
 
 
 @router.get("/api/system/status")

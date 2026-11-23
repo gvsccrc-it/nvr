@@ -57,8 +57,10 @@ def wanted(db: sqlite3.Connection) -> list[tuple[tuple[str, ...], dict[str, Any]
                              "WHERE archived_at IS NULL AND enabled=1 ORDER BY name,id"):
         try:
             variant = live_variant.choose(camera, privacy.server_zones(db, camera["id"]), "low", False)
-            if variant.transcode or not variant.playable_directly:
-                continue  # Converting H.265 for every viewer is real work; a camera the browser cannot play directly has no stream to hold
+            if variant.transcode or variant.video_filter or not variant.playable_directly:
+                # Converting H.265 or drawing a privacy mask in is a full re-encode, never held for nobody (#488); a camera the browser cannot
+                # play directly has no stream to hold
+                continue
             source = decrypt(camera["live_substream_url_ciphertext"] if variant.profile == "sub" else camera["stream_url_ciphertext"])
             safe_stream_url(source)
         except Exception:  # noqa: BLE001 - one camera with a bad address must not stop the others being held
