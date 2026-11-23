@@ -38,15 +38,15 @@ RUN apt-get update \
     && echo '202b90f2a1f3a0d486b8f1fbd5cdc2f19f4f4881a094f086b983976ed3108aaf  /opt/nvr/models/plates/global_mobile_vit_v2_ocr_config.yaml' | sha256sum -c - \
     && echo '5f388f57ddec318d38d17e420d292f5a049595bec93f111838903f6617f6943f  /opt/nvr/models/plates/european_mobile_vit_v2_ocr.onnx' | sha256sum -c - \
     && echo '202b90f2a1f3a0d486b8f1fbd5cdc2f19f4f4881a094f086b983976ed3108aaf  /opt/nvr/models/plates/european_mobile_vit_v2_ocr_config.yaml' | sha256sum -c - \
-    # The pose model for fall detection (docs/fall-detection.md; app/pose_models.py): MediaPipe Pose Landmarker lite, Apache-2.0. Only the landmark model is unpacked from the bundle.
-    && curl -fsSL --retry 3 https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task -o /opt/nvr/models/pose/pose_landmarker_lite.task \
+    # The pose model for fall detection (docs/fall-detection.md; app/pose_models.py): MediaPipe Pose Landmarker lite, Apache-2.0, version 1 of the file (not "latest": #549). Only the landmark model is unpacked from the bundle.
+    && curl -fsSL --retry 3 https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task -o /opt/nvr/models/pose/pose_landmarker_lite.task \
     && echo '59929e1d1ee95287735ddd833b19cf4ac46d29bc7afddbbf6753c459690d574a  /opt/nvr/models/pose/pose_landmarker_lite.task' | sha256sum -c - \
     && python -c "import zipfile; open('/opt/nvr/models/pose/pose_landmarks_detector.tflite','wb').write(zipfile.ZipFile('/opt/nvr/models/pose/pose_landmarker_lite.task').read('pose_landmarks_detector.tflite'))" \
     && echo 'ad6cfd3c903eb31a4ee788b809e45ecf9fa69923b69b9f3f2d9ae616ff433e58  /opt/nvr/models/pose/pose_landmarks_detector.tflite' | sha256sum -c - \
     && rm /opt/nvr/models/pose/pose_landmarker_lite.task \
-    # The face models for the face watch (docs/face-watch.md; app/face_models.py): OpenCV Zoo's YuNet (MIT) and SFace (Apache-2.0), kept in step with that registry by a test.
-    && curl -fsSL --retry 3 https://media.githubusercontent.com/media/opencv/opencv_zoo/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx -o /opt/nvr/models/faces/face_detection_yunet_2023mar.onnx \
-    && curl -fsSL --retry 3 https://media.githubusercontent.com/media/opencv/opencv_zoo/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx -o /opt/nvr/models/faces/face_recognition_sface_2021dec.onnx \
+    # The face models for the face watch (docs/face-watch.md; app/face_models.py): OpenCV Zoo's YuNet (MIT) and SFace (Apache-2.0) at a fixed commit (not the main branch: #549), kept in step with that registry by a test.
+    && curl -fsSL --retry 3 https://media.githubusercontent.com/media/opencv/opencv_zoo/48b10fa505aeb51fbd127fc60a5c660040e823b7/models/face_detection_yunet/face_detection_yunet_2023mar.onnx -o /opt/nvr/models/faces/face_detection_yunet_2023mar.onnx \
+    && curl -fsSL --retry 3 https://media.githubusercontent.com/media/opencv/opencv_zoo/48b10fa505aeb51fbd127fc60a5c660040e823b7/models/face_recognition_sface/face_recognition_sface_2021dec.onnx -o /opt/nvr/models/faces/face_recognition_sface_2021dec.onnx \
     && echo '8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4  /opt/nvr/models/faces/face_detection_yunet_2023mar.onnx' | sha256sum -c - \
     && echo '0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79  /opt/nvr/models/faces/face_recognition_sface_2021dec.onnx' | sha256sum -c - \
     && groupadd --system --gid 10001 nvr \

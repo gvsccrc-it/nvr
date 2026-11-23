@@ -10,9 +10,12 @@ permissions:
   contents: read
 
 # A newer push to a pull request makes the older run pointless: stop it, so its runner-minutes are not spent on a commit nobody will merge.
-# Runs on main are never cancelled, so every merge is checked and published.
+# Every other run (a merge to main, a run started by hand) is a group of its own, so none waits for or cancels another and every merge is
+# checked and published. A shared group was not enough: GitHub keeps only one waiting run per group, so a third merge inside one run's
+# time cancelled the second, which was then never tested or published as sha-<commit> (#549). Runs on main can therefore overlap; the
+# publish job moves edge only for the commit that is still main's newest.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -37,11 +40,6 @@ jobs:
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 35
-    services:
-      mediamtx:
-        image: bluenviron/mediamtx:1.21.0
-        ports:
-          - 8554:8554
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
@@ -66,6 +64,9 @@ jobs:
         run: |
           npm ci --prefix web --no-audit --no-fund
           npm run build --prefix web
+      - name: Start the simulated camera's RTSP server
+        # .github/camera-simulator/compose.yaml: pinned by digest, and updated by Dependabot (#549)
+        run: docker compose -f .github/camera-simulator/compose.yaml up -d --wait
       - name: Start simulated RTSP camera
         run: |
           nohup ffmpeg -re -f lavfi -i testsrc=size=320x240:rate=10 -t 2100 -an \
@@ -113,11 +114,6 @@ jobs:
       fail-fast: false
       matrix:
         shard: [1, 2, 3, 4]
-    services:
-      mediamtx:
-        image: bluenviron/mediamtx:1.21.0
-        ports:
-          - 8554:8554
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
@@ -129,6 +125,9 @@ jobs:
         run: bash .github/scripts/install-ffmpeg.sh
       - name: Install Python dependencies
         run: python -m pip install -r requirements-dev.txt
+      - name: Start the simulated camera's RTSP server
+        # .github/camera-simulator/compose.yaml: pinned by digest, and updated by Dependabot (#549)
+        run: docker compose -f .github/camera-simulator/compose.yaml up -d --wait
       - name: Start simulated RTSP camera
         # The camera must outlive the shard's tests (about 10 minutes; the job stops at 30). It ends with the job.
         run: |
@@ -356,8 +355,17 @@ jobs:
 
       - name: Publish the tested image
         # edge, and sha-<commit> so a release can name exactly this image (release.yml retags it rather than building again).
+        # Runs on main can overlap (see "concurrency"): sha-<commit> is always published, and edge only while this commit is still main's
+        # newest, so a run that finishes after a later merge's never moves edge back to an older build.
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           short="$(echo "$GITHUB_SHA" | cut -c1-7)"
           docker tag ghcr.io/gvsccrc-it/nvr:edge "ghcr.io/gvsccrc-it/nvr:sha-$short"
-          docker push ghcr.io/gvsccrc-it/nvr:edge
           docker push "ghcr.io/gvsccrc-it/nvr:sha-$short"
+          newest="$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)"
+          if [ "$newest" = "$GITHUB_SHA" ]; then
+            docker push ghcr.io/gvsccrc-it/nvr:edge
+          else
+            echo "main has moved on to $newest: edge is left to that commit's run"
+          fi

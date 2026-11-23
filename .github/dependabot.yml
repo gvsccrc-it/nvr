@@ -46,6 +46,15 @@ updates:
       compose-images:
         patterns: ["*"]
         update-types: ["minor", "patch"]
+  # The simulated camera's RTSP server that CI runs (#549), pinned by digest like the rest.
+  - package-ecosystem: docker-compose
+    directory: /.github/camera-simulator
+    schedule:
+      interval: weekly
+    groups:
+      ci-images:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
   # The web interface's packages and the root test packages (Playwright), one pull request a week each.
   - package-ecosystem: npm
     directory: /web

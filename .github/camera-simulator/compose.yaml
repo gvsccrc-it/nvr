@@ -1,0 +1,7 @@
+# The simulated camera's RTSP server for CI (the unit tests and the browser journeys publish test streams to it). Pinned by digest like
+# every other image, and kept here, not as a workflow service, so Dependabot's docker-compose updates can propose new versions (#549).
+services:
+  mediamtx:
+    image: bluenviron/mediamtx:1.21.0@sha256:19fddade8d6110a3d718ac0045681fbeba344ae563a066205fe5929a87f7582f
+    ports:
+      - "8554:8554"

@@ -1,7 +1,5 @@
 .git
 .venv
-__pycache__
-*.py[cod]
 .pytest_cache
 .env
 recordings
@@ -11,3 +9,5 @@ app/web_dist
 test-results
 playwright-report
 deploy/wireguard
+**/__pycache__
+**/*.py[cod]
