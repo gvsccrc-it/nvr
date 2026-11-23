@@ -8,6 +8,8 @@ A self-hosted network video recorder for workplace cameras. This branch includes
 - A host with a persistent filesystem for the Compose volumes
 - Docker Engine with Linux host-network support and the Docker Compose plugin
 
+**Before you run it for real, go through the [production checklist](docs/production-checklist.md)**: closing the port to the camera network, HTTPS, the first administrator, a pinned image, backups, clocks, disks, memory, hardening, upgrades, sizing and monitoring, in one place.
+
 ## Start the stack
 
 The default stack uses the validated Linux host-network arrangement:
