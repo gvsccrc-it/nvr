@@ -263,6 +263,14 @@ class _MotionSourceWriter:
             await asyncio.gather(self.task, return_exceptions=True)
 
 
+def _camera_exists(camera_id: str) -> bool:
+    try:
+        with connect() as db:
+            return db.execute("SELECT 1 FROM cameras WHERE id=?", (camera_id,)).fetchone() is not None
+    except sqlite3.Error:
+        return True  # Not known: kept, and tried again as when the database cannot be written
+
+
 def newest_is_fresh(folder: Path, pattern: str, seconds: float = 10) -> bool:
     """Whether the most recently written file matching ``pattern`` was written within ``seconds``.
 
@@ -525,7 +533,10 @@ class RecordingManager:
             try:
                 with connect() as db:
                     rows = db.execute("SELECT id FROM cameras").fetchall()
-                await asyncio.gather(*(self.sync_camera(row["id"]) for row in rows))
+                # A recording whose camera's row has gone (deleted by another process, or by a standby's sync of the primary's cameras) is
+                # synced too, which stops it: otherwise it recorded for good, and its footage was indexed onto any later camera of that id.
+                gone = [camera_id for camera_id in self.tasks if camera_id not in {row["id"] for row in rows}]
+                await asyncio.gather(*(self.sync_camera(camera_id) for camera_id in [row["id"] for row in rows] + gone))
                 # Each camera's coverage check writes, and a write waits for the database's lock: in a thread, as the watch does.
                 await asyncio.to_thread(self._sync_all_coverage, [row["id"] for row in rows])
                 if self._unindexed:
@@ -1117,6 +1128,14 @@ class RecordingManager:
         try:
             self._index_csv(camera_id, list_path, output_dir, must_store=True)
         except sqlite3.Error as exc:
+            if isinstance(exc, sqlite3.IntegrityError) and not _camera_exists(camera_id):
+                # The camera was deleted: its footage has nowhere to go. Tried again for good, it was indexed onto the next camera given
+                # the same id. The files are left where they are.
+                logging.getLogger("nvr.recording").warning("The last segments of a recording were not indexed: its camera %s no longer exists (they stay in %s)",
+                                                           camera_id, output_dir)
+                self._indexed_lines.pop(list_path, None)
+                self._newest_segment.pop(output_dir, None)
+                return
             self._database_unavailable(camera_id, exc)
             self._unindexed.append((camera_id, list_path, output_dir))
             return
