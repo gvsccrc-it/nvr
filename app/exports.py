@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import IO, Any, Callable
 
-from . import acceleration, copies_budget, footage_chain, privacy, redaction, viewing_audit
+from . import acceleration, copies_budget, footage_chain, privacy, queue_turns, redaction, viewing_audit
 from . import dewarp as dewarp_geometry
 from .display_settings import format_display_datetime
 from .processes import end_process
@@ -38,7 +38,6 @@ def _silent_for(updated_at: str | None, now: datetime, seconds: float) -> bool:
         return updated_at is None or (now - clock_parse(updated_at)).total_seconds() >= seconds
     except (TypeError, ValueError):
         return True
-MAX_ACTIVE_EXPORTS = 4
 MAX_EXPORT_CAMERAS = 16
 MAX_EXPORT_WINDOW = timedelta(hours=24)
 MAX_EXPORT_SOURCE_BYTES = 100 * 1024**3
@@ -196,6 +195,26 @@ def _camera_video_filename(name: str, camera_id: str, index: int) -> str:
 
 class ExportCancelled(Exception):
     pass
+
+
+class ExportTimedOut(Exception):
+    def __init__(self, job_id: str) -> None:
+        hours = queue_turns.export_limits()["job_hours"]
+        super().__init__(f"The export ran for more than {hours} hour{'s' if hours != 1 else ''}, the most one export may take, and was stopped. "
+                         "Export a shorter range or fewer cameras.")
+
+
+def next_queued(served: dict[int, int], troubled: set[str] | frozenset[str] = frozenset()) -> tuple[str, int] | None:
+    """The queued job to run next: people are taken in turn, the one served longest ago (or never) first; one person's jobs oldest first (#504).
+
+    A job whose last run raised before it could be claimed or finished (the database busy, #357) stays queued; it goes behind that person's
+    other jobs, so one job that keeps failing never holds up the rest."""
+    with connect() as db:
+        rows = db.execute("SELECT id,requested_by FROM exports WHERE status='queued' ORDER BY created_at,rowid").fetchall()
+    if not rows:
+        return None
+    index = min(range(len(rows)), key=lambda at: (served.get(rows[at]["requested_by"], 0), rows[at]["id"] in troubled, at))
+    return rows[index]["id"], rows[index]["requested_by"]
 
 
 def recover_interrupted_exports() -> None:
@@ -803,7 +822,8 @@ def _claim_export(job_id: str) -> "_ExportJob | None":
         row = db.execute("SELECT * FROM exports WHERE id=? AND status='queued'", (job_id,)).fetchone()
         if row is None:
             return
-        claimed = db.execute("UPDATE exports SET status='running',progress=1,updated_at=? WHERE id=? AND status='queued'", (datetime.now(timezone.utc).isoformat(), job_id))
+        now = datetime.now(timezone.utc).isoformat()
+        claimed = db.execute("UPDATE exports SET status='running',progress=1,started_at=?,updated_at=? WHERE id=? AND status='queued'", (now, now, job_id))
         if claimed.rowcount != 1:
             return
         camera_ids = json.loads(row["camera_ids_json"])
@@ -1044,6 +1064,10 @@ class ExportManager:
         self._review_task: asyncio.Task[None] | None = None
         self._pending: set[str] = set()
         self._running: str | None = None
+        self._served: dict[int, int] = {}  # Each person's last turn: the next job is the person's served longest ago (#504)
+        self._turns = 0
+        self._timed_out: set[str] = set()
+        self._troubled: set[str] = set()  # Jobs whose last run raised: tried after the person's others (next_queued)
 
     async def start(self) -> None:
         max_open_sources()  # Raise this process's open-file limit now, before any export holds its sources open (#356)
@@ -1162,10 +1186,19 @@ class ExportManager:
         self._queue.put_nowait(job_id)
 
     async def cancel(self, job_id: str) -> None:
+        self._stop_job(job_id)
+
+    def _stop_job(self, job_id: str) -> None:
         self._cancelled.add(job_id)
         process = self._processes.get(job_id)
         if process and process.returncode is None:
             process.terminate()
+
+    def _time_up(self, job_id: str) -> None:
+        """The whole job has run for its limit: it is stopped as a cancel is, and recorded as failed with the reason, giving up its place."""
+        logging.getLogger(__name__).warning("Export %s passed its %d-hour limit and is being stopped", job_id, queue_turns.export_limits()["job_hours"])
+        self._timed_out.add(job_id)
+        self._stop_job(job_id)
 
     async def _run(self) -> None:
         while True:
@@ -1174,15 +1207,20 @@ class ExportManager:
             try:
                 if self._stopping:
                     return
-                with connect() as db:
-                    row = db.execute("SELECT status FROM exports WHERE id=?", (job_id,)).fetchone()
-                if not row or row["status"] != "queued":
+                # A nudge says that something is queued; which job runs is decided here, taking people in turn (#504).
+                chosen = await asyncio.to_thread(next_queued, dict(self._served), set(self._troubled))
+                if chosen is None:
                     continue
+                job_id, person = chosen
+                self._turns += 1
+                self._served[person] = self._turns
                 self._running = job_id
                 await self._execute(job_id)
+                self._troubled.discard(job_id)
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001 - one job's error (the database busy while it was claimed or finished) must not end the worker (#357)
+                self._troubled.add(job_id)
                 # A job still queued is picked up again by the poll; one left "running" with nothing running is failed by the poll.
                 logging.getLogger(__name__).exception("Export %s could not be run or finished; the export worker carries on", job_id)
             finally:
@@ -1195,6 +1233,7 @@ class ExportManager:
         if job is None:
             return
         acquired: list[Path] = []
+        limit = asyncio.get_running_loop().call_later(queue_turns.export_limits()["job_hours"] * 3600, self._time_up, job_id)
         try:
             if job_id in self._cancelled:
                 raise ExportCancelled()
@@ -1222,16 +1261,24 @@ class ExportManager:
             # Hashing and copying up to 2 GiB into the zip, and hashing the result: in a thread. On the loop, the exporter's sign of life
             # stopped for as long as it took, and past 30 seconds the supervisor ended the exporter with the export at 85 to 99 percent (#359).
             await asyncio.to_thread(self._write_package, job, metadata, chain_path)
+            if job_id in self._cancelled:
+                raise ExportCancelled()
             await asyncio.to_thread(_record_completed, job, metadata, expires_at, total_segments)
         except ExportCancelled:
-            await asyncio.to_thread(_record_cancelled, job)
+            if job_id in self._timed_out:
+                await asyncio.to_thread(_record_failed, job, ExportTimedOut(job_id))
+            else:
+                await asyncio.to_thread(_record_cancelled, job)
         except asyncio.CancelledError:
             job.partial_path.unlink(missing_ok=True)
             job.final_path.unlink(missing_ok=True)
             raise
         except Exception as exc:
-            await asyncio.to_thread(_record_failed, job, exc)
+            # A job stopped at its time limit can end in an FFmpeg error rather than at a check: its reason is the limit.
+            await asyncio.to_thread(_record_failed, job, ExportTimedOut(job_id) if job_id in self._timed_out else exc)
         finally:
+            limit.cancel()
+            self._timed_out.discard(job_id)
             self._processes.pop(job_id, None)
             self._cancelled.discard(job_id)
             for path in acquired:
@@ -1607,12 +1654,50 @@ def _dewarp_plan(db: sqlite3.Connection, dewarp: dict[str, dict[str, Any]] | Non
     return plan
 
 
+_TYPICAL_EXPORT = "SELECT started_at,completed_at FROM exports WHERE status='completed' AND started_at IS NOT NULL ORDER BY completed_at DESC LIMIT ?"
+
+
+def _check_queue(db: sqlite3.Connection, requested_by: int, case_package: bool) -> None:
+    """Refuse a job the queue has no place for, saying how many are ahead and roughly how long (#504).
+
+    The queue holds ``places`` jobs, queued or running; one of them only a case package's clips may take, so exports cannot starve a package.
+    One person may have ``each`` of them (an administrator ``each_administrator``), a case package's clips included."""
+    limits = queue_turns.export_limits()
+    role = db.execute("SELECT role FROM users WHERE id=?", (requested_by,)).fetchone()
+    administrator = role is not None and role[0] == "administrator"
+    share = limits["each_administrator"] if administrator else limits["each"]
+    places = limits["places"] if case_package else limits["places"] - limits["kept_for_case_packages"]
+    active = db.execute("SELECT id,requested_by,status,started_at FROM exports WHERE status IN ('queued','running') ORDER BY created_at,rowid").fetchall()
+    mine = [row for row in active if row["requested_by"] == requested_by]
+    if len(mine) < share and len(active) < places:
+        return
+    now = datetime.now(timezone.utc)
+    typical = queue_turns.typical_seconds(db, _TYPICAL_EXPORT)
+    running = next((row for row in active if row["status"] == "running"), None)
+    running_left = queue_turns.remaining(running["started_at"], typical, now) if running else 0.0
+    if len(mine) >= share:
+        first = mine[0]
+        if first["status"] == "running":
+            wait = queue_turns.remaining(first["started_at"], typical, now)
+            ahead = 0
+        else:
+            ahead = sum(1 for row in active[:active.index(first)] if row["status"] == "queued")
+            wait = running_left + ahead * typical + typical
+        who = "an administrator" if administrator else "one person"
+        raise queue_turns.QueueFull(
+            f"You have {len(mine)} exports queued or running, the most {who} may have at once. Your first should finish in {queue_turns.about(wait)}"
+            + (f", with {queue_turns.jobs(ahead)} ahead of it." if ahead else "."), wait)
+    frees = running_left or typical
+    raise queue_turns.QueueFull(f"The export queue is full: {queue_turns.jobs(len(active))} queued or running. A place usually frees in {queue_turns.about(frees)}.", frees)
+
+
 def create_export_record(
     requested_by: int, camera_ids: list[str], start: datetime, end: datetime,
     output_modes: list[str] | None = None,
     tile_camera_ids: list[str | None] | None = None, grid_resolution: str = "1080p",
     include_audio: bool = False, audio_camera_id: str | None = None, retry_of: str | None = None,
     redaction_review_id: str | None = None, dewarp: dict[str, dict[str, Any]] | None = None, dewarp_lenses: dict[str, dict[str, Any]] | None = None,
+    case_package: bool = False,
 ) -> str:
     output_modes, tile_camera_ids = _checked_request(camera_ids, output_modes, tile_camera_ids, grid_resolution, include_audio, audio_camera_id)
     # Refused up front, with the reason, when exports and case packages already fill their share of the disk (#362).
@@ -1621,9 +1706,7 @@ def create_export_record(
     now = datetime.now(timezone.utc).isoformat()
     with connect() as db:
         db.execute("BEGIN IMMEDIATE")
-        active = db.execute("SELECT COUNT(*) FROM exports WHERE status IN ('queued','running')").fetchone()[0]
-        if active >= MAX_ACTIVE_EXPORTS:
-            raise OverflowError("The export queue is full; wait for an existing job to finish")
+        _check_queue(db, requested_by, case_package)
         _check_cameras_and_audio(db, camera_ids, output_modes, include_audio, audio_camera_id)
         segments = _export_segments(db, camera_ids, start, end)
         dewarp_plan = _dewarp_plan(db, dewarp, dewarp_lenses)

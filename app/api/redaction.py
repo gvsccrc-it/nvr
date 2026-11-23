@@ -78,7 +78,7 @@ def create_review(payload: ReviewRequest, request: Request, user: CurrentUser) -
     except LookupError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except OverflowError as exc:
-        raise HTTPException(status_code=429, detail=str(exc)) from exc
+        raise HTTPException(status_code=429, detail=str(exc), headers={"Retry-After": str(getattr(exc, "retry_after", 60))}) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return redaction.view(redaction.get_review(review_id, int(user["id"])))

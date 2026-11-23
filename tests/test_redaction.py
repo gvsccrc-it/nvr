@@ -339,8 +339,10 @@ class ReviewTests(RedactionCase):
         self.assertEqual(post(start=END, end=START).status_code, 422)
         self.assertEqual(post(start="2026-10-20T10:00:00", end="2026-10-20T10:00:03").status_code, 422)
         self.assertEqual(self.post_status(post(), 202), 202)
-        self.assertEqual(self.post_status(post(), 202), 202)
-        self.assertEqual(post().status_code, 429)  # Two are waiting for the analysis already
+        refused = post()
+        self.assertEqual(refused.status_code, 429)  # One review for each person at a time (#504; two in all is in tests/test_export_queue_turns.py)
+        self.assertIn("still being prepared", refused.json()["detail"])
+        self.assertGreater(int(refused.headers["Retry-After"]), 0)
 
     def post_status(self, response, expected):
         self.assertEqual(response.status_code, expected, response.text)
@@ -416,7 +418,8 @@ class ReviewTests(RedactionCase):
         self.assertEqual([(row["username"], row["kind"]) for row in viewed], [("reviewer", "export")])
 
     def test_a_review_the_application_stopped_in_the_middle_of_is_failed_and_old_unused_ones_are_forgotten(self):
-        stopped, used, old = self.review(), self.analysed(), self.analysed(self.review())
+        used, old = self.analysed(), self.analysed(self.review())
+        stopped = self.review()  # Last: one person has one review queued or being prepared at a time (#504)
         with connect() as db:
             db.execute("UPDATE redaction_reviews SET state='analysing' WHERE id=?", (stopped["id"],))
             # A running export that showed life just now. Its times must be real ones: the export worker this test's application runs looks

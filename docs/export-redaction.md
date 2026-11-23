@@ -17,6 +17,7 @@ Changing the cameras, the range or the kinds after starting a review makes it st
 - A manual region that **follows a track** uses that track's boxes (scaled by a factor between a quarter and four) even when the track itself is kept, which is how to blur a badge on a subject who stays visible. A region **by position** moves in a straight line between its keyframes.
 - Redaction applies to the **individual camera files**. A redacted export cannot include the synchronized grid (the request is refused), and audio, if asked for, is the camera's own.
 - A review covers at most two hours of footage in total (for example four cameras for thirty minutes), and an administrator's or operator's review is limited to the cameras they may see, exactly as an export is.
+- Reviews take their turn (#504): **one** for each person and **two** in all may be queued or being prepared at once, and preparing one may take up to **two hours**, after which it fails with the reason and gives its place back. A request with no place is refused with `429`, a `Retry-After` header and roughly how long the wait is. The numbers can be changed with `NVR_REDACTION_REVIEWS_PER_PERSON` (1), `NVR_REDACTION_REVIEW_PLACES` (2) and `NVR_REDACTION_REVIEW_HOURS` (2).
 
 ## The package
 

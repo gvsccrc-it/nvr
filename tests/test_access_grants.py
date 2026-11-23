@@ -325,6 +325,7 @@ class RouteTests(GrantCase):
         ("POST", "/api/me/security/password"), ("POST", "/api/me/security/password/passkey-options"), ("GET", "/api/push/preferences"),
         ("PUT", "/api/push/preferences"), ("GET", "/api/push/public-key"), ("POST", "/api/push/subscriptions"), ("POST", "/api/push/subscriptions/remove"),
         ("GET", "/api/settings/display"), ("GET", "/api/redaction/models"), ("GET", "/api/failover/status"),
+        ("GET", "/api/exports/limits"),  # The queue's limits and how many of the person's own exports are in it (#504)
         # The native app's own phone: its push token and device sessions
         ("POST", "/api/native/devices"), ("POST", "/api/native/devices/remove"), ("GET", "/api/native/device-sessions"), ("POST", "/api/native/device-sessions"),
         ("POST", "/api/native/device-sessions/revoke"), ("DELETE", "/api/native/device-sessions/{session_id}"),

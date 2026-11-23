@@ -27,7 +27,7 @@ Notes are only added. What was written, by whom and when stays as it was; to cor
 
 ## The evidence package
 
-**Build evidence package** makes one ZIP of the clips the person may see. It is built in the background by the exporter: one export is made for each clip (as the export queue has room), and when all are done the case's file is written. It contains:
+**Build evidence package** makes one ZIP of the clips the person may see. It is built in the background by the exporter: one export is made for each clip (as the export queue has room: one of its places is kept for case packages, and a package's clips count towards its requester's share of the queue, so they go in two at a time; see [Evidence packages](evidence-packages.md)), and when all are done the case's file is written. It contains:
 
 - `clips/NN-<export id>.zip`: the export's own evidence package, with its manifest and signed chain extract;
 - `case.json` (the case, its members and items, which file holds each clip, and how much of each clip's range is recorded now), `notes.json`, `notes.md`, `audit.json` (the audit up to that moment), `metadata.json`;

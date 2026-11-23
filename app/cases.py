@@ -544,9 +544,10 @@ def _advance(db: sqlite3.Connection, package: sqlite3.Row, create_export_record:
     for clip in rows:
         if clip["export_id"] is None:
             try:
-                export_id = create_export_record(int(package["requested_by"]), [clip["camera_id"]], _parse(clip["starts_at"]), _parse(clip["ends_at"]), ["individual"])
+                export_id = create_export_record(int(package["requested_by"]), [clip["camera_id"]], _parse(clip["starts_at"]), _parse(clip["ends_at"]), ["individual"],
+                                                 case_package=True)
             except OverflowError:
-                return  # The export queue is full: the next poll tries again
+                return  # No place in the export queue, or the person's share is used: the next poll tries again (#504)
             except (LookupError, ValueError) as exc:
                 _fail(db, package, f"A clip could not be exported: {exc}")
                 return

@@ -465,8 +465,9 @@ class PackageCase(CaseCase):
 
     def build(self, case: str, client=None) -> tuple[str, bytes]:
         package = self.package(case, client)
-        cases.advance_packages()
-        self.finish_exports()
+        for _ in range(5):  # A person's package has two clips in the export queue at a time, their share of it (#504)
+            cases.advance_packages()
+            self.finish_exports()
         cases.advance_packages()
         status = (client or self.full).get(f"/api/cases/{case}/packages/{package}").json()
         self.assertEqual(status["status"], "ready", status)

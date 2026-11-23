@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { ApiError } from "@/api/client";
-import { useCameras, useCancelExport, useDisplaySettings, useExportJobs, useRetryExport } from "@/api/queries";
-import type { ExportJob } from "@/api/types";
+import { useCameras, useCancelExport, useDisplaySettings, useExportJobs, useExportLimits, useRetryExport } from "@/api/queries";
+import type { ExportJob, ExportLimits } from "@/api/types";
 import { formatRelative } from "@/lib/time";
 import { formatSiteDateTime } from "@/lib/zonedTime";
 
@@ -18,12 +18,25 @@ function describe(job: ExportJob): string {
   }
 }
 
+/** What the queue allows, so a refusal is no surprise (#504). */
+function QueueLimits({ limits }: { limits: ExportLimits | undefined }) {
+  if (!limits) return null;
+  return (
+    <p className="muted export-limits">
+      You may have {limits.each} export{limits.each === 1 ? "" : "s"} queued or running at once ({limits.active} now). The queue holds{" "}
+      {limits.places} for everyone, one of them kept for case packages; exports take turns between people, and one may run for up to{" "}
+      {limits.job_hours} hour{limits.job_hours === 1 ? "" : "s"}.
+    </p>
+  );
+}
+
 /**
  * Every export job of this person (all jobs for administrators), newest first. Jobs live on
  * the server, so this list survives navigation, reloads and other sessions.
  */
 export function ExportJobs() {
   const jobs = useExportJobs();
+  const limits = useExportLimits();
   const cameras = useCameras();
   const display = useDisplaySettings();
   const cancel = useCancelExport();
@@ -40,9 +53,10 @@ export function ExportJobs() {
   const list = [...newest.filter(needsAttention), ...(allFinished ? finished : finished.slice(0, FINISHED_SHOWN))];
 
   if (jobs.isPending) return <p className="muted">Loading export jobs…</p>;
-  if (!list.length) return <p className="muted">No exports yet. Mark a range in Playback to export footage.</p>;
+  if (!list.length) return <><QueueLimits limits={limits.data} /><p className="muted">No exports yet. Mark a range in Playback to export footage.</p></>;
   return (
     <>
+      <QueueLimits limits={limits.data} />
       {failure ? <p className="notice" data-tone="bad" role="alert">{failure instanceof ApiError ? failure.detail : "The export could not be changed."}</p> : null}
       <ul className="status-list export-jobs" aria-label="Export jobs">
         {list.map(job => {

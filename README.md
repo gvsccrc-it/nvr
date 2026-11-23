@@ -64,6 +64,11 @@ The `nvr-data` volume stores the database and account/session state. `nvr-secret
 | `NVR_BACKUP_PASSPHRASE` | unset | Enables encrypted configuration backups (at least 16 characters) |
 | `NVR_BACKUP_PASSPHRASE_FILE` | unset | Path of a file holding the backup passphrase, used when `NVR_BACKUP_PASSPHRASE` is empty |
 | `NVR_BACKUP_KEEP` | `14` | Number of configuration backups kept |
+| `NVR_EXPORT_QUEUE_PLACES` | `8` | Exports queued or running at once for the whole NVR, one place kept for case packages ([evidence packages](docs/evidence-packages.md)) |
+| `NVR_EXPORTS_PER_PERSON` / `NVR_EXPORTS_PER_ADMINISTRATOR` | `2` / `4` | Exports one person may have queued or running at once |
+| `NVR_EXPORT_JOB_HOURS` | `6` | How long one whole export may run before it is stopped and fails |
+| `NVR_REDACTION_REVIEW_PLACES` / `NVR_REDACTION_REVIEWS_PER_PERSON` | `2` / `1` | Redaction reviews queued or being prepared at once, in all and for each person ([export redaction](docs/export-redaction.md)) |
+| `NVR_REDACTION_REVIEW_HOURS` | `2` | How long preparing one redaction review may take |
 | `NVR_VAPID_SUBJECT` | `NVR_PUBLIC_URL` when HTTPS | Contact given to push services that deliver alarm notifications (`mailto:` or `https://`) |
 | `NVR_PUSH_EXTRA_HOSTS` | none | Extra push-service hosts a device may subscribe with, besides the browsers' own (comma-separated) |
 | `NVR_UPDATE_CHECK` | `true` | `false` turns the release check off for the whole installation: no request is made at all ([guided updates](docs/guided-updates.md)) |

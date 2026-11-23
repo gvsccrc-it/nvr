@@ -23,7 +23,7 @@ from app import exports as export_rules
 from app.store import connect
 from app.retention import acquire_playback, release_playback
 from app import dewarp, footage_chain, viewing_audit
-from app import copies_budget
+from app import copies_budget, queue_turns
 from app.exports import create_export_record, export_output_path, get_export, list_exports, request_cancel, verify_evidence_file, _job_view, EXPORT_DIRECTORY, MAX_EXPORT_CAMERAS, MAX_EXPORT_WINDOW, MAX_VERIFY_PACKAGE_BYTES
 from app.recording import recordings_path
 from app.audit import record as audit_record
@@ -132,6 +132,17 @@ def get_exports(user: CurrentUser) -> dict[str, object]:
     return {"exports": [job for job in jobs if all(user.access.can_see(camera_id) for camera_id in job["camera_ids"])][:50]}
 
 
+@router.get("/api/exports/limits")
+@requires_scope("export")
+def get_export_limits(user: CurrentUser) -> dict[str, object]:
+    """The queue's limits as they apply to this person, for the export page (#504). Before /api/exports/{job_id}, which would take "limits" as an id."""
+    limits = queue_turns.export_limits()
+    with connect() as db:
+        active = db.execute("SELECT COUNT(*) FROM exports WHERE requested_by=? AND status IN ('queued','running')", (int(user["id"]),)).fetchone()[0]
+    return {"places": limits["places"], "kept_for_case_packages": limits["kept_for_case_packages"], "job_hours": limits["job_hours"],
+            "each": limits["each_administrator"] if user["role"] == "administrator" else limits["each"], "active": active}
+
+
 @router.post("/api/exports", status_code=status.HTTP_202_ACCEPTED)
 @requires_scope("export")
 async def create_export(
@@ -163,7 +174,7 @@ async def _submit(request: Request, user: dict, create: Callable[[], str]) -> di
     except copies_budget.BudgetFull as exc:
         raise HTTPException(status_code=507, detail=str(exc)) from exc
     except OverflowError as exc:
-        raise HTTPException(status_code=429, detail=str(exc)) from exc
+        raise HTTPException(status_code=429, detail=str(exc), headers={"Retry-After": str(getattr(exc, "retry_after", 60))}) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     try:
