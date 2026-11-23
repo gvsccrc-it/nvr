@@ -17,8 +17,7 @@ import zipfile
 from pathlib import Path
 from unittest import mock
 
-from app import cases, exports
-from app.recording import recordings_path
+from app import cases, exports, package_checks
 from tests.test_access_grants import GrantCase
 
 MIB = 1024 * 1024
@@ -46,6 +45,12 @@ class MemoryTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.package = Path(self.temporary.name) / "package.zip"
+        # A case package's clips are copied to the recordings volume to be opened, within its headroom (#503): one of each, for the check
+        for key, value in (("NVR_RECORDINGS_PATH", Path(self.temporary.name) / "recordings"), ("NVR_DB_PATH", Path(self.temporary.name) / "state.sqlite3")):
+            self.addCleanup(lambda key=key, was=os.environ.get(key): os.environ.pop(key, None) if was is None else os.environ.__setitem__(key, was))
+            os.environ[key] = str(value)
+        from app.store import initialize
+        initialize()
 
     def peak(self, work) -> int:
         tracemalloc.start()
@@ -93,8 +98,8 @@ class MemoryTests(unittest.TestCase):
 
 class UploadTests(GrantCase):
     def uploads_left(self) -> list[str]:
-        folder = recordings_path() / exports.EXPORT_DIRECTORY
-        return sorted(path.name for path in folder.glob(".verify-*")) if folder.is_dir() else []
+        folder = package_checks.directory()  # Its own folder on the recordings volume, which the exports' budget does not count (#503)
+        return sorted(path.name for path in folder.iterdir()) if folder.is_dir() else []
 
     def completed_export(self) -> str:
         from app.store import connect

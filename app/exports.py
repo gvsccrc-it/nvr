@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import IO, Any, Callable
 
-from . import acceleration, copies_budget, footage_chain, privacy, queue_turns, redaction, viewing_audit
+from . import acceleration, copies_budget, footage_chain, package_checks, privacy, queue_turns, redaction, viewing_audit
 from . import dewarp as dewarp_geometry
 from .display_settings import format_display_datetime
 from .processes import end_process
@@ -95,7 +95,7 @@ def verify_chain_member(archive: zipfile.ZipFile, installation_key: str | None =
 
     With ``installation_key``, a chain signed by any other key is invalid: a package can carry a key of its own making."""
     try:
-        package = json.loads(archive.read("chain.json"))
+        package = package_checks.read_json(archive, "chain.json")
         cameras = []
         for camera in package["cameras"]:
             if not camera.get("chain"):
@@ -136,32 +136,34 @@ def verify_evidence_bytes(package: bytes, expected_export_id: str | None = None,
     return verify_evidence_file(io.BytesIO(package), expected_export_id, installation_key)
 
 
-def read_integrity_manifest(archive: zipfile.ZipFile) -> tuple[list[str], dict[str, Any]]:
+def read_integrity_manifest(archive: zipfile.ZipFile, budget: "package_checks.Budget | None" = None) -> tuple[list[str], dict[str, Any]]:
     """The member names and the integrity manifest of an uploaded package, once it has passed the checks made before any file is read: no
-    path that is absolute or climbs out, no name given twice, no more uncompressed content than the limit, and one manifest of the known
-    kind. Raises ValueError saying which failed. Shared by the evidence and case package verifiers (#387)."""
+    path that is absolute or climbs out, no name given twice, no more uncompressed content than the limit (the ``budget``, which a case
+    package shares with its clips, #503), and one manifest of the known kind, itself not larger than a genuine one. Raises ValueError saying
+    which failed. Shared by the evidence and case package verifiers (#387)."""
     infos = archive.infolist()
     names = [item.filename for item in infos]
     if len(names) != len(set(names)) or any(name.startswith("/") or ".." in Path(name).parts for name in names):
         raise ValueError("invalid archive paths")
-    if sum(item.file_size for item in infos) > MAX_VERIFY_PACKAGE_BYTES:
-        raise ValueError("uncompressed package exceeds the verification size limit")
+    (budget or package_checks.Budget(MAX_VERIFY_PACKAGE_BYTES)).take(sum(item.file_size for item in infos))
     if names.count("integrity.json") != 1:
         raise ValueError("integrity manifest is missing or duplicated")
-    manifest = json.loads(archive.read("integrity.json"))
+    manifest = package_checks.read_json(archive, "integrity.json")
     if manifest.get("algorithm") != "sha256" or not isinstance(manifest.get("files"), list):
         raise ValueError("unsupported integrity manifest")
     return names, manifest
 
 
-def verify_evidence_file(package: "str | os.PathLike[str] | IO[bytes]", expected_export_id: str | None = None, installation_key: str | None = None) -> dict[str, Any]:
+def verify_evidence_file(package: "str | os.PathLike[str] | IO[bytes]", expected_export_id: str | None = None, installation_key: str | None = None,
+                         budget: "package_checks.Budget | None" = None) -> dict[str, Any]:
     """Verify the evidence manifest against the exact uploaded ZIP member bytes, reading the package from a file.
 
     This deliberately does not extract files or validate that media is playable. Blocking: callers on an event loop run it in a thread.
     """
     try:
+        package_checks.check_directory(package)
         with zipfile.ZipFile(package) as archive:
-            names, manifest = read_integrity_manifest(archive)
+            names, manifest = read_integrity_manifest(archive, budget)
             expected = {entry["path"]: entry for entry in manifest["files"]}
             if len(expected) != len(manifest["files"]):
                 raise ValueError("integrity manifest contains duplicate paths")
@@ -169,8 +171,8 @@ def verify_evidence_file(package: "str | os.PathLike[str] | IO[bytes]", expected
             if delivered != set(expected):
                 return {"checksums_valid": False, "files": [], "error": "package contents do not match the integrity manifest"}
             if expected_export_id is not None:
-                metadata = json.loads(archive.read("metadata.json"))
-                if metadata.get("export_id") != expected_export_id or metadata.get("audit_reference") != {"resource_type": "export", "resource_id": expected_export_id}:
+                metadata = package_checks.read_json(archive, "metadata.json")
+                if not isinstance(metadata, dict) or metadata.get("export_id") != expected_export_id or metadata.get("audit_reference") != {"resource_type": "export", "resource_id": expected_export_id}:
                     return {"checksums_valid": False, "files": [], "error": "package identity does not match the requested export"}
             files = []
             valid = True
@@ -183,7 +185,7 @@ def verify_evidence_file(package: "str | os.PathLike[str] | IO[bytes]", expected
             chain = verify_chain_member(archive, installation_key) if "chain.json" in delivered else None
             return {"checksums_valid": valid, "files": files, "chain": chain,
                     "error": None if valid else "one or more file checksums do not match"}
-    except (zipfile.BadZipFile, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+    except (zipfile.BadZipFile, KeyError, TypeError, ValueError, AttributeError, json.JSONDecodeError) as exc:
         return {"checksums_valid": False, "files": [], "error": f"invalid evidence package: {str(exc)[:200]}"}
 
 
