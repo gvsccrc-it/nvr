@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
+import fcntl
 import hashlib
 import io
 import json
@@ -148,8 +150,12 @@ class _Opener:
         n, r, p = struct.unpack(">III", header[len(MAGIC) + 16:len(MAGIC) + 28])
         if n > 2**20 or r > 16 or p > 4:
             raise BackupError("Backup key-derivation parameters are out of range")
+        try:
+            key = _derive(secret, salt, n, r, p)
+        except ValueError:  # A cost this machine will not spend (more memory than the limit), or one scrypt refuses outright
+            raise BackupError("This is not a valid NVR configuration backup: its key-derivation cost is out of range") from None
         self._header, self._prefix = header, header[-8:]
-        self._cipher = AESGCM(_derive(secret, salt, n, r, p))
+        self._cipher = AESGCM(key)
         self._source = source
         self._buffer = bytearray()
         self._counter = 0
@@ -204,6 +210,78 @@ def decrypt_stream(source: BinaryIO, target: BinaryIO, secret: str) -> None:
 
 # --- creating backups -------------------------------------------------------------
 
+# --- work left behind ------------------------------------------------------------------------------------------------------------------------
+
+WORK_PREFIXES = (".backup-", ".restore-", ".verify-")  # Folders beside the database; each holds an unencrypted copy of it while in use
+PARTIAL_PATTERN = ".nvr-config-*.partial"  # An archive being written, in the backup folder
+
+
+@contextlib.contextmanager
+def _work_folder(prefix: str, parent: Path):
+    """A private folder beside the database for one backup, restore or check, removed when it is done. It is locked while in use, so the
+    clean-up at start (``remove_leftovers``) leaves alone one that another process is still using and removes one whose process was killed."""
+    with tempfile.TemporaryDirectory(prefix=prefix, dir=parent) as work:
+        os.chmod(work, 0o700)
+        handle = os.open(work, os.O_RDONLY)
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            yield Path(work)
+        finally:
+            os.close(handle)
+
+
+def _in_use(path: Path) -> bool:
+    """Whether another process holds the lock on ``path``: a backup, restore or check that is still running. The lock goes with its process."""
+    try:
+        handle = os.open(path, os.O_RDONLY)
+    except OSError:
+        return False
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return False
+    except BlockingIOError:
+        return True
+    finally:
+        os.close(handle)
+
+
+def _size(path: Path) -> int:
+    if path.is_file():
+        return path.stat().st_size
+    return sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
+
+
+def remove_leftovers() -> int:
+    """At start: remove what a backup, restore or check left when its process was killed (#509). Each work folder holds an unencrypted copy of
+    the database and a partial archive can be as large as a backup; nothing else ever removes them. One still in use by another process (a
+    backup run by hand) is left alone. Logs what was removed and the room it freed; returns the bytes freed."""
+    candidates = [item for prefix in WORK_PREFIXES for item in database_path().parent.glob(f"{prefix}*") if item.is_dir()]
+    try:
+        candidates += [item for item in destination().glob(PARTIAL_PATTERN) if item.is_file()]
+    except OSError:
+        pass
+    freed, removed = 0, []
+    for leftover in candidates:
+        try:
+            if _in_use(leftover):
+                continue
+            size = _size(leftover)
+            if leftover.is_dir():
+                shutil.rmtree(leftover)
+            else:
+                leftover.unlink()
+        except OSError as exc:
+            logger.warning("Could not remove %s, left by an interrupted backup: %s", leftover, exc.strerror or exc)
+            continue
+        freed += size
+        removed.append(leftover.name)
+    if removed:
+        logger.warning("Removed %d leftover%s of interrupted backups, restores or checks (%s), freeing %s: %s",
+                       len(removed), "" if len(removed) == 1 else "s", "unencrypted copies of the database or partial archives", _megabytes(freed),
+                       ", ".join(sorted(removed)))
+    return freed
+
+
 def create_backup(kind: str, *, run_id: str | None = None, database: Path | None = None) -> dict[str, object]:
     """Write one encrypted backup and prune old ones. Raises BackupError on failure."""
     reason = disabled_reason()
@@ -224,9 +302,7 @@ def create_backup(kind: str, *, run_id: str | None = None, database: Path | None
     # Plaintext only ever exists in the protected data volume, and only as the one snapshot of the database: the archive is encrypted as
     # it is written. A backup needs room for that snapshot where the database is, and for the encrypted archive where backups go (#328).
     _check_space(database, target_dir)
-    with tempfile.TemporaryDirectory(prefix=".backup-", dir=database.parent) as work:
-        work_dir = Path(work)
-        os.chmod(work_dir, 0o700)
+    with _work_folder(".backup-", database.parent) as work_dir:
         snapshot = work_dir / "nvr.sqlite3"
         source = sqlite3.connect(database)
         copy = sqlite3.connect(snapshot)
@@ -258,6 +334,7 @@ def create_backup(kind: str, *, run_id: str | None = None, database: Path | None
         try:
             with partial_path.open("wb") as sealed:
                 os.chmod(partial_path, 0o600)
+                fcntl.flock(sealed.fileno(), fcntl.LOCK_EX)  # In use: the clean-up at start leaves it alone while this process lives
                 sealer = _Sealer(sealed, passphrase() or "")
                 with tarfile.open(fileobj=sealer, mode="w|") as tar:  # A stream: each piece is encrypted as it is written
                     data = json.dumps(manifest, indent=2).encode()
@@ -547,9 +624,7 @@ def restore(archive: Path, *, force: bool = False, standby: bool = False) -> dic
     if free < needed:
         raise BackupError(f"Not enough free space to restore: it needs about {_megabytes(needed)} free in {database.parent}, and there is {_megabytes(free)}. "
                           "Free some space on that disk and try again. Nothing was changed.")
-    with tempfile.TemporaryDirectory(prefix=".restore-", dir=database.parent) as work:
-        work_dir = Path(work)
-        os.chmod(work_dir, 0o700)
+    with _work_folder(".restore-", database.parent) as work_dir:
         manifest = _unpack_checked(archive, secret, work_dir)
         if manifest.get("kind") == "failover":
             # Made for a standby's sync (#501): only the tables a standby copies. Restoring it would leave an installation with no users, footage index or history.
@@ -623,9 +698,7 @@ def verify(archive: Path) -> dict[str, object]:
     free = shutil.disk_usage(work_parent).free
     if free < needed:
         raise BackupError(f"Not enough free space to check the backup: it needs about {_megabytes(needed)} free in {work_parent}, and there is {_megabytes(free)}.")
-    with tempfile.TemporaryDirectory(prefix=".verify-", dir=work_parent) as work:
-        work_dir = Path(work)
-        os.chmod(work_dir, 0o700)
+    with _work_folder(".verify-", work_parent) as work_dir:
         manifest = _unpack_checked(archive, secret, work_dir)
         check = sqlite3.connect(f"file:{work_dir / 'nvr.sqlite3'}?mode=ro", uri=True)
         try:

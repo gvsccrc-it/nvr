@@ -8,7 +8,7 @@ A case groups everything about one incident: clips (a camera and a time range), 
 
 - Adding a clip holds every recorded interval of that camera overlapping the range, with a hold of its own that records the case. Footage that is not recorded (a gap) cannot be held: the clip says how many seconds of its range were not covered. A clip must be of footage already recorded, at most 24 hours long, and have some recorded footage in range.
 - A held interval cannot be deleted (the existing rule), and its hold cannot be released by hand while a case holds it (releasing a hold in the footage list answers 409). Holds placed by hand or by other cases are separate: closing a case or removing a clip releases only the holds that case placed.
-- **Removing a clip** releases the holds no other clip of the case needs.
+- **Removing a clip** releases the holds no other clip of the case needs. Which those are is read from the footage index alone (which recorded intervals overlap the remaining clips), so removing a clip takes the same moment however many long clips the case has; a hold on footage whose file has since gone stays until no clip overlaps it or the case closes. Adding a clip looks for its files before it changes anything, so neither holds up recording or any other writer while thousands of files are checked (#506).
 - **Closing a case** asks for a confirmation that says how many recorded intervals it releases. Footage nothing else holds then becomes eligible for deletion under its retention policy. A closed case takes no more items, but can still be opened, audited and packaged (only if its clips' footage still exists: it is no longer protected). There is no reopening.
 
 ## Who can open a case

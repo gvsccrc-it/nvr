@@ -152,6 +152,106 @@ class HoldTests(CaseCase):
         self.assertEqual(self.admin.post(f"/api/cases/{case}/close", json={"confirm": True}).status_code, 200)
 
 
+def write_lock_is_free() -> bool:
+    """Whether another connection could take the database's write lock right now."""
+    import sqlite3
+
+    from app.store import database_path
+
+    other = sqlite3.connect(database_path(), timeout=0, isolation_level=None)
+    try:
+        other.execute("BEGIN IMMEDIATE")
+        other.execute("ROLLBACK")
+        return True
+    except sqlite3.OperationalError:
+        return False
+    finally:
+        other.close()
+
+
+class LockTests(CaseCase):
+    """Adding and removing clips never looks for files while holding the write lock (#506): a day of cold-tier footage is seconds to minutes of
+    file checks, and while the lock is held the recorder, the AI worker and every other writer wait."""
+
+    def stalled_file_checks(self):
+        """A stand-in for the file check that is slow, as for footage on a cold tier, and notes whether the write lock was held at each check."""
+        real = cases.segment_available
+        under_lock: list[str] = []
+        calls: list[str] = []
+
+        def slow(relative_path):
+            calls.append(relative_path)
+            if not write_lock_is_free():
+                under_lock.append(relative_path)
+            return real(relative_path)
+
+        return mock.patch.object(cases, "segment_available", slow), calls, under_lock
+
+    def test_removing_a_clip_checks_no_files_however_many_long_clips_remain(self):
+        for minute in range(2, 120):
+            self.add_segment(self.d1, minute)
+        case = self.create()["id"]
+        clips = [self.clip(case, self.d1, start, 60).json()["item_id"] for start in (0, 20, 40, 60)]
+        held_before = {hold["segment_id"] for hold in self.holds(case)}
+        self.assertEqual(len(held_before), 120)
+        patched, calls, _ = self.stalled_file_checks()
+        with patched:
+            self.assertEqual(self.full.delete(f"/api/cases/{case}/items/{clips[0]}").status_code, 200)  # Minutes 0-59; 20-119 are still in the others
+            self.assertEqual(self.full.delete(f"/api/cases/{case}/items/{clips[3]}").status_code, 200)  # Minutes 60-119; 20-99 are still in the two left
+        self.assertEqual(calls, [])  # Decided from the index alone: the time under the lock does not grow with the number of segments
+        held = {hold["segment_id"] for hold in self.holds(case)}
+        with connect() as db:
+            minutes = {row["id"]: row["starts_at"] for row in db.execute("SELECT id,starts_at FROM recording_segments WHERE camera_id=?", (self.d1,))}
+        expected = {segment for segment, starts in minutes.items() if START + timedelta(minutes=20) <= cases._parse(starts) < START + timedelta(minutes=100)}
+        self.assertEqual(held, expected)  # Released only what no remaining clip needs
+
+    def test_adding_a_clip_looks_for_its_files_before_taking_the_lock(self):
+        for minute in range(2, 30):
+            self.add_segment(self.d1, minute)
+        case = self.create()["id"]
+        patched, calls, under_lock = self.stalled_file_checks()
+        with patched:
+            response = self.clip(case, self.d1, 0, 30)
+        self.assertEqual(response.status_code, 201, response.text)
+        self.assertEqual(len(calls), 30)
+        self.assertEqual(under_lock, [])
+        self.assertEqual(len(self.holds(case)), 30)
+
+    def test_a_clip_whose_footage_has_all_gone_is_still_refused(self):
+        with connect() as db:
+            for segment in (self.d1_first, self.d1_second):
+                recording_file_path(db.execute("SELECT relative_path FROM recording_segments WHERE id=?", (segment,)).fetchone()[0]).unlink()
+        case = self.create()["id"]
+        response = self.clip(case, self.d1, 0, 2)
+        self.assertEqual((response.status_code, response.json()["detail"]), (422, "No recorded footage is available in that range"))
+        self.assertEqual(self.holds(case), [])
+
+    def test_footage_that_leaves_the_index_between_the_look_and_the_lock_is_not_held(self):
+        case = self.create()["id"]
+        real = cases.clip_footage
+
+        def then_retention(*args):
+            found = real(*args)
+            with connect() as db:  # Retention marks a segment gone after its file was found and before the lock was taken
+                db.execute("UPDATE recording_segments SET unavailable_at='2026-01-01T00:00:00.000Z' WHERE id=?", (self.d1_second,))
+            return found
+
+        with mock.patch.object(cases, "clip_footage", then_retention):
+            response = self.clip(case, self.d1, 0, 2)
+        self.assertEqual(response.status_code, 201, response.text)
+        self.assertEqual({hold["segment_id"] for hold in self.holds(case)}, {self.d1_first})
+        self.assertEqual(response.json()["case"]["items"][0]["data"]["segments"], 1)
+
+    def test_nothing_is_looked_for_on_a_camera_the_person_may_not_see_or_in_a_case_they_are_not_in(self):
+        case = self.create()["id"]
+        patched, calls, _ = self.stalled_file_checks()
+        with patched:
+            self.assertEqual(self.clip(case, self.d1, 0, 1, client=self.limited).status_code, 404)  # Not in the case
+            mine = self.create(self.limited)["id"]
+            self.assertEqual(self.clip(mine, self.y1, 0, 1, client=self.limited).status_code, 404)  # A camera they may not see
+        self.assertEqual(calls, [])
+
+
 class AccessTests(CaseCase):
     def test_only_members_and_administrators_can_open_a_case_and_others_cannot_tell_it_exists(self):
         case = self.create()["id"]
