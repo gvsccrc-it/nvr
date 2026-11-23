@@ -156,6 +156,16 @@ export function useAcknowledgeIncident() {
   });
 }
 
+/** A break in a camera's signed footage is acknowledged with a note, by an administrator, which recovers its incident (#507). */
+export function useAcknowledgeChainBreak() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ breakId, note }: { breakId: string; note: string }) =>
+      api<unknown>(`/api/footage/chain-breaks/${encodeURIComponent(breakId)}/acknowledge`, { method: "POST", body: { note } }),
+    onSuccess: () => client.invalidateQueries({ queryKey: keys.incidents }),
+  });
+}
+
 export function useExportJobs(enabled = true) {
   return useQuery({
     queryKey: keys.exports,

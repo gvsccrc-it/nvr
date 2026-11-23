@@ -1,8 +1,8 @@
 """The nightly self-test, and the weekly coverage report's schedule.
 
 Each night the self-test checks that every camera expected to record wrote footage in the
-last day, every recording volume is writable, and the latest configuration backup is
-fresh. Each failed check raises its own incident, which recovers when a later run passes;
+last day, that each camera's signed footage chain still matches its last signature, every
+recording volume is writable, and the latest configuration backup is fresh. Each failed check raises its own incident, which recovers when a later run passes;
 an administrator can run it at any time to confirm a fix.
 """
 from __future__ import annotations
@@ -46,6 +46,25 @@ def _check_cameras(now: datetime) -> list[dict[str, Any]]:
                                f"{row['name']}: last footage {row['last_footage']}" if passed else
                                f"{row['name']} has written no footage in the last day" + (f" (last footage {row['last_footage']})" if row["last_footage"] else ""),
                                camera_id=row["id"]))
+    return results
+
+
+def _check_footage_chains() -> list[dict[str, Any]]:
+    """Each camera's signed footage chain, from its last signature to its head, still extends that signature intact (#507). The background
+    worker checks the same before each signing and records a break; this finds one even while that worker is not running."""
+    from . import footage_chain
+
+    results = []
+    with connect() as db:
+        names = {row["id"]: row["name"] for row in db.execute("SELECT id,name FROM cameras")}
+        for head in footage_chain._heads(db):
+            camera_id = head["camera_id"]
+            name = names.get(camera_id, camera_id)
+            fault = footage_chain.chain_fault(db, camera_id)
+            results.append(_result(f"footage_chain:{camera_id}", "footage_chain", name, fault is None,
+                                   f"{name}: the signed footage chain is intact since its last signature" if fault is None else
+                                   f"{name}: the signed footage chain no longer matches its signature at link {fault[0]} ({fault[1]})",
+                                   camera_id=camera_id if camera_id in names else None))
     return results
 
 
@@ -161,7 +180,7 @@ def run(kind: str = "manual") -> dict[str, Any]:
     with connect() as db:
         run_id = db.execute("INSERT INTO self_test_runs(kind,started_at) VALUES(?,?)", (kind, started.isoformat())).lastrowid
     try:
-        results = [database] + _check_cameras(started) + _check_volumes() + _check_backup()
+        results = [database] + _check_cameras(started) + _check_footage_chains() + _check_volumes() + _check_backup()
     except BaseException:
         with connect() as db:  # A run that never finished must not count as tonight's, or it would not be retried.
             db.execute("DELETE FROM self_test_runs WHERE id=?", (run_id,))

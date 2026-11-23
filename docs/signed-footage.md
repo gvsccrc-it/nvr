@@ -6,7 +6,7 @@ Every recording segment is hashed into a signed, per-camera chain. That makes it
 
 When a segment is indexed, the background worker reads the file, normally within 5 seconds. It records its SHA-256, time range and size as the next link in that camera's chain. Each link includes the hash of the link before it, so changing, removing or reordering any link breaks every link after it. Hashing happens in the background worker, never on the recorder's write path.
 
-Once a minute, the head of each camera's chain is signed, but only if the new links extend the signed ones intact; otherwise the worker logs an error and signs nothing for that camera. The head is signed with the installation's Ed25519 signing key. The key is generated on first use and stored in the NVR database, encrypted with the credential key. Configuration backups contain both, so a restored installation keeps its signing key and its old signatures stay valid. The public key is at `GET /api/footage/signing-key`.
+Once a minute, the head of each camera's chain is signed, after checking that the new links extend the signed ones intact (when they do not, see **When the chain no longer matches its signature** below). The head is signed with the installation's Ed25519 signing key. The key is generated on first use and stored in the NVR database, encrypted with the credential key. Configuration backups contain both, so a restored installation keeps its signing key and its old signatures stay valid. The public key is at `GET /api/footage/signing-key`.
 
 Deletions the NVR makes are recorded as links too, so they are expected rather than reported as tampering. This covers retention, administrator footage deletion, and removal of a camera's footage.
 
@@ -52,6 +52,16 @@ Ranges are limited to 7 days, and one verification runs at a time (`429` while a
 The result is `valid` only when no segment is out of order, missing, altered or overdue for a signature, and the chain itself checks out. If the chain has been rewritten, or its signature does not match this installation's key, `chain_error` says so and nothing in it can be trusted.
 
 **What a check reads.** Verifying a range checks the links of the footage in it: each is hashed with its neighbours from the signature before it to the first signature that covers it, and both signatures must be this installation's and valid. The newest signature is checked too. A range is therefore proved against signed points on either side of it without re-reading the camera's whole history, and the check says nothing about footage outside the range asked for.
+
+## When the chain no longer matches its signature
+
+A link that has changed since it was signed can be deliberate editing, damage to the database, or a partial restore. When the minute's check finds one (#507):
+
+- A **break record** is written: the camera, the link that no longer matched, why, when it was noticed, the last good signature and the link signing resumes from. It is signed with the installation's key, and it is permanent: the database refuses to delete or change it, apart from its acknowledgement, which is added once.
+- **Signing resumes at once** from the chain's head as it stands, so footage recorded afterwards is signed as before. A second break on the same camera is a record of its own. Before this, the same error was logged every minute and nothing recorded on that camera was signed again.
+- An **incident** is raised ("The signed footage of *camera* no longer matches its signature at link *n*"), sent to `system.failure` webhooks and incident emails. It stays active until an administrator acknowledges the break, signed in with a browser (never an API token), with a note saying what happened: in the status panel's incident, or `POST /api/footage/chain-breaks/{id}/acknowledge` `{"note": "..."}`. The acknowledgement is in the security log (`footage_chain_break_acknowledged`). `GET /api/footage/chain-breaks` lists every break, newest first.
+- **Verifying a range that spans the break** is not valid: `chain_error` names the break, and `breaks` lists it (with whether its own signature checks out). Footage from where signing resumed verifies as before. An **evidence package** whose chain extract spans a break carries the break record and fails verification with the same message; one made of footage after the break verifies.
+- The **nightly self-test** checks each camera's chain from its last signature to its head, so a break is found even if the background worker is not running (see [the self-test](coverage-and-self-test.md)).
 
 ## Evidence packages
 

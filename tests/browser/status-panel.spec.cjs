@@ -1,5 +1,5 @@
 // Real-browser journeys for the Operational status panel (#257): one section at a time, counts on the tabs, the worst first and the rest folded.
-const { test, expect, seedFixtures, seedStatus, signInNext } = require("./helpers.cjs");
+const { test, expect, seedChainBreak, seedFixtures, seedStatus, signInNext } = require("./helpers.cjs");
 
 const bar = page => page.getByRole("status", { name: "Operational status" });
 const drawer = page => page.getByRole("dialog", { name: "Operational status" });
@@ -72,4 +72,20 @@ test("on a phone the tabs sit at the top, scroll sideways inside their own strip
   await panel.getByRole("tab", { name: /^Maintenance/ }).click();
   await expect(panel.getByRole("heading", { name: "Maintenance" })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
+test("a break in signed footage is acknowledged only with a note, and its incident then closes (#507)", async ({ page }) => {
+  seedFixtures(1);
+  seedChainBreak();
+  await signInNext(page);
+  await bar(page).getByRole("button", { name: "Incidents: 1" }).click();
+  const panel = drawer(page);
+  const row = panel.getByRole("list", { name: "Open incidents" }).getByRole("listitem");
+  await expect(row).toContainText("no longer matches its signature at link 4");
+  await expect(row.getByRole("button", { name: "Acknowledge", exact: true })).toHaveCount(0); // Not the plain button: a note is needed
+  const acknowledge = row.getByRole("button", { name: "Acknowledge break" });
+  await expect(acknowledge).toBeDisabled();
+  await row.getByRole("textbox", { name: /What happened/ }).fill("Restored the database from last night's copy after the disk fault");
+  await acknowledge.click();
+  await expect(panel.getByText("No active incidents.")).toBeVisible();
 });

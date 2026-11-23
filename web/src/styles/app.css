@@ -106,6 +106,9 @@
 .status-list { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--n-space-2); }
 .status-list li { display: grid; gap: 2px; padding: var(--n-space-2) var(--n-space-3); border: 1px solid var(--n-line); border-radius: var(--n-radius); min-width: 0; overflow-wrap: anywhere; grid-template-columns: minmax(0, 1fr); }
 .status-list li .button { justify-self: start; margin-top: var(--n-space-1); }
+.chain-break-ack { display: grid; gap: var(--n-space-1); margin-top: var(--n-space-1); }
+.chain-break-ack label { display: grid; gap: 2px; }
+.chain-break-ack textarea { width: 100%; box-sizing: border-box; font: inherit; }
 .alarm-inbox, .alarm-detail { display: grid; gap: var(--n-space-3); }
 .alarm-filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: var(--n-space-2); }
 .alarm-list li { padding: 0; }

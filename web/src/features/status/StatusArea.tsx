@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { NavLink, useNavigate } from "react-router";
 import { create } from "zustand";
 import { ApiError } from "@/api/client";
-import { useAcknowledgeIncident, useCameras, useConsoleStatus, useExportJobs, useFailoverStatus, useOpenIncidents, type ConsoleSite, type FailoverStatus } from "@/api/queries";
+import { useAcknowledgeChainBreak, useAcknowledgeIncident, useCameras, useConsoleStatus, useExportJobs, useFailoverStatus, useOpenIncidents, type ConsoleSite, type FailoverStatus } from "@/api/queries";
 import type { Camera, Incident } from "@/api/types";
 import { Drawer } from "@/components/Drawer";
 import { AlarmsInbox } from "@/features/alarms/AlarmsInbox";
@@ -169,6 +169,22 @@ function MaintenanceSection({ focused, onClose }: { focused: boolean; onClose: (
 
 const INCIDENTS_SHOWN = 8;
 
+/** A break in a camera's signed footage stays an active incident until an administrator says, in a note, what happened (#507). */
+function ChainBreakAcknowledgement({ breakId }: { breakId: string }) {
+  const acknowledge = useAcknowledgeChainBreak();
+  const [note, setNote] = useState("");
+  return (
+    <form className="chain-break-ack" onSubmit={event => { event.preventDefault(); if (note.trim()) acknowledge.mutate({ breakId, note: note.trim() }); }}>
+      <label>
+        What happened (kept in the security log)
+        <textarea value={note} onChange={event => setNote(event.target.value)} rows={2} maxLength={2000} required />
+      </label>
+      <button type="submit" className="button" disabled={acknowledge.isPending || !note.trim()}>Acknowledge break</button>
+      {acknowledge.error ? <p className="notice" data-tone="bad" role="alert">{acknowledge.error instanceof ApiError ? acknowledge.error.detail : "Could not acknowledge the break."}</p> : null}
+    </form>
+  );
+}
+
 /** The open incidents: who needs a look first, a filter, one button for the lot, and the rest behind "Show more". */
 function IncidentsPanel({ open, focused }: { open: Incident[]; focused: boolean }) {
   const acknowledge = useAcknowledgeIncident();
@@ -179,7 +195,8 @@ function IncidentsPanel({ open, focused }: { open: Incident[]; focused: boolean 
   const shown = (filter === "active" ? active : filter === "acknowledged" ? acknowledged : [...active, ...acknowledged])
     .sort((a, b) => (a.state === b.state ? b.last_seen_at.localeCompare(a.last_seen_at) : a.state === "active" ? -1 : 1));
   const visible = all ? shown : shown.slice(0, INCIDENTS_SHOWN);
-  const acknowledgeAll = () => { void Promise.allSettled(active.map(incident => acknowledge.mutateAsync(incident.id))); };
+  const plain = active.filter(incident => incident.fault_type !== "footage_chain");  // A break in signed footage needs a note of its own
+  const acknowledgeAll = () => { void Promise.allSettled(plain.map(incident => acknowledge.mutateAsync(incident.id))); };
   return (
     <section aria-labelledby="status-incidents" data-focused={focused}>
       <h3 id="status-incidents">Incidents</h3>
@@ -195,7 +212,7 @@ function IncidentsPanel({ open, focused }: { open: Incident[]; focused: boolean 
                 </button>
               ))}
             </div>
-            {active.length > 1 ? <button type="button" className="button" onClick={acknowledgeAll} disabled={acknowledge.isPending}>Acknowledge all {active.length} active</button> : null}
+            {plain.length > 1 ? <button type="button" className="button" onClick={acknowledgeAll} disabled={acknowledge.isPending}>Acknowledge all {plain.length} active</button> : null}
           </div>
           <ul className="status-list" aria-label="Open incidents">
             {visible.map(incident => (
@@ -205,7 +222,9 @@ function IncidentsPanel({ open, focused }: { open: Incident[]; focused: boolean 
                   {incident.state === "acknowledged" ? "Acknowledged, still active" : "Active"} · last seen {formatRelative(incident.last_seen_at)}
                   {incident.recurrence_count > 1 ? ` · occurred ${incident.recurrence_count} times` : ""}
                 </span>
-                {incident.state === "active" ? (
+                {incident.fault_type === "footage_chain" && typeof incident.details?.break_id === "string" ? (
+                  <ChainBreakAcknowledgement breakId={incident.details.break_id} />
+                ) : incident.state === "active" ? (
                   <button type="button" className="button" onClick={() => acknowledge.mutate(incident.id)} disabled={acknowledge.isPending}>
                     Acknowledge
                   </button>
