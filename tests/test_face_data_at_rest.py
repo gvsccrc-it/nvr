@@ -207,7 +207,7 @@ class MigrationTests(AtRestCase):
 
     def test_the_upgrade_encrypts_what_was_stored_and_leaves_no_plain_copy_in_the_file(self):
         self.assertIn(self.embedding.tobytes(), stored_bytes())
-        self.assertEqual(migrations.migrate(database_path(), connect), [103])
+        self.assertIn(103, migrations.migrate(database_path(), connect))  # With any later steps
         shrink_log()
         raw = stored_bytes()
         for plain in (self.embedding.tobytes(), self.picture, self.seen):
@@ -227,7 +227,7 @@ class MigrationTests(AtRestCase):
             for table in ("face_sightings", "face_embeddings", "face_watch_entries"):
                 db.execute(f"DELETE FROM {table}")
         with mock.patch.object(credentials, "encrypt_bytes", side_effect=AssertionError("the key was used")):
-            self.assertEqual(migrations.migrate(database_path(), connect), [103])
+            self.assertIn(103, migrations.migrate(database_path(), connect))  # With any later steps
         self.assertFalse(credentials.key_path().exists())
 
 
