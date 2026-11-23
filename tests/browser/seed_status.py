@@ -30,5 +30,20 @@ def seed() -> dict[str, object]:
     return {"incidents": 11, "active": 6, "acknowledged": 5, "exports": len(statuses)}
 
 
+def seed_chain_break() -> dict[str, object]:
+    """One break in a signed footage chain, with its incident, as the signing pass records it (#507). On a camera id no fixture camera has: a
+    break is permanent, and on a fixture camera it would be part of that camera's chain in every later journey (camera-tabs verifies one)."""
+    from app import footage_chain
+
+    with connect() as db:
+        db.execute("DELETE FROM incidents")
+        private, public = footage_chain._key(db)
+        break_id = footage_chain._record_break(db, private, public, str(uuid.uuid4()), None, (4, "link 4 no longer matches its signature"),
+                                               {"seq": 5, "link_hash": "0" * 64})
+    return {"break_id": break_id}
+
+
 if __name__ == "__main__":
-    print(json.dumps(seed()))
+    import sys
+
+    print(json.dumps(seed_chain_break() if "--chain-break" in sys.argv else seed()))

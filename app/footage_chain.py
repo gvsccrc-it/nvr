@@ -17,6 +17,7 @@ import json
 import logging
 import sqlite3
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -227,12 +228,10 @@ def sign_heads() -> int:
                     continue
                 since = int(last["upto_seq"]) if last is not None else 1
                 links = [dict(link) for link in db.execute("SELECT * FROM footage_chain WHERE camera_id=? AND seq>=? ORDER BY seq", (row["camera_id"], since))]
-                error = check_links(links, None if last is not None else GENESIS)
-                if not error and last is not None and links[0]["link_hash"] != last["head_hash"]:
-                    error = f"link {since} no longer matches its signature"
-                if error:
-                    logger.error("Not signing the footage chain of camera %s: %s", row["camera_id"], error)
-                    continue
+                if fault := _from_signature(db, row["camera_id"], last, links):
+                    # Recorded once, with its incident, and signing resumes from the head: checking from the last good signature again
+                    # found the same fault every minute for good, and nothing recorded on the camera afterwards was ever signed (#507).
+                    _record_break(db, private, public, row["camera_id"], last, fault, links[-1])
                 head = links[-1]["link_hash"]
                 signature = base64.b64encode(private.sign(signed_message(row["camera_id"], int(row["seq"]), head))).decode()
                 db.execute("INSERT INTO footage_chain_signatures(camera_id,upto_seq,head_hash,signature,public_key,signed_at) VALUES(?,?,?,?,?,?)",
@@ -381,20 +380,129 @@ def verify_signature(public_key_b64: str, camera_id: str, upto_seq: int, head_ha
         return False
 
 
-def check_links(links: list[dict[str, Any]], first_prev: str | None = None) -> str | None:
-    """None when the links hash correctly in sequence; otherwise what is wrong."""
+def find_break(links: list[dict[str, Any]], first_prev: str | None = None, first_seq: int | None = None) -> tuple[int, str] | None:
+    """None when the links hash correctly in sequence; otherwise the first link that does not, and what is wrong with it."""
     previous = first_prev
-    expected_seq = links[0]["seq"] if links else 0
+    expected_seq = first_seq if first_seq is not None else (links[0]["seq"] if links else 0)
     for link in links:
         if link["seq"] != expected_seq:
-            return f"link {expected_seq} is missing from the chain"
+            return expected_seq, f"link {expected_seq} is missing from the chain"
         if previous is not None and link["prev_hash"] != previous:
-            return f"link {link['seq']} does not follow the link before it"
+            return int(link["seq"]), f"link {link['seq']} does not follow the link before it"
         if link_hash(link) != link["link_hash"]:
-            return f"link {link['seq']} was changed after it was written"
+            return int(link["seq"]), f"link {link['seq']} was changed after it was written"
         previous = link["link_hash"]
         expected_seq += 1
     return None
+
+
+def check_links(links: list[dict[str, Any]], first_prev: str | None = None) -> str | None:
+    """None when the links hash correctly in sequence; otherwise what is wrong."""
+    found = find_break(links, first_prev)
+    return found[1] if found else None
+
+
+# --- a chain that no longer matches its signature (#507) ----------------------------------------------------------------------------------
+#
+# The owner's decision on the ticket: signing resumes by itself, at once, from a signed break record that names the camera, the link that no
+# longer matched and when it was noticed. The record is permanent (the table's triggers refuse a delete or a change), any verification or
+# export that spans it says so, and its incident stays active until an administrator acknowledges it from a browser session with a note.
+
+BREAK_FAULT = "footage_chain"
+
+
+def break_message(record: dict[str, Any]) -> bytes:
+    """What a break record's signature covers: every field of the record but the acknowledgement."""
+    return json.dumps({"kind": "nvr-footage-chain-break:v1", **{key: record[key] for key in ("camera_id", "broken_seq", "signed_seq", "resumed_seq", "head_hash", "reason",
+                                                                                           "detected_at")}}, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def _resumes_after_break(db: sqlite3.Connection, camera_id: str, seq: int) -> bool:
+    """Whether signing resumed at link ``seq`` after a break: that link is where the chain is checked from again, as it stands, whatever
+    happened to it before."""
+    return db.execute("SELECT 1 FROM footage_chain_breaks WHERE camera_id=? AND resumed_seq=?", (camera_id, seq)).fetchone() is not None
+
+
+def _from_signature(db: sqlite3.Connection, camera_id: str, signature: sqlite3.Row | None, links: list[dict[str, Any]]) -> tuple[int, str] | None:
+    """Whether ``links``, from a signed link to the head, still extend that signature intact: None, or the first link that does not."""
+    if signature is None:
+        return find_break(links, GENESIS, 1)
+    since = int(signature["upto_seq"])
+    if not links or links[0]["seq"] != since or links[0]["link_hash"] != signature["head_hash"]:
+        return since, f"link {since} no longer matches its signature"
+    if _resumes_after_break(db, camera_id, since):
+        return find_break(links[1:], links[0]["link_hash"], since + 1)
+    return find_break(links, None)
+
+
+def chain_fault(db: sqlite3.Connection, camera_id: str) -> tuple[int, str] | None:
+    """Read only: whether a camera's links since its last signature extend it intact (the nightly self-test asks this of every camera)."""
+    last = _latest_signature(db, camera_id)
+    since = int(last["upto_seq"]) if last is not None else 1
+    links = [dict(link) for link in db.execute("SELECT * FROM footage_chain WHERE camera_id=? AND seq>=? ORDER BY seq", (camera_id, since))]
+    return _from_signature(db, camera_id, last, links) if links else None
+
+
+def _record_break(db: sqlite3.Connection, private: Ed25519PrivateKey, public: str, camera_id: str, last: sqlite3.Row | None,
+                  fault: tuple[int, str], head: dict[str, Any]) -> str:
+    """The signed, permanent record of a break, and its incident. Signing then resumes from ``head``."""
+    from .incidents import sync_incident
+
+    break_id, detected_at = str(uuid.uuid4()), _now()
+    broken_seq, reason = fault
+    record = {"camera_id": camera_id, "broken_seq": broken_seq, "signed_seq": int(last["upto_seq"]) if last is not None else 0, "resumed_seq": int(head["seq"]),
+              "head_hash": head["link_hash"], "reason": reason, "detected_at": detected_at}
+    signature = base64.b64encode(private.sign(break_message(record))).decode()
+    db.execute("INSERT INTO footage_chain_breaks(id,camera_id,broken_seq,signed_seq,resumed_seq,head_hash,reason,detected_at,signature,public_key) "
+               "VALUES(?,?,?,?,?,?,?,?,?,?)",
+               (break_id, camera_id, broken_seq, record["signed_seq"], record["resumed_seq"], record["head_hash"], reason, detected_at, signature, public))
+    camera = db.execute("SELECT name FROM cameras WHERE id=?", (camera_id,)).fetchone()
+    name = camera["name"] if camera is not None else camera_id
+    sync_incident(db, incident_key=f"{BREAK_FAULT}:{break_id}", camera_id=camera_id if camera is not None else None, fault_type=BREAK_FAULT,
+                  summary=f"The signed footage of {name} no longer matches its signature at link {broken_seq} ({reason}); signing carries on from link {head['seq']}",
+                  active=True, details={"break_id": break_id, "camera_id": camera_id, "camera": name, "link": broken_seq, "reason": reason,
+                                        "resumed_at_link": int(head["seq"]), "detected_at": detected_at})
+    logger.error("The signed footage chain of camera %s no longer matches its signature: %s. The break is recorded and signing carries on from link %s",
+                 camera_id, reason, head["seq"])
+    return break_id
+
+
+def break_view(row: sqlite3.Row, installation_key: str | None = None) -> dict[str, Any]:
+    view = {key: row[key] for key in ("id", "camera_id", "broken_seq", "signed_seq", "resumed_seq", "reason", "detected_at", "acknowledged_by",
+                                      "acknowledged_at", "acknowledgement_note")}
+    view["signature_valid"] = verify_break(dict(row))
+    if installation_key is not None:
+        view["signature_valid"] = view["signature_valid"] and row["public_key"] == installation_key
+    return view
+
+
+def verify_break(record: dict[str, Any]) -> bool:
+    try:
+        Ed25519PublicKey.from_public_bytes(base64.b64decode(record["public_key"])).verify(base64.b64decode(record["signature"]), break_message(record))
+        return True
+    except (InvalidSignature, ValueError, KeyError, TypeError):
+        return False
+
+
+def _breaks_spanning(db: sqlite3.Connection, camera_id: str, first_seq: int, last_seq: int) -> list[sqlite3.Row]:
+    """Breaks whose links, from the one that no longer matched up to where signing resumed, overlap links first..last."""
+    return db.execute("SELECT * FROM footage_chain_breaks WHERE camera_id=? AND broken_seq<=? AND resumed_seq>? ORDER BY resumed_seq",
+                      (camera_id, last_seq, first_seq)).fetchall()
+
+
+def acknowledge_break(db: sqlite3.Connection, break_id: str, actor_id: int, note: str) -> sqlite3.Row | None:
+    """An administrator has seen the break: noted on the record, once, in the security log, and its incident recovers."""
+    from .audit import record as audit_record
+    from .incidents import sync_incident
+
+    row = db.execute("SELECT * FROM footage_chain_breaks WHERE id=?", (break_id,)).fetchone()
+    if row is None or row["acknowledged_at"] is not None:
+        return row
+    db.execute("UPDATE footage_chain_breaks SET acknowledged_by=?,acknowledged_at=?,acknowledgement_note=? WHERE id=?", (actor_id, _now(), note, break_id))
+    audit_record(db, actor_id, "footage_chain_break_acknowledged", "footage_chain_break", break_id, camera_id=row["camera_id"], link=row["broken_seq"], note=note)
+    sync_incident(db, incident_key=f"{BREAK_FAULT}:{break_id}", camera_id=None, fault_type=BREAK_FAULT, summary="", active=False,
+                  details={"break_id": break_id, "acknowledged_by": actor_id, "note": note})
+    return db.execute("SELECT * FROM footage_chain_breaks WHERE id=?", (break_id,)).fetchone()
 
 
 LONGEST_LINK = timedelta(hours=24)  # No recorded segment is longer: a link that touches a range starts within this of it
@@ -420,6 +528,12 @@ def _check_stretches(db: sqlite3.Connection, camera_id: str, seqs: list[int], in
         if seq <= checked_upto:
             continue
         before, covering = _signature_before(db, camera_id, seq), _signature_at_or_after(db, camera_id, seq)
+        if covering is not None and int(covering["upto_seq"]) == seq and _resumes_after_break(db, camera_id, seq):
+            # Where signing resumed after a break (#507): this link is proven by its own signature, whatever the broken stretch before it.
+            if error := _signature_error(db, camera_id, covering, installation_key):
+                return error
+            checked_upto = seq
+            continue
         if before is None and kept is not None and seq >= int(kept["seq"]):
             # The kept chain begins at the checkpoint's signed link (#500): that signature is the point to check from.
             before = db.execute("SELECT * FROM footage_chain_signatures WHERE camera_id=? AND upto_seq=?", (camera_id, kept["seq"])).fetchone()
@@ -432,10 +546,14 @@ def _check_stretches(db: sqlite3.Connection, camera_id: str, seqs: list[int], in
         last = int(covering["upto_seq"]) if covering is not None else None  # Not signed yet: checked to the head, and reported as unsigned
         stretch = [dict(row) for row in db.execute("SELECT * FROM footage_chain WHERE camera_id=? AND seq>=? AND seq<=? ORDER BY seq",
                                                    (camera_id, first, last if last is not None else 1 << 62))]
-        if error := check_links(stretch, GENESIS if before is None else None):
-            return error
         if before is not None and (not stretch or stretch[0]["seq"] != first or stretch[0]["link_hash"] != before["head_hash"]):
             return f"link {first} no longer matches its signature"
+        if before is not None and _resumes_after_break(db, camera_id, first):
+            found = find_break(stretch[1:], stretch[0]["link_hash"], first + 1)  # Signing resumed here after a break (#507): checked from it as signed
+            if found:
+                return found[1]
+        elif error := check_links(stretch, GENESIS if before is None else None):
+            return error
         checked_upto = stretch[-1]["seq"] if stretch else seq
     return None
 
@@ -469,6 +587,12 @@ def verify(camera_id: str, start: datetime, end: datetime) -> dict[str, Any]:
             # Links before the checkpoint are on their way out (they are dropped a bounded number at a time): not part of the kept chain.
             links = {seq: link for seq, link in links.items() if seq >= int(kept["seq"])}
         chain_error = _check_stretches(db, camera_id, sorted(links), installation_key)
+        # A break the range spans: its links were not what was signed when the break was noticed, so the footage they cover is not proven (#507).
+        breaks = [break_view(row, installation_key) for row in _breaks_spanning(db, camera_id, min(links), max(links))] if links else []
+        if breaks:
+            first_break = breaks[0]
+            chain_error = (f"the signed chain was broken at link {first_break['broken_seq']} ({first_break['reason']}), noticed {first_break['detected_at']}; "
+                           f"footage before signing resumed at link {first_break['resumed_seq']} is not proven")
         signature = _latest_signature(db, camera_id)
         signed_upto = 0
         if signature is not None:
@@ -519,7 +643,7 @@ def verify(camera_id: str, start: datetime, end: datetime) -> dict[str, Any]:
     # Footage older than the kept chain: its links were dropped KEEP_DAYS after it was removed. That is said as such, and is never a problem.
     before_kept_chain = kept is not None and start.isoformat() < kept["kept_from"]
     return {"camera_id": camera_id, "start": start.isoformat(), "end": end.isoformat(),
-            "valid": chain_error is None and not problems, "chain_error": chain_error, "signed_upto": signed_upto,
+            "valid": chain_error is None and not problems, "chain_error": chain_error, "signed_upto": signed_upto, "breaks": breaks,
             "public_key": installation_key, "segments": results, "problems": problems,
             "before_kept_chain": before_kept_chain, "kept_from": kept["kept_from"] if kept is not None else None}
 
@@ -540,7 +664,11 @@ def extract(db: sqlite3.Connection, camera_id: str, segment_ids: Iterable[int]) 
         return None
     links = [dict(row) for row in db.execute("SELECT camera_id,seq,kind,segment_id,relative_path,starts_at,ends_at,size_bytes,sha256,prev_hash,link_hash "
                                              "FROM footage_chain WHERE camera_id=? AND seq BETWEEN ? AND ? ORDER BY seq", (camera_id, first, signature["upto_seq"]))]
-    return {"camera_id": camera_id, "links": links, "signature": {key: signature[key] for key in ("upto_seq", "head_hash", "signature", "public_key", "signed_at")}}
+    breaks = [{key: row[key] for key in ("camera_id", "broken_seq", "signed_seq", "resumed_seq", "head_hash", "reason", "detected_at", "signature", "public_key")}
+              for row in _breaks_spanning(db, camera_id, int(first), int(signature["upto_seq"]))]
+    resumed = _resumes_after_break(db, camera_id, int(first))  # The extract starts where signing resumed after a break: checked from it as signed
+    return {"camera_id": camera_id, "links": links, "breaks": breaks, "starts_after_break": resumed,
+            "signature": {key: signature[key] for key in ("upto_seq", "head_hash", "signature", "public_key", "signed_at")}}
 
 
 def verify_extract(chain: dict[str, Any], sources: list[dict[str, Any]]) -> dict[str, Any]:
@@ -549,7 +677,17 @@ def verify_extract(chain: dict[str, Any], sources: list[dict[str, Any]]) -> dict
     reach (recorded before signing began, or not yet hashed) are listed as unsigned, not as mismatches."""
     links = chain.get("links") or []
     signature = chain.get("signature") or {}
-    error = check_links(links)
+    breaks = chain.get("breaks") or []
+    if chain.get("starts_after_break") and links:
+        found = find_break(links[1:], links[0]["link_hash"], int(links[0]["seq"]) + 1)
+        error = found[1] if found else None
+    else:
+        error = check_links(links)
+    for record in breaks:  # The export spans a break (#507): said, with the break's own signature checked
+        if not verify_break(record) or record.get("public_key") != signature.get("public_key"):
+            error = error or "a break record in the chain extract is not validly signed"
+        error = error or (f"the signed chain was broken at link {record['broken_seq']} ({record['reason']}), noticed {record['detected_at']}; "
+                          f"footage before signing resumed at link {record['resumed_seq']} is not proven")
     if not error and (not links or links[-1]["seq"] != signature.get("upto_seq") or links[-1]["link_hash"] != signature.get("head_hash")):
         error = "the chain extract does not end at its signed head"
     if not error and not verify_signature(signature.get("public_key", ""), chain.get("camera_id", ""), int(signature.get("upto_seq", 0)),
@@ -565,7 +703,10 @@ def verify_extract(chain: dict[str, Any], sources: list[dict[str, Any]]) -> dict
             mismatched.append(source["segment_id"])
     if not error and mismatched:
         error = f"exported source segments {mismatched} do not match the signed chain"
-    return {"valid": error is None, "error": error, "public_key": signature.get("public_key"), "unsigned": unsigned}
+    result = {"valid": error is None, "error": error, "public_key": signature.get("public_key"), "unsigned": unsigned}
+    if breaks:
+        result["breaks"] = [{key: record.get(key) for key in ("broken_seq", "resumed_seq", "reason", "detected_at")} for record in breaks]
+    return result
 
 
 class FootageChainManager:

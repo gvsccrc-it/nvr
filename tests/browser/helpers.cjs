@@ -122,6 +122,13 @@ function seedStatus() {
   return JSON.parse(result.stdout);
 }
 
+/** A recorded break in fixture camera 1's signed footage chain, with its incident (#507). */
+function seedChainBreak() {
+  const result = spawnSync("python", ["-m", "tests.browser.seed_status", "--chain-break"], { cwd: process.cwd(), env: { PATH: process.env.PATH, ...FIXTURE_ENVIRONMENT }, encoding: "utf8", timeout: 60_000 });
+  assert.equal(result.status, 0, `seeding a chain break failed: ${result.stderr || result.stdout}`);
+  return JSON.parse(result.stdout);
+}
+
 /** Give fixture camera `camera` a camera address, an ONVIF login and/or an ONVIF device address, for the hardening checks. */
 function weakenCamera(camera, { ip, onvifUser, onvifPassword, device } = {}) {
   const args = ["-m", "tests.browser.seed_hardening", "--camera", String(camera)];
@@ -207,4 +214,4 @@ async function settingsLink(page, label) {
   return link;
 }
 
-module.exports = { test: base, settingsLink, expect, FIXTURE_PASSWORD, seedFixtures, raiseAlarm, feedTamper, writeHistory, smartReading, weakenCamera, seedSearchTracks, seedPlates, seedFailover, seedTiering, seedTracking, seedDigest, seedHealth, seedStatus, seedOverlayTracks, signInNext, signInAs, trackLiveSockets, median, percentile, writeAcceptanceMeasurements };
+module.exports = { test: base, settingsLink, expect, FIXTURE_PASSWORD, seedFixtures, raiseAlarm, feedTamper, writeHistory, smartReading, weakenCamera, seedSearchTracks, seedPlates, seedFailover, seedTiering, seedTracking, seedDigest, seedHealth, seedStatus, seedChainBreak, seedOverlayTracks, signInNext, signInAs, trackLiveSockets, median, percentile, writeAcceptanceMeasurements };

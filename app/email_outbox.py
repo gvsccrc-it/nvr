@@ -27,7 +27,7 @@ KEEP = timedelta(days=30)
 TITLES = {
     "recording": "Recording problem", "recording_uncertain": "Recording may have a gap", "storage": "Storage problem", "disk_health": "Disk health warning",
     "retention_forecast": "Footage will not last as long as the policy says", "tiering": "Storage tiering problem", "backup": "Backup problem", "self_test": "Self-test problem",
-    "failover": "Failover problem", "failover_sync": "Failover sync problem",
+    "failover": "Failover problem", "failover_sync": "Failover sync problem", "footage_chain": "Signed footage no longer matches its signature",
 }
 
 

@@ -45,6 +45,7 @@ At 03:41 site time, after the nightly backup, the self-test checks:
 
 - that every camera expected to record at some point in the last day (recording enabled, and not only expected idle) wrote footage in that day;
 - that the database file is not damaged: the nightly run reads every page of it (a few minutes on a large database); a run started by hand only opens it and reads the start of every table. A damaged file raises the incident "Self-test failed: The database file is damaged" and ends the run there, because the other checks read the same file; the next run that finds it healthy recovers the incident. See [recovering from a damaged database](database-recovery.md);
+- that each camera's signed footage chain, from its last signature to its head, still extends that signature intact (a break is also recorded within a minute by the background worker, which then resumes signing: see [signed footage](signed-footage.md));
 - that every recording volume is writable;
 - that the latest configuration backup is fresh (under 26 hours old). When backups are not configured, this check is reported and skipped.
 

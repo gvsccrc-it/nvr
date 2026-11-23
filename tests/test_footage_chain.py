@@ -327,8 +327,12 @@ class FootageChainTests(SceneTestCase):
         self.add_segment(8, START + timedelta(seconds=20))
         asyncio.run(footage_chain.append_pending())
         with self.assertLogs("app.footage_chain", "ERROR"):
-            self.assertEqual(footage_chain.sign_heads(), 0)
-        self.assertFalse(self.verify()["valid"])
+            # Not a signature over the rewritten chain as if nothing happened: a signed break record, and signing carries on from the head
+            # (the owner's decision on #507; this used to sign nothing, for good).
+            self.assertEqual(footage_chain.sign_heads(), 1)
+        with connect() as db:
+            self.assertEqual([(row["broken_seq"], row["resumed_seq"]) for row in db.execute("SELECT * FROM footage_chain_breaks")], [(4, 5)])
+        self.assertFalse(self.verify()["valid"])  # Verification across the break still says the footage is not proven
 
     def test_overdue_signatures_and_footage_lost_before_hashing_are_problems(self):
         asyncio.run(footage_chain.append_pending())  # Hashed, never signed.

@@ -137,6 +137,7 @@ export interface Incident {
   last_seen_at: string;
   acknowledged_at: string | null;
   recovered_at: string | null;
+  details?: Record<string, unknown>;
 }
 
 export interface ExportJob {
