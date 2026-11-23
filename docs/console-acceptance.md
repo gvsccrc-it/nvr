@@ -20,7 +20,7 @@ Archiving a camera disables collection and removes it from live use while keepin
 
 These are application admission/resource limits, not hardware performance guarantees:
 
-- Live video admits at most 16 concurrent video viewers; live audio separately admits at most 16 audio listeners. The UI's sixteen-tile layout is a maximum of sixteen selected cameras, not a promise of smooth playback on all hosts. The browser permits one camera to be audible at a time.
+- Live video admits at most 16 tiles for each person, API token and video wall, and 32 distinct camera streams for the whole server (#487; [live-video-ready.md](live-video-ready.md) has the settings); live audio separately admits at most 16 audio listeners. The UI's sixteen-tile layout is a maximum of sixteen selected cameras, not a promise of smooth playback on all hosts. The browser permits one camera to be audible at a time.
 - Exports use one worker and allow at most 4 active jobs. Each job can select up to 8 cameras for a range up to 24 hours, with no more than 5,000 indexed source segments or 100 GiB of source footage. The output ZIP is capped at 2 GiB and export processing preserves a 256 MiB free-space reserve.
 - Completed ZIP downloads expire after 7 days. Expiry removes the archive while retaining job/evidence metadata and audit history. Queued work can resume after a process restart; interrupted running renders are reported failed rather than falsely marked complete.
 - Camera retention defaults to 30 days and can be configured from 1 to 3,650 days. Projected capacity is estimated from observed bitrate and is not a guarantee of retained days.
