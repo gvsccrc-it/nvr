@@ -5,6 +5,7 @@ two to four new database connections: every other viewer's video, every asynchro
 from __future__ import annotations
 
 import asyncio
+import gc
 import threading
 import time
 from unittest import mock
@@ -68,8 +69,15 @@ class OffTheLoopTests(RecheckCase):
                 longest, last = max(longest, now - last), now
             return longest, [task.result() for task in checking]
 
-        with mock.patch.object(privacy, "connect", slow):
-            longest, answers = asyncio.run(run())
+        # The garbage collector is run first and kept off while this is measured, as tests/loop_stall.py does: a collection of what earlier
+        # tests left behind pauses the whole process, not the loop alone (1.4 s on CI after the motion tests' unclosed sockets, main after #596).
+        gc.collect()
+        gc.disable()
+        try:
+            with mock.patch.object(privacy, "connect", slow):
+                longest, answers = asyncio.run(run())
+        finally:
+            gc.enable()
         self.assertEqual(answers, [True] * 6)
         self.assertLess(longest, 0.2, f"the loop stood still for {longest:.2f} s while the database was slow")
 
