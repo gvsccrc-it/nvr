@@ -102,6 +102,16 @@ The site dials out to a hub (a small host with a public address, which you run);
 
 It does not run or monitor the tunnel, does not open ports (UPnP), and sends nothing to a service of ours. A tunnel that is down means no remote access, and recording carries on.
 
+## Compression
+
+The NVR compresses what it sends itself, so the WireGuard and Tailscale set-ups, which have no proxy, get it too (#537):
+
+- **The interface's files** (its scripts and styles) are compressed once, when the image is built. A browser that accepts Brotli or gzip is sent that copy: the main script is about 175 kB instead of about 650 kB. It costs nothing while running.
+- **JSON answers to GET requests** of 1 KB or more (the camera list, status, the timeline) are compressed with gzip as they are sent. The 200-camera list goes from about 42 kB to 2 kB, for well under a millisecond of processor time.
+- **Never compressed:** video, picture streams, line-by-line streams, downloads, anything sent in pieces, anything over a WebSocket, and any answer that shows a secret once (a new API token, a signing secret, second-factor enrolment, recovery codes). Those answers are all to POST or PUT requests, which are never compressed: compressing a secret next to text a caller can influence is a known way of leaking it.
+
+A proxy in front may compress as well. The NVR never compresses an answer twice.
+
 ## Requests from other sites, and large requests
 
 A request that changes something (`POST`, `PUT`, `PATCH`, `DELETE`) and carries a browser's `Origin` is refused with 403 unless the origin is the host the request was made to (as a trusted proxy reports it), `NVR_PUBLIC_URL` or one of `NVR_ALLOWED_ORIGINS`: the same rule as the live video socket. API tokens, scripts and the signed routes other systems call (`/api/inbound/...`) send no such origin and are not affected. If signing in from the browser answers "This request came from a page on another site", the NVR is behind a proxy it has not been told about: set `NVR_PUBLIC_URL` to the address people use, and `NVR_TRUSTED_PROXIES` to the proxy.
