@@ -16,6 +16,7 @@ growing gaps, not every pass.
 from __future__ import annotations
 
 import asyncio
+import random
 import logging
 import sqlite3
 import time
@@ -127,7 +128,8 @@ class LiveReadyKeeper:
                 self.hub.leave(*held)
                 del self.held[key]
                 gap = self._retry.get(key, (0.0, RETRY_FIRST_SECONDS))[1]
-                self._retry[key] = (now + gap, min(gap * 2, RETRY_MAX_SECONDS))
+                # With a random share, so streams that failed together (the network down) are not all tried again in the same second (#495)
+                self._retry[key] = (now + gap * random.uniform(1.0, 1.5), min(gap * 2, RETRY_MAX_SECONDS))
                 continue
             if now < self._retry.get(key, (0.0, RETRY_FIRST_SECONDS))[0]:
                 continue

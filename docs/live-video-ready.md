@@ -20,7 +20,7 @@ Not held: a camera whose H.265 would have to be converted to H.264 (converting f
 
 A held stream is one more connection to the camera (the recorder holds one, detection another when it reads the stream) and the same data again over the network from the camera to the NVR. Passing the video through costs very little CPU; a stream with a privacy mask drawn in is re-encoded, and one with audio converts the audio to AAC. If a camera limits how many connections it accepts, or the network between the cameras and the NVR is tight, choose **Keep cameras that were just watched** or **Only while someone is watching**.
 
-A camera that does not answer is tried again after 15 seconds, then 30, 60, up to every five minutes, so an offline camera is not hammered. Changing the choice takes effect within seconds and is recorded in the audit log.
+A camera that does not answer is tried again after 15 seconds, then 30, 60, up to every five minutes, so an offline camera is not hammered; each wait has a random share of up to half again added, so cameras that went offline together are not all tried again in the same second (#495). Changing the choice takes effect within seconds and is recorded in the audit log.
 
 ## Reading Diagnostics
 

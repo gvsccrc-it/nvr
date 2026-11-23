@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import random
 import csv
 import contextlib
 import hashlib
@@ -29,6 +30,22 @@ from .health import recording_health
 from .incidents import sync_incident, sync_storage_incidents
 
 RECONNECT_MAX_SECONDS = 30
+# Cameras are started a few at a time, so a restart with many does not launch every FFmpeg, test connection and status write in one pass (#495)
+STARTUP_BATCH = 16
+STARTUP_BATCH_PAUSE_SECONDS = 0.5
+
+
+def reconnect_delay(failures: int, rng: random.Random | None = None) -> float:
+    """How long a camera waits before it tries again after ``failures`` failures in a row: doubling up to ``RECONNECT_MAX_SECONDS``, with a
+    random share (#495). Cameras that drop together (a switch rebooting, the power going) used to retry together, at +2, +4, +8, +16, +30 s
+    for the whole outage, every one starting an FFmpeg and a test connection and writing its status in the same second, and all of them
+    connecting in the same second when the network came back.
+
+    The first retry is still within 2 to 3 seconds; later ones fall anywhere from half to one and a half times the doubling step, the same
+    on average as before."""
+    rng = rng or random
+    base = min(2 ** min(max(failures, 0), 5), RECONNECT_MAX_SECONDS)
+    return base * (rng.uniform(1.0, 1.5) if failures <= 1 else rng.uniform(0.5, 1.5))
 RECORDER_GRACE_SECONDS = 5  # How long FFmpeg is given to stop (and finish its last segment) before it is killed; elsewhere 3 s
 # An open coverage interval not confirmed for this long means the recorder was not running.
 RESTART_GAP_AFTER = timedelta(seconds=15)
@@ -403,7 +420,9 @@ class RecordingManager:
             await asyncio.to_thread(self._sweep_empty_run_folders, [row["id"] for row in rows])
         except Exception:  # noqa: BLE001 - tidying must never stop recording from starting
             logging.getLogger("nvr.recording").exception("Empty recording folders could not be cleared")
-        for row in rows:
+        for number, row in enumerate(rows):
+            if number and number % STARTUP_BATCH == 0:
+                await asyncio.sleep(STARTUP_BATCH_PAUSE_SECONDS)  # A few at a time (#495)
             await self.sync_camera(row["id"])
         self.scheduler_task = asyncio.create_task(self._schedule_loop(), name="recording-schedule-supervisor")
         self.retention_task = asyncio.create_task(self._retention_loop(), name="recording-retention-cleanup")
@@ -855,7 +874,7 @@ class RecordingManager:
             except Exception:  # noqa: BLE001 - see the docstring
                 errors += 1
                 logging.getLogger("nvr.recording").exception("The recording task for camera %s failed; starting it again", camera_id)
-                await asyncio.sleep(min(2 ** min(errors, 5), RECONNECT_MAX_SECONDS))
+                await asyncio.sleep(reconnect_delay(errors))
 
     async def _run_once(self, camera_id: str, expected_mode: str) -> None:
         failures = 0
@@ -874,7 +893,7 @@ class RecordingManager:
                 if not should_retry:
                     return
                 failures = failures_after(failures, ran_for)
-                await asyncio.sleep(min(2 ** min(failures, 5), RECONNECT_MAX_SECONDS))
+                await asyncio.sleep(reconnect_delay(failures))
             else:
                 await self._run_continuous(camera_id, expected_mode)
                 return
@@ -1275,4 +1294,4 @@ class RecordingManager:
                 if progress_task:
                     progress_task.cancel()
                     await asyncio.gather(progress_task, return_exceptions=True)
-            await asyncio.sleep(min(2 ** min(failures, 5), RECONNECT_MAX_SECONDS))
+            await asyncio.sleep(reconnect_delay(failures))
