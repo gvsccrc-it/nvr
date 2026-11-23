@@ -338,23 +338,28 @@ def _live(entry: sqlite3.Row, now: datetime) -> bool:
     return (expires if expires.tzinfo else expires.replace(tzinfo=timezone.utc)) > now
 
 
-def _on_list(db: sqlite3.Connection, list_id: str, plate: str, now: datetime) -> tuple[str, bool] | None:
-    """The list's kind and whether the plate is on it (an entry that has not expired matches it); None when there is no such list."""
+def load_watch_list(db: sqlite3.Connection, list_id: str) -> tuple[str, bool, list[tuple[str, str | None]]] | None:
+    """A watch list as read once: its kind, whether it matches lookalike characters, and its entries' patterns and expiry. None when there is
+    no such list. A rule's test reads it once for all the day's reads, not once per read (#515)."""
     watch = db.execute("SELECT kind,lookalikes FROM plate_watch_lists WHERE id=?", (list_id,)).fetchone()
     if watch is None:
         return None
-    on_list = any(_live(entry, now) and matches(entry["pattern"], plate, bool(watch["lookalikes"]))
-                  for entry in db.execute("SELECT pattern,expires_at FROM plate_watch_entries WHERE list_id=?", (list_id,)))
-    return watch["kind"], on_list
+    entries = [(row["pattern"], row["expires_at"]) for row in db.execute("SELECT pattern,expires_at FROM plate_watch_entries WHERE list_id=?", (list_id,))]
+    return watch["kind"], bool(watch["lookalikes"]), entries
+
+
+def fires_on(watch: tuple[str, bool, list[tuple[str, str | None]]] | None, plate: str, now: datetime) -> bool:
+    """Whether a read of this plate raises a rule on the list as loaded: a deny list's plate is on it, an allow list's plate is not."""
+    if watch is None:
+        return False
+    kind, lookalikes, entries = watch
+    on_list = any(_live({"expires_at": expires_at}, now) and matches(pattern, plate, lookalikes) for pattern, expires_at in entries)
+    return on_list if kind == "deny" else not on_list
 
 
 def rule_fires(db: sqlite3.Connection, list_id: str, plate: str, now: datetime | None = None) -> bool:
     """Whether a read of this plate raises a rule on the list: a deny list's plate is on it, an allow list's plate is not."""
-    found = _on_list(db, list_id, plate, now or datetime.now(timezone.utc))
-    if found is None:
-        return False
-    kind, on_list = found
-    return on_list if kind == "deny" else not on_list
+    return fires_on(load_watch_list(db, list_id), plate, now or datetime.now(timezone.utc))
 
 
 # --- search -----------------------------------------------------------------------------------------------------------------------------------

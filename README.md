@@ -77,6 +77,8 @@ The `nvr-data` volume stores the database and account/session state. `nvr-secret
 | `NVR_FOOTAGE_CHAIN_KEEP_DAYS` | `365` | How long the signed-footage chain keeps the links of removed footage, 90 to 3650 days ([signed footage](docs/signed-footage.md)) |
 | `NVR_DB_LOG_LIMIT_MB` | `128` | The size the database's write-ahead log is brought back to once it can be reset, 16 to 4096 |
 | `NVR_DB_SYNCHRONOUS` | `NORMAL` | SQLite's `synchronous` setting. `FULL` or `EXTRA` wait for the disk on every write (slower; nothing is lost in a power cut). `OFF` is accepted and is **not for a production server**: a crash or power cut can then damage the database. Leave it unless you know why |
+| `NVR_HEAVY_REQUESTS` | `4` | How many Insights reports, heatmaps, searches and rule tests run at once, 1 to 64; another is answered "busy, try again" |
+| `NVR_HEAVY_REQUEST_SECONDS` | `30` | How long one of those may run before it is stopped and answered that the range was too large, 1 to 600 |
 | `NVR_STOP_GRACE_SECONDS` | `25` | How long a worker is given to stop before it is killed, 1 to 600; keep it under the container's `stop_grace_period` |
 | `NVR_WEB_MAX_CONNECTIONS` | `512` | The most connections the web interface holds at once, 16 to 16384. Live video sockets count. At the limit a new connection takes the place of the one that has waited longest without sending a request |
 | `NVR_WEB_FIRST_REQUEST_SECONDS` | `10` | How long a new connection has to send its first request before it is closed, 1 to 300 |

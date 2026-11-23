@@ -724,15 +724,16 @@ def fire_plate(db: sqlite3.Connection, camera_id: str, track_id: str, plate: str
 
 def _replay_plate(rule: Rule, start: datetime, end: datetime) -> list[dict[str, Any]]:
     """The plate reads of [start, end) the rule would have fired on, from those kept."""
-    from .plates import rule_fires
+    from .plates import fires_on, load_watch_list
 
     with connect() as db:
+        watch = load_watch_list(db, str(rule.condition.get("watch_list_id")))  # Once, not once per read (#515)
         rows = db.execute(
             "SELECT r.track_id,r.camera_id,r.plate,r.read_at,r.box_json,c.name AS camera_name FROM plate_reads r JOIN cameras c ON c.id=r.camera_id "
             "WHERE r.read_at>=? AND r.read_at<? ORDER BY r.read_at,r.id", (start.astimezone(timezone.utc).isoformat(), end.astimezone(timezone.utc).isoformat())).fetchall()
         groups = {row["camera_id"]: _camera_groups(db, row["camera_id"]) for row in rows}
         wanted = [row for row in rows if rule.watches_camera(row["camera_id"], groups[row["camera_id"]]) and _parse(row["read_at"]) >= rule.active_from
-                  and rule.scheduled(_parse(row["read_at"])) and rule_fires(db, str(rule.condition.get("watch_list_id")), row["plate"], _parse(row["read_at"]))]
+                  and rule.scheduled(_parse(row["read_at"])) and fires_on(watch, row["plate"], _parse(row["read_at"]))]
     events, last, tracks = [], {}, set()
     for row in wanted:
         at = _parse(row["read_at"])
@@ -843,9 +844,15 @@ def replay(rule: Rule, start: datetime, end: datetime) -> list[dict[str, Any]]:
         return _replay_face(rule, start, end)
     start_text, end_text = start.astimezone(timezone.utc).isoformat(), end.astimezone(timezone.utc).isoformat()
     with connect() as db:
+        # Camera by camera through the (camera, first seen) index, from the earliest a track still going at the start can have begun: it was a
+        # full scan of every track of every camera and a sort (#515)
+        from .search import began_since
+
+        cameras = [row["id"] for row in db.execute("SELECT id FROM cameras")]
         tracks = db.execute(
-            "SELECT t.id,t.camera_id,t.label,c.name AS camera_name FROM ai_tracks t JOIN cameras c ON c.id=t.camera_id "
-            "WHERE t.first_seen_at<? AND t.last_seen_at>=? ORDER BY t.first_seen_at,t.id", (end_text, start_text)).fetchall()
+            "SELECT t.id,t.camera_id,t.label,c.name AS camera_name FROM cameras c CROSS JOIN ai_tracks t ON t.camera_id=c.id "  # CROSS: cameras outside, always
+            "WHERE t.first_seen_at>=? AND t.first_seen_at<? AND t.last_seen_at>=? ORDER BY t.first_seen_at,t.id",
+            (began_since(db, cameras, start), end_text, start_text)).fetchall()
         groups: dict[str, set[str]] = {}
         candidates = []
         for track in tracks:

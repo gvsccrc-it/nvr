@@ -48,14 +48,26 @@ def _iso(moment: datetime) -> str:
     return moment.astimezone(timezone.utc).isoformat()
 
 
+def began_since(db: sqlite3.Connection, camera_ids: list[str], start: datetime) -> str:
+    """The earliest a track of these cameras that is still going at ``start`` can have begun: ``start`` less the longest track any of them has
+    had (``ai_track_spans``, kept by triggers). A search then reads the tracks that began from then on through the (camera, first seen) index,
+    not every later track (#515)."""
+    ids = list(camera_ids)
+    longest = db.execute(f"SELECT MAX(longest_seconds) FROM ai_track_spans WHERE camera_id IN ({','.join('?' * len(ids))})", ids).fetchone()[0] if ids else None
+    try:
+        return _iso(start - timedelta(seconds=float(longest or 0) + 1))
+    except OverflowError:  # A time that could not be read counts as endless: read from the beginning
+        return ""
+
+
 def find_tracks(db: sqlite3.Connection, camera_ids: list[str], start: datetime, end: datetime, *, label: str | None = None, upper_colour: str | None = None,
                 lower_colour: str | None = None, vehicle_colour: str | None = None, vehicle_type: str | None = None, direction: str | None = None,
                 zone: dict[str, float] | None = None, order: str = "desc", limit: int = 60) -> tuple[list[dict[str, Any]], bool]:
     """The tracks in range matching every filter given, newest first unless ``order`` is ``asc``, and whether more matched than ``limit``."""
     if not camera_ids:
         return [], False
-    clauses = [f"t.camera_id IN ({','.join('?' * len(camera_ids))})", "t.last_seen_at>=?", "t.first_seen_at<?"]
-    values: list[Any] = [*camera_ids, _iso(start), _iso(end)]
+    clauses = [f"t.camera_id IN ({','.join('?' * len(camera_ids))})", "t.first_seen_at>=?", "t.last_seen_at>=?", "t.first_seen_at<?"]
+    values: list[Any] = [*camera_ids, began_since(db, camera_ids, start), _iso(start), _iso(end)]
     for column, value in (("label", label), ("upper_colour", upper_colour), ("lower_colour", lower_colour), ("vehicle_colour", vehicle_colour),
                           ("vehicle_type", vehicle_type), ("direction", direction)):
         if value:

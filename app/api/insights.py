@@ -9,7 +9,7 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException, Query, Response
 from fastapi.concurrency import run_in_threadpool
 
-from app import insights, privacy, search
+from app import heavy, insights, privacy, search
 from app.api.playback import _segment_zones
 from app.principal import CurrentUser, requires_scope
 from app.retention import acquire_playback, release_playback
@@ -45,7 +45,7 @@ def _label(label: str | None) -> str | None:
 
 def _report(user, start: str, end: str, unit: str, camera_ids: list[str] | None, label: str | None) -> dict[str, object]:
     start_time, end_time = _range(start, end, unit)
-    with connect() as db:
+    with heavy.limited("report"), connect() as db:  # At most a few at once, each with a time budget (#515)
         names = {row["id"]: row["name"] for row in db.execute("SELECT id,name FROM cameras WHERE archived_at IS NULL ORDER BY name COLLATE NOCASE")}
         # Cameras this person may not see are not counted, and cannot be told apart from cameras that do not exist.
         wanted = [camera_id for camera_id in (camera_ids or names) if camera_id in names]
@@ -90,7 +90,7 @@ def get_heatmap(
     label: str | None = Query(default=None, max_length=32),
 ) -> dict[str, object]:
     start_time, end_time = _range(start, end)
-    with connect() as db:
+    with heavy.limited("heatmap"), connect() as db:
         row = db.execute("SELECT name FROM cameras WHERE id=? AND archived_at IS NULL", (camera_id,)).fetchone()
         if row is None:
             raise HTTPException(status_code=404, detail="Camera not found")

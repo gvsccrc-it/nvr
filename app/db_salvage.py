@@ -217,6 +217,11 @@ def _work_out_derived(out: sqlite3.Connection) -> None:
     if {"alarms", "alarm_counts"} <= names:  # The alarm inbox's counts (#517)
         for statement in RECOUNT:
             out.execute(statement)
+    if {"ai_tracks", "ai_track_spans"} <= names:  # Each camera's longest track, which bounds a search (#515)
+        from app.migrations.m0097_track_spans import RESPAN
+
+        for statement in RESPAN:
+            out.execute(statement)
 
 
 def _copy_sequences(damaged: Path, out: sqlite3.Connection) -> None:

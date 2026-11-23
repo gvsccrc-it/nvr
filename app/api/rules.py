@@ -10,7 +10,7 @@ from typing import Annotated, Literal, Union
 from fastapi import APIRouter, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from app import rule_actions
+from app import heavy, rule_actions
 from app.principal import Administrator
 from app.rules import Rule, replay
 from app.scheduling import validate_schedule
@@ -380,7 +380,8 @@ def test_rule(definition: RuleDefinition, _: Administrator) -> dict[str, object]
         condition_type=definition.condition.type, condition=definition.condition.model_dump(exclude={"type"}), classes=frozenset(definition.classes),
         schedule=definition.schedule.model_dump() if definition.schedule else None, cooldown=timedelta(seconds=definition.cooldown_seconds), active_from=start,
     )
-    events = replay(rule, start, end)
+    with heavy.limited("rule test"):  # Every camera's last day, at most a few at once and with a time budget (#515)
+        events = replay(rule, start, end)
     # Listed, never run: test mode performs no action.
     actions = rule_actions.describe([action.model_dump() for action in definition.actions])
     return {"start": start.isoformat(), "end": end.isoformat(), "events": events, "count": len(events), "actions": actions,
