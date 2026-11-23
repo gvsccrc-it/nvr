@@ -36,6 +36,7 @@ SIGNATURE_WINDOW_SECONDS = 300
 FUTURE_SLACK = timedelta(minutes=5)
 MAX_AGE = timedelta(days=7)
 KEEP_EVENTS = timedelta(days=90)
+MESSAGES_PER_MINUTE = 600  # Kept from one MQTT or Home Assistant source a minute: the allowance an HTTP source has (#380, #528)
 MIN_SECRET = 16
 MAX_SOURCES = 50
 MAX_MAPPINGS_PER_SOURCE = 500
@@ -183,8 +184,48 @@ def receive_http(source_id: str, body: bytes, headers: Any, *, now: datetime | N
     return result
 
 
+_windows: dict[str, list[float]] = {}  # Each source's kept messages this minute (monotonic times)
+_uncounted: dict[str, dict[str, int]] = {}  # Messages not kept since the counts were last saved: {"dropped": n, "unmapped": n}
+
+
+def _within_allowance(source_id: str) -> bool:
+    """Whether this source may have one more message kept this minute; if so it is counted."""
+    clock = time.monotonic()
+    window = [moment for moment in _windows.get(source_id, []) if clock - moment < 60]
+    if len(window) >= MESSAGES_PER_MINUTE:
+        _windows[source_id] = window
+        return False
+    window.append(clock)
+    _windows[source_id] = window
+    return True
+
+
+def _not_kept(source_id: str, why: str) -> None:
+    counts = _uncounted.setdefault(source_id, {"dropped": 0, "unmapped": 0})
+    counts[why] += 1
+
+
+def save_counts(now: datetime | None = None) -> None:
+    """Add the messages not kept since the last save to each source's counts: one write a source a pass, never one a message."""
+    if not _uncounted:
+        return
+    pending = dict(_uncounted)
+    _uncounted.clear()
+    with connect() as db:
+        db.executemany("UPDATE event_sources SET dropped_count=dropped_count+?,unmapped_count=unmapped_count+?,counted_since=COALESCE(counted_since,?) WHERE id=?",
+                       [(counts["dropped"], counts["unmapped"], _iso(now or _now()), source_id) for source_id, counts in pending.items()])
+
+
+def _maps_messages(db: sqlite3.Connection, source_id: str, topic: str) -> bool:
+    """Whether a mapping of this source takes a plain message on this topic (an ``mqtt_message`` on it, or any type)."""
+    return any(not (types := json.loads(row["types_json"])) or "mqtt_message" in types
+               for row in db.execute("SELECT types_json FROM event_mappings WHERE source_id=? AND (subject=? OR subject='*')", (source_id, topic[:128])))
+
+
 def receive_message(source_id: str, topic: str, payload: bytes, *, now: datetime | None = None) -> dict[str, Any] | None:
-    """Accept a message from an MQTT source. JSON that is an event is used as it is; anything else becomes a generic event about the topic. None if it is refused."""
+    """Accept a message from an MQTT source. JSON that is an event is used as it is; anything else becomes a generic event about the topic, kept only
+    when a mapping takes it. At most ``MESSAGES_PER_MINUTE`` are kept a minute from one source; the rest, and the unmapped messages, are counted
+    on the source and not stored (#528). None if it is not kept."""
     now = now or _now()
     try:
         document: Any = json.loads(payload.decode("utf-8"))
@@ -194,11 +235,18 @@ def receive_message(source_id: str, topic: str, payload: bytes, *, now: datetime
     except EventRefused as exc:
         logger.info("An MQTT event from %s was refused: %s", source_id, exc.reason)
         return None
-    if event is None:
-        event = {"event_id": "", "type": "mqtt_message", "subject": topic[:128], "message": payload.decode("utf-8", errors="replace")[:MAX_MESSAGE], "data": {}, "occurred_at": now}
     with connect() as db:
         source = db.execute("SELECT * FROM event_sources WHERE id=? AND enabled=1 AND kind IN ('mqtt','home_assistant')", (source_id,)).fetchone()
         if source is None:
+            return None
+        if event is None:
+            # Not an event: kept only when a mapping takes it, as decided on #528. A broker's every message used to become a stored event.
+            if not _maps_messages(db, source_id, topic):
+                _not_kept(source_id, "unmapped")
+                return None
+            event = {"event_id": "", "type": "mqtt_message", "subject": topic[:128], "message": payload.decode("utf-8", errors="replace")[:MAX_MESSAGE], "data": {}, "occurred_at": now}
+        if not _within_allowance(source_id):
+            _not_kept(source_id, "dropped")
             return None
         db.execute("BEGIN IMMEDIATE")
         try:
@@ -215,11 +263,21 @@ def receive_message(source_id: str, topic: str, payload: bytes, *, now: datetime
 
 # --- sources and mappings (administrators) --------------------------------------------------------------------------------------------------
 
+def takes_everything(topic_filter: str | None) -> bool:
+    """A filter with no fixed level (``#``, ``+/#``, ``+/+``): every message on the broker, or nearly."""
+    return bool(topic_filter) and all(level in {"#", "+"} for level in str(topic_filter).strip().split("/"))
+
+
 def _check_filter(value: str) -> str:
     try:
-        return mqtt.validate_filter(value)
+        checked = mqtt.validate_filter(value)
     except ValueError as exc:
         raise SourceError(str(exc)) from exc
+    if takes_everything(checked):
+        # As decided on #528: a filter must name at least one fixed level. A source saved with one before keeps running, under the allowance,
+        # marked on its page, until it is next edited.
+        raise SourceError("Name at least one fixed level in the topic filter, for example site/doors/#: a filter of only # or + takes every message on the broker")
+    return checked
 
 
 def _validated(db: sqlite3.Connection, fields: dict[str, Any], current: sqlite3.Row | None) -> tuple[str, bytes | None, dict[str, Any], str | None]:
@@ -238,7 +296,9 @@ def _validated(db: sqlite3.Connection, fields: dict[str, Any], current: sqlite3.
         return kind, secret, settings, None
     if kind == "mqtt":
         previous = json.loads(current["settings_json"]) if current is not None else {}
-        settings = {"topic": _check_filter(fields.get("topic") or previous.get("topic") or ""), "allow_private": bool(previous.get("allow_private", False) if fields.get("allow_private") is None else fields["allow_private"])}
+        switching_off = current is not None and not fields.get("topic") and fields.get("enabled") is False and takes_everything(previous.get("topic"))
+        # A source saved with a filter that takes everything must be narrowed when next edited (#528), but can always be switched off as it is
+        settings = {"topic": previous["topic"] if switching_off else _check_filter(fields.get("topic") or previous.get("topic") or ""), "allow_private": bool(previous.get("allow_private", False) if fields.get("allow_private") is None else fields["allow_private"])}
         if fields.get("url"):
             try:
                 rule_actions._check_broker(fields["url"].strip(), settings["allow_private"])
@@ -277,7 +337,10 @@ def source_view(db: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
     settings = json.loads(row["settings_json"])
     return {"id": row["id"], "name": row["name"], "kind": row["kind"], "enabled": bool(row["enabled"]), "target": row["target"], "topic": settings.get("topic"),
             "allow_private": bool(settings.get("allow_private")), "has_secret": row["secret_ciphertext"] is not None, "last_event_at": row["last_event_at"], "last_error": row["last_error"],
-            "created_at": row["created_at"], "mappings": mapping_views(db, row["id"]), "events": db.execute("SELECT COUNT(*) FROM external_events WHERE source_id=?", (row["id"],)).fetchone()[0]}
+            "created_at": row["created_at"], "mappings": mapping_views(db, row["id"]), "events": db.execute("SELECT COUNT(*) FROM external_events WHERE source_id=?", (row["id"],)).fetchone()[0],
+            # Messages not kept (#528): over the allowance, or not events and matched by no mapping; and a filter that takes everything on the broker
+            "not_kept": {"over_allowance": int(row["dropped_count"]), "unmapped": int(row["unmapped_count"]), "since": row["counted_since"]},
+            "filter_takes_everything": row["kind"] == "mqtt" and takes_everything(settings.get("topic"))}
 
 
 def mapping_views(db: sqlite3.Connection, source_id: str) -> list[dict[str, Any]]:
@@ -430,6 +493,7 @@ class ExternalEventManager:
     async def _run(self) -> None:
         while True:
             try:
+                await asyncio.to_thread(save_counts)
                 await self.reconcile()
             except asyncio.CancelledError:
                 raise

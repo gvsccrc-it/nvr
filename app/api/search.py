@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from fastapi import APIRouter, HTTPException, Query, Response
 
 from app import console
-from app import clip, heavy, privacy, search, semantic, similar, track_pictures, track_privacy
+from app import clip, heavy, privacy, search_audit, search, semantic, similar, track_pictures, track_privacy
 from app.attributes import DIRECTIONS, PALETTE, VEHICLE_TYPES
 from app.principal import CurrentUser, requires_scope
 from app.store import connect
@@ -71,6 +71,8 @@ def search_tracks(
         searched = {camera_id: names[camera_id] for camera_id in user.access.only(wanted)}
         results, truncated = search.find_tracks(db, list(searched), start_time, end_time, zone=zone_box, order=order, limit=limit, **filters)
         coverage = search.coverage(db, searched, start_time, searched_until)
+    search_audit.log(user, "attributes", {**{key: value for key, value in filters.items() if value}, "zone": zone, "cameras": sorted(searched),
+                                          "start": start_time.astimezone(timezone.utc).isoformat(), "end": end_time.astimezone(timezone.utc).isoformat()})  # (#519)
     return {"start": start_time.astimezone(timezone.utc).isoformat(), "end": end_time.astimezone(timezone.utc).isoformat(), "results": results, "truncated": truncated,
             "coverage": coverage, "coverage_note": "No match in time that was not analyzed means nothing was looked at; unanalyzed time is listed with the results."}
 
@@ -134,6 +136,8 @@ def ask(
         else:
             found = {"mode": "browse", "results": [], "candidates": 0, "unindexed": 0, "candidates_truncated": False}
             coverage = search.coverage(db, searched, start_time, start_time)
+    search_audit.log(user, "words", {"words": q, "cameras": sorted(searched), "start": start_time.astimezone(timezone.utc).isoformat(),
+                                     "end": end_time.astimezone(timezone.utc).isoformat()})  # The words, never the image-text model's embedding of them (#519)
     notes = {"image-text": "Matched against each object's picture by the image-text model.",
              "attributes": "No image-text model is installed, so results are ranked by the colors, vehicle type and direction named in the description.",
              "browse": "Nothing in the description could be matched to an object, so these are the newest in range."}
@@ -184,6 +188,8 @@ def similar_tracks(
             if found_id in views:
                 results.append({**views[found_id], "similarity": round(max(0.0, min(1.0, score)), 3), "rank": rank})
         coverage = search.coverage(db, searched, start_time, min(end_time, datetime.now(timezone.utc)))
+    search_audit.log(user, "similar", {"track_id": track_id, "min_similarity": min_similarity, "cameras": sorted(searched),
+                                       "start": start_time.astimezone(timezone.utc).isoformat(), "end": end_time.astimezone(timezone.utc).isoformat()})  # The object it started from, never its embedding (#519)
     if sort == "time":
         results.sort(key=lambda item: (item["first_seen_at"], item["rank"]))
     return {"track_id": track_id, "start": start_time.astimezone(timezone.utc).isoformat(), "end": end_time.astimezone(timezone.utc).isoformat(), "results": results,

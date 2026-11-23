@@ -8,6 +8,10 @@ interface Mapping { subject: string; types: string[]; camera_ids: string[] }
 interface Source {
   id: string; name: string; kind: "http" | "mqtt" | "home_assistant"; enabled: boolean; target: string | null; topic: string | null; allow_private: boolean; has_secret: boolean;
   last_event_at: string | null; last_error: string | null; events: number; mappings: Mapping[];
+  /** Messages not stored (#528): over the 600-a-minute allowance, or plain messages no mapping takes. */
+  not_kept?: { over_allowance: number; unmapped: number; since: string | null };
+  /** A filter of only # or + saved before #528: it takes every message on the broker and must be narrowed when next edited. */
+  filter_takes_everything?: boolean;
 }
 interface Draft { id: string | null; kind: "http" | "mqtt"; name: string; enabled: boolean; secret: string; url: string; topic: string; allow_private: boolean; mappings: Mapping[]; saved: boolean }
 interface SeenEvent { id: string; type: string; label: string; subject: string | null; occurred_at: string; mapped: boolean }
@@ -173,7 +177,14 @@ export function EventSourcesSettings() {
               <span className="muted">
                 {source.kind === "http" ? `POST ${inboundPath(source.id)}` : source.kind === "mqtt" ? `MQTT ${source.target ?? ""} ${source.topic ?? ""}` : "From Home Assistant"} · {source.events} events{source.enabled ? "" : " · off"}
                 {source.last_error ? ` · ${source.last_error}` : ""}
+                {source.not_kept?.over_allowance ? ` · ${source.not_kept.over_allowance.toLocaleString()} over the allowance of 600 a minute, not kept` : ""}
+                {source.not_kept?.unmapped ? ` · ${source.not_kept.unmapped.toLocaleString()} messages no mapping takes, not kept` : ""}
               </span>
+              {source.filter_takes_everything ? (
+                <p className="notice" data-tone="warn" role="note">
+                  The topic filter {source.topic} takes every message on the broker. Name at least one fixed level (for example site/doors/#) when you next edit {source.name}.
+                </p>
+              ) : null}
               <span className="field-actions">
                 {source.kind !== "home_assistant" ? <button type="button" className="button" onClick={() => edit(source)}>Edit {source.name}</button> : null}
                 <button type="button" className="button" data-variant="ghost" onClick={() => setShown(shown === source.id ? null : source.id)}>Recent events</button>
