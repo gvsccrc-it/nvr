@@ -125,12 +125,19 @@ def list_alarms(
 
 
 @router.get("/api/alarms/assignees")
-def list_assignees(_: CurrentUser, camera_id: str | None = Query(default=None, max_length=64)) -> dict[str, object]:
-    """Who an alarm can be assigned to: with a camera, the people who can see it."""
+def list_assignees(user: CurrentUser, camera_id: str | None = Query(default=None, max_length=64)) -> dict[str, object]:
+    """Who an alarm of this camera can be assigned to: the enabled accounts that can see it. The caller must see the camera too; without one,
+    only the caller. It listed every account to anyone signed in, administrators and disabled ones included, which told a guesser which
+    names to try (#521)."""
+    if not camera_id:
+        return {"users": [{"id": int(user["id"]), "username": user["username"]}]}
+    if not user.access.can_see(camera_id):
+        raise HTTPException(status_code=404, detail="Camera not found")
     with connect() as db:
-        rows = db.execute("SELECT id,username FROM users ORDER BY username COLLATE NOCASE").fetchall()
-        if camera_id:
-            rows = [row for row in rows if may_view_camera(db, int(row["id"]), camera_id)]
+        if db.execute("SELECT 1 FROM cameras WHERE id=?", (camera_id,)).fetchone() is None:
+            raise HTTPException(status_code=404, detail="Camera not found")
+        rows = db.execute("SELECT id,username FROM users WHERE disabled_at IS NULL ORDER BY username COLLATE NOCASE").fetchall()
+        rows = [row for row in rows if may_view_camera(db, int(row["id"]), camera_id)]
     return {"users": [dict(row) for row in rows]}
 
 
