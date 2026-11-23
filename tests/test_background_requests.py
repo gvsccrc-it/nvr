@@ -68,8 +68,9 @@ class OpenIncidentsTests(Case):
         made = self.incidents()
         one = client.get("/api/incidents?state=open").json()["incidents"]
         two = client.get("/api/incidents?state=active").json()["incidents"] + client.get("/api/incidents?state=acknowledged").json()["incidents"]
-        self.assertEqual({item["id"] for item in one}, {made["active"], made["acknowledged"], made["other camera"]})
+        # The same as the two requests it replaces. (The application may have open incidents of its own, raised as it starts.)
         self.assertEqual({item["id"] for item in one}, {item["id"] for item in two})
+        self.assertLessEqual({made["active"], made["acknowledged"], made["other camera"]}, {item["id"] for item in one})
         self.assertNotIn(made["recovered"], {item["id"] for item in one})
         self.assertEqual([item["last_seen_at"] for item in one], sorted((item["last_seen_at"] for item in one), reverse=True))
 
