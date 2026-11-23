@@ -591,7 +591,7 @@ class ImportTests(FailoverCase):
                 response.extensions["failover_request_signature"] = request
                 return response
 
-            async def _download(self, settings, secret, epoch, segment_id, target, listed_size):
+            async def _download(self, settings, secret, epoch, segment_id, target, listed_size, **_options):
                 if segment_id == 11:
                     raise failover.MissingFootage  # Removed by the standby's retention
                 target.parent.mkdir(parents=True, exist_ok=True)
