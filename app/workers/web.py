@@ -39,9 +39,19 @@ def main() -> None:
     db_health.install_log_filter("web")  # A background task of the web process that meets a damaged database says so once and fails the health check (#453)
     # Forwarded headers are believed only from NVR_TRUSTED_PROXIES (app.network), never by uvicorn on its own: its default trusts any 127.0.0.1 sender.
     open_files.raise_limit()
-    # The protocol closes connections that send no request and holds the number of connections to a limit (app.connection_guard, #546).
-    uvicorn.run("app.main:app", host=listen_host(), port=listen_port(), timeout_graceful_shutdown=10, log_config=log_config(), proxy_headers=False,
-                http="app.connection_guard:GuardedProtocol")
+    uvicorn.run("app.main:app", **server_settings())
+
+
+def server_settings() -> dict[str, object]:
+    """How the web server runs; the tests start a server with the same settings.
+
+    - The protocol closes connections that send no request and holds the number of connections to a limit (app.connection_guard, #546).
+    - No WebSocket compression (#545): uvicorn offers it by default and browsers ask for it, and then every piece of live video was deflated
+      on the event loop, about 3.4 ms for 150 kB at a ratio of 1.000 (video is already compressed). Sixteen tiles at 4 Mbit/s spent about
+      180 ms of every second there, during which nothing else the web process does on that loop could run. The JSON messages on the
+      sockets are a few hundred bytes."""
+    return {"host": listen_host(), "port": listen_port(), "timeout_graceful_shutdown": 10, "log_config": log_config(), "proxy_headers": False,
+            "http": "app.connection_guard:GuardedProtocol", "ws_per_message_deflate": False}
 
 
 if __name__ == "__main__":
