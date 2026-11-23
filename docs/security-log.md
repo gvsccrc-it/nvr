@@ -18,6 +18,7 @@ Two years (730 days) unless changed: **Security log retention** on the same page
 - A username that belongs to nobody is kept as a keyed digest (`unknown:…`), not as text: people type their password into the username box by mistake. The same text gives the same digest, so repeated attempts still show as one thing.
 - Using an API token does not add a row. Its last-used time, shown in **Settings › Users & access**, is the record; a row per use used to add up to 1,440 rows a day for one token that is polled constantly.
 - An administrator ending someone's session (`session_ended`), disabling or enabling an account (`user_disabled`, `user_enabled`), a password change (`password_changed`) and a change to the site's date and time display (`display_settings_changed`) are recorded.
+- **Searches** (#519): a licence plate search (`search_plate`, with the pattern), an attribute search (`search_attributes`, with its filters), a search in words (`search_words`, with the words) and **Find similar** (`search_similar`, with the object it started from) are recorded with the person, the cameras searched and the time range. Never a picture or an embedding. The same person repeating the same search within a minute adds no row. A plate someone searched for is personal data, so it is kept here, which only administrators read, and nowhere else. The row is written just after the search answers, so the search never waits for it.
 
 ## For developers
 

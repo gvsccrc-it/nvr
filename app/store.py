@@ -29,8 +29,9 @@ def _synchronous() -> str:
     return value if value in {"OFF", "NORMAL", "FULL", "EXTRA"} else "NORMAL"
 
 
-def connect() -> sqlite3.Connection:
-    path = database_path()
+def connect(path: Path | None = None) -> sqlite3.Connection:
+    """The database (``database_path()`` unless ``path`` names it: work handed to another thread keeps the file it was meant for)."""
+    path = path or database_path()
     key = str(path)
     if key not in _prepared or not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)

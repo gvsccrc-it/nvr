@@ -9,7 +9,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, HTTPException, Query, Response, status
 from pydantic import BaseModel, Field, field_validator
 
-from app import plates, track_privacy
+from app import plates, search_audit, track_privacy
 from app.audit import record
 from app.principal import Administrator, CurrentUser, requires_scope
 from app.store import connect
@@ -274,6 +274,8 @@ def search_plates(
         rows = plates.search(db, q, camera_ids=visible, start=start_time.astimezone(timezone.utc).isoformat(), end=end_time.astimezone(timezone.utc).isoformat(),
                              lookalikes=lookalikes, min_confidence=min_confidence, limit=limit + 1, order=order)
         reading = {row["camera_id"] for row in db.execute("SELECT camera_id FROM plate_settings WHERE enabled=1")}
+    search_audit.log(user, "plate", {"pattern": q, "lookalikes": lookalikes, "min_confidence": min_confidence, "cameras": sorted(visible),
+                                     "start": start_time.astimezone(timezone.utc).isoformat(), "end": end_time.astimezone(timezone.utc).isoformat()})  # Who looked for which vehicle (#519)
     return {"query": q, "pattern": glob, "lookalikes": lookalikes, "start": start_time.astimezone(timezone.utc).isoformat(), "end": end_time.astimezone(timezone.utc).isoformat(),
             "results": [plates.read_view(row) for row in rows[:limit]], "truncated": len(rows) > limit,
             "cameras_reading": sorted(camera_id for camera_id in visible if camera_id in reading),
