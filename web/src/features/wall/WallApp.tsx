@@ -1,7 +1,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useReducer, useState, type FormEvent } from "react";
 import { api, ApiError, onSessionExpired } from "@/api/client";
-import { useCameras, useDisplaySettings, useLiveViews } from "@/api/queries";
+import { dropSessionData, useCameras, useDisplaySettings, useLiveViews } from "@/api/queries";
 import type { Camera, SavedView } from "@/api/types";
 import { popInSummary } from "@/features/live/AlarmBanner";
 import { useViewingPrefs } from "@/features/live/bandwidth";
@@ -61,7 +61,7 @@ export function WallApp() {
     document.title = "Video wall";
   }, []);
   // A revoked or expired token ends the session: go back to the token form.
-  useEffect(() => onSessionExpired(() => client.setQueryData(sessionKey, null)), [client]);
+  useEffect(() => onSessionExpired(() => dropSessionData(client, sessionKey, [])), [client]);  // The wall's views and cameras go with it (#538)
 
   if (session.isPending) return session.failureCount ? <Waiting /> : <div className="app-loading" role="status"><span className="spinner" /> <span>Loading…</span></div>;
   if (!session.data) return <WallSignIn />;

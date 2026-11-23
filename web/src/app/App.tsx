@@ -2,7 +2,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, type ReactNode } from "react";
 import { createBrowserRouter, Navigate, Outlet, RouterProvider } from "react-router";
 import { onSessionExpired } from "@/api/client";
-import { keys, useMe, usePublicBranding, useSetupStatus } from "@/api/queries";
+import { dropSessionData, useMe, usePublicBranding, useSetupStatus } from "@/api/queries";
 import type { Me } from "@/api/types";
 import { EnrolmentRequired } from "@/features/auth/EnrolmentRequired";
 import { SetupPage } from "@/features/auth/SetupPage";
@@ -114,7 +114,7 @@ export function App() {
   useEffect(() => {
     if (branding.data) reapplyBranding(branding.data);
   }, [branding.data]);
-  useEffect(() => onSessionExpired(() => client.setQueryData(keys.me, null)), [client]);
+  useEffect(() => onSessionExpired(() => dropSessionData(client)), [client]);
 
   if (setup.isPending || (setup.data?.setup_required === false && me.isPending)) {
     return <div className="app-loading" role="status"><span className="spinner" /> <span>Loading…</span></div>;
