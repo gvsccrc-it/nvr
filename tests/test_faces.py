@@ -13,7 +13,7 @@ from unittest.mock import patch
 import numpy as np
 from fastapi.testclient import TestClient
 
-from app import face_models, faces
+from app import credentials, face_models, faces
 from app.main import app
 from app.principal import current_user
 from app.store import connect, initialize
@@ -105,7 +105,7 @@ class FindAndAddTests(Case):
                          ("Visitor A", "Trespassed 2026-11-01", 1, True, "admin", False, True))
         self.assertEqual(self.client.get(f"/api/faces/watch/{entry['id']}/picture").content[:2], b"\xff\xd8")
         with connect() as db:
-            stored = np.frombuffer(db.execute("SELECT embedding FROM face_embeddings").fetchone()[0], dtype=np.float32)
+            stored = np.frombuffer(credentials.decrypt_bytes(db.execute("SELECT embedding_ciphertext FROM face_embeddings").fetchone()[0]), dtype=np.float32)  # Kept encrypted (#520)
         np.testing.assert_allclose(stored, [1, 0, 0], atol=1e-6)  # The first face, not the second
         self.assertEqual(self.audit_actions(), ["face_search_viewed", "face_watch_added"] if False else ["face_watch_added"])
 
@@ -113,7 +113,7 @@ class FindAndAddTests(Case):
         second = self.add(point=None, box={"x": 0.61, "y": 0.21, "width": 0.09, "height": 0.19}, name="Visitor B", reason="Banned")
         self.assertEqual(second.status_code, 201, second.text)
         with connect() as db:
-            stored = np.frombuffer(db.execute("SELECT embedding FROM face_embeddings WHERE entry_id=?", (second.json()["id"],)).fetchone()[0], dtype=np.float32)
+            stored = np.frombuffer(credentials.decrypt_bytes(db.execute("SELECT embedding_ciphertext FROM face_embeddings WHERE entry_id=?", (second.json()["id"],)).fetchone()[0]), dtype=np.float32)
         np.testing.assert_allclose(stored, [0, 1, 0], atol=1e-6)
         miss = self.add(point=None, box={"x": 0.8, "y": 0.8, "width": 0.1, "height": 0.1})
         self.assertEqual(miss.status_code, 422)
@@ -295,8 +295,8 @@ class SightingTests(Case):
         with connect() as db:
             db.execute("INSERT INTO ai_tracks(id,camera_id,label,first_seen_at,last_seen_at,model_id,model_version,provider) VALUES('t1',?,'person','2026-11-06T12:00:00+00:00','2026-11-06T12:00:00+00:00','m','1','cpu')", (self.camera,))
             for number, seen in (("s1", "2026-11-06T12:00:05+00:00"), ("s2", "2026-11-06T12:30:00+00:00")):
-                db.execute("INSERT INTO face_sightings(id,entry_id,camera_id,track_id,seen_at,similarity,box_json,picture) VALUES(?,?,?,?,?,0.8,'{}',?)",
-                           (number, entry["id"], self.camera, "t1", seen, b"\xff\xd8jpeg" if number == "s1" else None))
+                db.execute("INSERT INTO face_sightings(id,entry_id,camera_id,track_id,seen_at,similarity,box_json,picture_ciphertext) VALUES(?,?,?,?,?,0.8,'{}',?)",
+                           (number, entry["id"], self.camera, "t1", seen, credentials.encrypt_bytes(b"\xff\xd8jpeg") if number == "s1" else None))
         body = self.client.get("/api/faces/sightings").json()["sightings"]
         self.assertEqual([(item["id"], item["entry_name"], item["camera_name"], item["has_picture"]) for item in body],
                          [("s2", "Visitor A", "Front gate", False), ("s1", "Visitor A", "Front gate", True)])
@@ -309,8 +309,8 @@ class SightingTests(Case):
         entry = self.add().json()
         with connect() as db:
             db.execute("INSERT INTO ai_tracks(id,camera_id,label,first_seen_at,last_seen_at,model_id,model_version,provider) VALUES('t1',?,'person','2026-11-06T12:00:00+00:00','2026-11-06T12:00:00+00:00','m','1','cpu')", (self.camera,))
-            db.execute("INSERT INTO face_sightings(id,entry_id,camera_id,track_id,seen_at,similarity,box_json,picture) VALUES('s1',?,?,'t1','2026-11-06T12:00:05+00:00',0.8,'{}',?)",
-                       (entry["id"], self.camera, b"\xff\xd8jpeg"))
+            db.execute("INSERT INTO face_sightings(id,entry_id,camera_id,track_id,seen_at,similarity,box_json,picture_ciphertext) VALUES('s1',?,?,'t1','2026-11-06T12:00:05+00:00',0.8,'{}',?)",
+                       (entry["id"], self.camera, credentials.encrypt_bytes(b"\xff\xd8jpeg")))
 
     def test_fetching_the_same_match_picture_again_does_not_write_another_audit_row(self):
         # A redrawn list fetches each thumbnail again (#306): looking at a picture is recorded, but not once per redraw.

@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 from fastapi.testclient import TestClient
 
-from app import face_scan, faces, rules
+from app import credentials, face_scan, faces, rules
 from app.main import app
 from app.principal import current_user
 from app.store import connect, initialize
@@ -124,7 +124,8 @@ class SightingCase(unittest.TestCase):
             self.entry = faces.create_entry(db, "Visitor A", "Trespassed", None, None, 1)
             self.other = faces.create_entry(db, "Visitor B", "Banned", None, None, 1)
             for entry in (self.entry, self.other):
-                db.execute("INSERT INTO face_embeddings(entry_id,embedding) VALUES(?,?)", (entry, np.asarray(unit(1, 0, 0) if entry == self.entry else unit(0, 1, 0), dtype=np.float32).tobytes()))
+                db.execute("INSERT INTO face_embeddings(entry_id,embedding_ciphertext) VALUES(?,?)",
+                           (entry, credentials.encrypt_bytes(np.asarray(unit(1, 0, 0) if entry == self.entry else unit(0, 1, 0), dtype=np.float32).tobytes())))
         app.dependency_overrides[current_user] = lambda: principal(1, "admin", "administrator")
         self.context = TestClient(app)
         self.client = self.context.__enter__()
@@ -165,7 +166,7 @@ class KeepSightingTests(SightingCase):
             event = db.execute("SELECT condition_type,label,track_id,camera_id FROM rule_events").fetchone()
             alarm = db.execute("SELECT COUNT(*) FROM alarms").fetchone()[0]
         self.assertEqual((sighting["entry_id"], sighting["camera_id"], sighting["track_id"], sighting["similarity"]), (self.entry, self.camera, "t1", 0.9))
-        self.assertEqual(bytes(sighting["picture"])[:2], b"\xff\xd8")
+        self.assertEqual(credentials.decrypt_bytes(sighting["picture_ciphertext"])[:2], b"\xff\xd8")  # Kept encrypted (#520)
         box = json.loads(sighting["box_json"])
         for key, value in {"x": 0.1, "y": 0.2, "width": 0.2, "height": 0.25}.items():
             self.assertAlmostEqual(box[key], value, places=3)
