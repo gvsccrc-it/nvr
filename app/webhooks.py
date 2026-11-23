@@ -47,6 +47,14 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 MAX_ATTEMPTS = 8
 MAX_PENDING_PER_ENDPOINT = 1000
+STALE_AFTER = timedelta(hours=1)  # An event still waiting this long is dropped and counted, not delivered late (#526)
+DROPS_INCIDENT_WINDOW = timedelta(hours=1)  # An incident while a receiver dropped events this recently; it clears an hour after the last
+PRUNE_BATCH = 1000
+ANSWER_BYTES = 64 * 1024  # The most of a receiver's answer read before its connection is closed instead of reused
+
+
+class _AnswerTooLong(Exception):
+    pass
 REQUEST_TIMEOUT_SECONDS = 10
 RETRY_SECONDS = (2, 5, 15, 60, 300, 1800, 3600)
 
@@ -169,6 +177,7 @@ def _endpoint_view(row: sqlite3.Row) -> dict[str, Any]:
         "id": row["id"], "name": row["name"], "url_origin": url_origin(row["target_url_ciphertext"]),
         "events": json.loads(row["events_json"]), "allow_private_receiver": bool(row["allow_private"]),
         "enabled": bool(row["enabled"]), "created_at": row["created_at"], "updated_at": row["updated_at"],
+        "dropped": {"count": int(row["dropped_count"]), "first_at": row["dropped_first_at"], "last_at": row["dropped_last_at"]},
     }
 
 
@@ -237,16 +246,77 @@ def enqueue_event(db: sqlite3.Connection, event_type: str, payload: dict[str, An
     created = 0
     now = _now()
     for target_id, target_name in recipients:
-        pending = db.execute("SELECT COUNT(*) FROM webhook_deliveries WHERE endpoint_id=? AND status IN ('queued','delivering')", (target_id,)).fetchone()[0]
-        delivery_id = str(uuid.uuid4())
-        status = "failed" if pending >= MAX_PENDING_PER_ENDPOINT else "queued"
-        error = "queue_capacity" if status == "failed" else None
+        pending = db.execute("SELECT COUNT(*) FROM (SELECT 1 FROM webhook_deliveries WHERE endpoint_id=? AND status IN ('queued','delivering') LIMIT ?)",
+                             (target_id, MAX_PENDING_PER_ENDPOINT)).fetchone()[0]
+        if pending >= MAX_PENDING_PER_ENDPOINT:
+            # The receiver is this far behind: the event is counted on it, not stored, so a receiver that falls behind cannot fill the database (#526)
+            _count_dropped(db, target_id, 1, now)
+            continue
         cursor = db.execute(
-            "INSERT OR IGNORE INTO webhook_deliveries(id,endpoint_id,endpoint_name,event_id,event_type,payload_json,status,attempt_count,next_attempt_at,error_code,created_at,updated_at) VALUES(?,?,?,?,?,?,?,0,?,?,?,?)",
-            (delivery_id, target_id, target_name, str(payload["event_id"]), event_type, json.dumps(payload, sort_keys=True, separators=(",", ":")), status, now, error, now, now),
+            "INSERT OR IGNORE INTO webhook_deliveries(id,endpoint_id,endpoint_name,event_id,event_type,payload_json,status,attempt_count,next_attempt_at,error_code,created_at,updated_at) VALUES(?,?,?,?,?,?,'queued',0,?,NULL,?,?)",
+            (str(uuid.uuid4()), target_id, target_name, str(payload["event_id"]), event_type, json.dumps(payload, sort_keys=True, separators=(",", ":")), now, now, now),
         )
         created += cursor.rowcount
     return created
+
+
+def _count_dropped(db: sqlite3.Connection, endpoint_id: str, count: int, now: str) -> None:
+    db.execute("UPDATE webhook_endpoints SET dropped_count=dropped_count+?,dropped_first_at=COALESCE(dropped_first_at,?),dropped_last_at=? WHERE id=?",
+               (count, now, now, endpoint_id))
+
+
+def clear_dropped(endpoint_id: str) -> bool:
+    """The administrator has seen the count: start it again."""
+    with connect() as db:
+        return db.execute("UPDATE webhook_endpoints SET dropped_count=0,dropped_first_at=NULL,dropped_last_at=NULL WHERE id=?", (endpoint_id,)).rowcount > 0
+
+
+def drop_stale(now: datetime | None = None) -> int:
+    """Events that have waited longer than ``STALE_AFTER`` are dropped and counted on their receiver: one that comes back after a day gets what
+    is happening, not a day's backlog (#526). Read first (#280), a batch at a time."""
+    cutoff = ((now or datetime.now(timezone.utc)) - STALE_AFTER).isoformat()
+    due = "FROM webhook_deliveries WHERE status='queued' AND created_at<?"
+    dropped = 0
+    with connect() as db:
+        while has_row(db, f"SELECT 1 {due} LIMIT 1", (cutoff,)):
+            rows = db.execute(f"SELECT id,endpoint_id {due} LIMIT ?", (cutoff, PRUNE_BATCH)).fetchall()
+            counts: dict[str, int] = {}
+            for row in rows:
+                if row["endpoint_id"]:
+                    counts[row["endpoint_id"]] = counts.get(row["endpoint_id"], 0) + 1
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                db.execute("DELETE FROM webhook_deliveries WHERE id IN (SELECT value FROM json_each(?)) AND status='queued'", (json.dumps([row["id"] for row in rows]),))
+                for endpoint_id, count in counts.items():
+                    _count_dropped(db, endpoint_id, count, _now())
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            db.execute("COMMIT")
+            dropped += len(rows)
+    return dropped
+
+
+def sync_drop_incidents(now: datetime | None = None) -> None:
+    """An incident for each receiver that dropped events in the last hour, cleared an hour after its last drop: a security system that is
+    quietly not delivering its alerts is something to be told about (#526). Reads first; writes only when there is something to say."""
+    from .incidents import sync_incident
+
+    since = ((now or datetime.now(timezone.utc)) - DROPS_INCIDENT_WINDOW).isoformat()
+    with connect() as db:
+        dropping = db.execute("SELECT id,name,dropped_count,dropped_first_at FROM webhook_endpoints WHERE dropped_last_at>?", (since,)).fetchall()
+        open_keys = {row[0] for row in db.execute("SELECT incident_key FROM incidents WHERE fault_type='webhook_drops' AND fault_active=1")}
+        if not dropping and not open_keys:
+            return
+        seen = set()
+        for row in dropping:
+            key = f"webhook_drops:{row['id']}"
+            seen.add(key)
+            sync_incident(db, incident_key=key, camera_id=None, fault_type="webhook_drops",
+                          summary=f"Webhook {row['name']} is not keeping up: {row['dropped_count']} events dropped since {row['dropped_first_at']}",
+                          active=True, details={"endpoint_id": row["id"], "dropped": int(row["dropped_count"])})
+        for key in open_keys - seen:
+            sync_incident(db, incident_key=key, camera_id=None, fault_type="webhook_drops", summary="Webhook is keeping up again", active=False)
 
 
 def enqueue_test(endpoint_id: str, actor_id: int) -> str | None:
@@ -278,10 +348,11 @@ def prune_deliveries(now: datetime | None = None) -> int:
     receiver's history (#350). Read first, so a pass with nothing due takes no write lock (#280)."""
     cutoff = ((now or datetime.now(timezone.utc)) - timedelta(days=HISTORY_DAYS)).isoformat()
     due = "FROM webhook_deliveries WHERE status IN ('delivered','failed') AND updated_at<?"
+    removed = 0
     with connect() as db:
-        if not has_row(db, f"SELECT 1 {due} LIMIT 1", (cutoff,)):
-            return 0
-        return db.execute(f"DELETE {due}", (cutoff,)).rowcount
+        while has_row(db, f"SELECT 1 {due} LIMIT 1", (cutoff,)):  # A batch at a time, never a month-old day in one statement (#526)
+            removed += db.execute(f"DELETE FROM webhook_deliveries WHERE id IN (SELECT id {due} LIMIT ?)", (cutoff, PRUNE_BATCH)).rowcount
+    return removed
 
 
 def recover_inflight() -> None:
@@ -331,10 +402,16 @@ ATTEMPT_DEADLINE_SECONDS = REQUEST_TIMEOUT_SECONDS + 5  # For a whole attempt: t
 
 
 class WebhookManager:
+    CHECK_EVERY_SECONDS = 60  # Stale events and the drops incident
+
     def __init__(self) -> None:
         self.tasks: list[asyncio.Task[None]] = []
         self.stopping = False
         self._pruned_at = 0.0
+        self._checked_at = 0.0
+        # One client for each receiver and address, kept between deliveries so its connection (and TLS session) is reused: a fresh
+        # handshake for every event held a receiver to a handful a second (#526). One delivery at a time per receiver, so never shared.
+        self._clients: dict[tuple[str, str], httpx.AsyncClient] = {}
 
     async def start(self) -> None:
         self.stopping = False
@@ -347,6 +424,20 @@ class WebhookManager:
             task.cancel()
         await asyncio.gather(*self.tasks, return_exceptions=True)
         self.tasks = []
+        clients, self._clients = list(self._clients.values()), {}
+        for client in clients:
+            await client.aclose()
+
+    def _client(self, endpoint_id: str, target: str) -> httpx.AsyncClient:
+        client = self._clients.get((endpoint_id, target))
+        if client is None:
+            for key in [key for key in self._clients if key[0] == endpoint_id]:  # The receiver's address changed: the old connection goes
+                old = self._clients.pop(key)
+                asyncio.get_running_loop().create_task(old.aclose())
+            client = self._clients[(endpoint_id, target)] = httpx.AsyncClient(
+                timeout=httpx.Timeout(REQUEST_TIMEOUT_SECONDS, connect=3), follow_redirects=False, trust_env=False,
+                limits=httpx.Limits(max_connections=1, max_keepalive_connections=1, keepalive_expiry=60))
+        return client
 
     async def _run(self) -> None:
         while not self.stopping:
@@ -354,6 +445,10 @@ class WebhookManager:
                 if time.monotonic() - self._pruned_at >= PRUNE_EVERY_SECONDS:
                     self._pruned_at = time.monotonic()
                     await asyncio.to_thread(prune_deliveries)
+                if time.monotonic() - self._checked_at >= self.CHECK_EVERY_SECONDS:
+                    self._checked_at = time.monotonic()
+                    await asyncio.to_thread(drop_stale)
+                    await asyncio.to_thread(sync_drop_incidents)
                 delivery = await asyncio.to_thread(claim_due_delivery)
                 if delivery is None:
                     await asyncio.sleep(1)
@@ -380,10 +475,25 @@ class WebhookManager:
             )
             body = json.dumps(json.loads(delivery["payload_json"]), sort_keys=True, separators=(",", ":")).encode("utf-8")
             headers = signed_headers(decrypt(delivery["signing_secret_ciphertext"]), str(delivery["event_id"]), str(delivery["event_type"]), body)
-            async with asyncio.timeout(ATTEMPT_DEADLINE_SECONDS):
-                async with httpx.AsyncClient(timeout=httpx.Timeout(REQUEST_TIMEOUT_SECONDS, connect=3), follow_redirects=False, trust_env=False) as client:
-                    async with client.stream("POST", target, content=body, headers=headers) as response:  # Only the status matters: the answer's body is never read
+            client = self._client(str(delivery["endpoint_id"]), target)
+            code: int | None = None
+            try:
+                async with asyncio.timeout(ATTEMPT_DEADLINE_SECONDS):
+                    async with client.stream("POST", target, content=body, headers=headers) as response:
                         code = int(response.status_code)
+                        # Only the status matters. A short answer is read to its end so the connection can be used again; a long or slow
+                        # one is cut off and its connection closed, so an answer is never held beyond ANSWER_BYTES or the deadline
+                        kept = 0
+                        async for chunk in response.aiter_raw():
+                            kept += len(chunk)
+                            if kept > ANSWER_BYTES:
+                                raise _AnswerTooLong
+            except BaseException as exc:
+                # A connection left in an unknown state is not used again
+                self._clients.pop((str(delivery["endpoint_id"]), target), None)
+                await client.aclose()
+                if code is None or isinstance(exc, asyncio.CancelledError) and not isinstance(exc, TimeoutError):
+                    raise  # No status yet: the attempt failed. (A stop asked for while delivering is not swallowed either.)
             await self._finish(delivery_id, attempt, response_status=code, error_code=None if 200 <= code < 300 else f"receiver_http_{code}", retryable=code == 429 or code >= 500)
         except Exception as exc:
             refused = isinstance(exc, ValueError) and not isinstance(exc, Unresolved)

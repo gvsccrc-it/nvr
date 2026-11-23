@@ -7,7 +7,11 @@ import { failureText, useTabDraft } from "@/features/admin/tabDraft";
 import { formatRelative } from "@/lib/time";
 import { SecretDialog } from "./SecretDialog";
 
-interface Webhook { id: string; name: string; url_origin: string; events: string[]; allow_private_receiver: boolean; enabled: boolean }
+interface Webhook {
+  id: string; name: string; url_origin: string; events: string[]; allow_private_receiver: boolean; enabled: boolean;
+  /** Events not delivered because the receiver had 1,000 waiting, or one waited over an hour (#526). */
+  dropped?: { count: number; first_at: string | null; last_at: string | null };
+}
 interface Delivery { id: string; endpoint_name: string; event_type: string; status: string; attempt_count: number; response_status: number | null; error_code: string | null; created_at: string }
 interface Heartbeat {
   configured: boolean; enabled: boolean; url_origin: string | null; interval_seconds: number | null; allow_private_receiver?: boolean;
@@ -59,7 +63,16 @@ export function NotificationsSettings() {
               <li key={hook.id} aria-label={`Webhook ${hook.name}`}>
                 <strong>{hook.name}</strong> <span className="mono">{hook.url_origin}</span> · {hook.enabled ? "enabled" : "paused"}
                 <div className="muted field-hint">{hook.events.join(", ")}</div>
+                {hook.dropped?.count ? (
+                  <p className="notice" data-tone="warn" role="note">
+                    {hook.dropped.count.toLocaleString()} {hook.dropped.count === 1 ? "event" : "events"} dropped since {formatRelative(hook.dropped.first_at)}: the receiver was not keeping up,
+                    or events waited over an hour. The latest {formatRelative(hook.dropped.last_at)}.
+                  </p>
+                ) : null}
                 <div className="field-actions">
+                  {hook.dropped?.count ? (
+                    <button type="button" className="button" onClick={() => void act(() => api(`/api/webhooks/${hook.id}/dropped/clear`, { method: "POST" }), `Count of dropped events cleared for ${hook.name}.`)}>Clear dropped count</button>
+                  ) : null}
                   <button type="button" className="button" onClick={() => void act(() => api(`/api/webhooks/${hook.id}/test`, { method: "POST" }), `Test event queued for ${hook.name}.`)}>Send test</button>
                   <button type="button" className="button" onClick={() => void act(() => api(`/api/webhooks/${hook.id}`, { method: "PATCH", body: { enabled: !hook.enabled } }), hook.enabled ? `${hook.name} paused.` : `${hook.name} enabled.`)}>{hook.enabled ? "Pause" : "Enable"}</button>
                   <button type="button" className="button" onClick={() => void act(async () => {

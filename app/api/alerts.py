@@ -177,6 +177,18 @@ def post_webhook_secret_rotation(webhook_id: str, user: Administrator) -> dict[s
     return {"signing_secret": secret, "secret_notice": "This secret is shown once. Update the receiver before the next delivery."}
 
 
+@router.post("/api/webhooks/{webhook_id}/dropped/clear", status_code=status.HTTP_204_NO_CONTENT)
+def post_webhook_dropped_clear(webhook_id: str, user: Administrator) -> Response:
+    """Start the receiver's count of dropped events again, once the administrator has seen it (#526)."""
+    from app.webhooks import clear_dropped
+
+    if not clear_dropped(webhook_id):
+        raise HTTPException(status_code=404, detail="Webhook endpoint not found")
+    with connect() as db:
+        audit_record(db, int(user["id"]), "webhook_dropped_cleared", "webhook", webhook_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @router.delete("/api/webhooks/{webhook_id}", status_code=status.HTTP_204_NO_CONTENT)
 def remove_webhook(webhook_id: str, user: Administrator) -> Response:
     if not delete_webhook_endpoint(webhook_id):
