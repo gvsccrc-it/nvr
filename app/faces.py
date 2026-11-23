@@ -6,6 +6,8 @@ list is never kept. Looking for faces on cameras, and the alarm, are the next pa
 """
 from __future__ import annotations
 
+from app.child_env import child_environment
+
 import asyncio
 import json
 import math
@@ -140,7 +142,7 @@ async def frame_at(camera_id: str, at: datetime) -> np.ndarray:
         offset = max(0.0, (at - _parse(row["starts_at"])).total_seconds())
         process = await asyncio.create_subprocess_exec(
             shutil.which("ffmpeg"), "-nostdin", "-hide_banner", "-loglevel", "error", "-ss", f"{offset:.3f}", "-i", str(path), "-frames:v", "1",
-            "-f", "image2pipe", "-c:v", "bmp", "-pix_fmt", "bgr24", "pipe:1", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+            "-f", "image2pipe", "-c:v", "bmp", "-pix_fmt", "bgr24", "pipe:1", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL, env=child_environment())
         try:
             data, _ = await run_to_end(process, timeout=EXTRACT_TIMEOUT)
         except asyncio.TimeoutError:

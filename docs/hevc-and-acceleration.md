@@ -34,6 +34,8 @@ If an accelerated job fails, it is redone in software; if that works, accelerati
 System status shows the reason. In a container, pass the device in (`devices: ["/dev/dri:/dev/dri"]` for Intel/AMD, or the
 NVIDIA container runtime) and make sure the FFmpeg in the image has the encoder.
 
+**What FFmpeg is given of the environment (#547).** FFmpeg, ffprobe and smartctl are started with a short, listed set of variables, never the NVR's secrets: `PATH`, `HOME`, `LANG`, `LANGUAGE`, `TZ`, `TMPDIR`, `LD_LIBRARY_PATH`, `XDG_RUNTIME_DIR`, and every variable starting `LC_`, `LIBVA_`, `MFX_`, `ONEVPL_`, `INTEL_MEDIA_`, `CUDA_` or `NVIDIA_` (the drivers' own settings, such as `LIBVA_DRIVER_NAME`), except one whose name looks like a secret. A driver setting outside that list does not reach FFmpeg: add its prefix to `CHILD_PREFIXES` in `app/child_env.py`. The devices themselves go on FFmpeg's command line.
+
 ## Not covered by automated tests
 
 Real GPUs are not available in CI: backend detection and argument building are tested with a fake runner, and the

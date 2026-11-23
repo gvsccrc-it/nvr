@@ -12,6 +12,8 @@ stream URLs, credentials and the addresses of the configured cameras before it l
 """
 from __future__ import annotations
 
+from app.child_env import secret
+
 import atexit
 import http.client
 import json
@@ -355,7 +357,7 @@ def install(process: str) -> Forwarder | None:
         capacity = int(os.environ.get("NVR_LOG_FORWARD_QUEUE", "2000"))
         if not isinstance(level, int) or capacity < 1:
             raise ValueError("NVR_LOG_FORWARD_LEVEL must be a level name and NVR_LOG_FORWARD_QUEUE a positive number")
-        headers = dict(item.split("=", 1) for item in os.environ.get("NVR_LOG_FORWARD_HEADERS", "").split(",") if "=" in item)
+        headers = dict(item.split("=", 1) for item in secret("NVR_LOG_FORWARD_HEADERS").split(",") if "=" in item)
     except ValueError as exc:
         logging.getLogger("nvr.logforward").error("Log forwarding is off: %s", exc)
         return None

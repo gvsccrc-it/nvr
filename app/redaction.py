@@ -14,6 +14,8 @@ vehicles as label 1 and plates as label 2, set with ``NVR_AI_PLATE_LABEL``). Eve
 """
 from __future__ import annotations
 
+from app.child_env import child_environment
+
 import asyncio
 import json
 import logging
@@ -267,11 +269,11 @@ def redact_clip(source: Path, target: Path, regions: dict[str, Any], camera_id: 
     """Re-encode a rendered clip with its boxes blurred, frame by frame. Returns the frame and blurred-box counts; raises on any failure."""
     decoder = subprocess.Popen([_ffmpeg(), "-nostdin", "-hide_banner", "-loglevel", "error", "-i", str(source), "-map", "0:v:0", "-an",
                                 "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{FRAME_WIDTH}x{FRAME_HEIGHT}", "pipe:1"],
-                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=child_environment())
     encoder = subprocess.Popen([_ffmpeg(), "-nostdin", "-hide_banner", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "bgr24",
                                 "-s", f"{FRAME_WIDTH}x{FRAME_HEIGHT}", "-r", str(OUTPUT_FPS), "-i", "pipe:0", "-c:v", "libx264", "-preset", "ultrafast",
                                 "-crf", "26", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-y", str(target)],
-                               stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                               stdin=subprocess.PIPE, stderr=subprocess.DEVNULL, env=child_environment())
     frames = blurred = 0
     assert decoder.stdout is not None and encoder.stdin is not None
     try:
@@ -434,7 +436,7 @@ async def _frames(manifest: Path, zones: list[dict[str, float]]):
     process = await asyncio.create_subprocess_exec(
         _ffmpeg(), "-nostdin", "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", str(manifest), "-map", "0:v:0", "-an",
         "-vf", _decode_filter(zones, SAMPLE_FPS), "-pix_fmt", "bgr24", "-f", "rawvideo", "pipe:1",
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL, env=child_environment())
     assert process.stdout is not None
     try:
         while True:
@@ -699,7 +701,7 @@ def preview_frame(review_id: str, row: sqlite3.Row, camera_id: str, at: float) -
         try:
             decoded = subprocess.run([_ffmpeg(), "-nostdin", "-hide_banner", "-loglevel", "error", "-ss", f"{offset:.3f}", "-i", str(recording_file_path(span["segment"]["relative_path"])),
                                       "-map", "0:v:0", "-frames:v", "1", "-vf", _decode_filter(plan["zones"], None), "-pix_fmt", "bgr24", "-f", "rawvideo", "pipe:1"],
-                                     capture_output=True, timeout=120, check=False)
+                                     capture_output=True, timeout=120, check=False, env=child_environment())
         except subprocess.TimeoutExpired:
             # FFmpeg taking too long is "no picture", like any other way it fails; it used to be a server error (#386).
             raise LookupError("No picture at that time") from None
@@ -715,7 +717,7 @@ def preview_frame(review_id: str, row: sqlite3.Row, camera_id: str, at: float) -
                 _outline(image, box, (0, 140, 255))
         try:
             encoded = subprocess.run([_ffmpeg(), "-nostdin", "-hide_banner", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{FRAME_WIDTH}x{FRAME_HEIGHT}",
-                                      "-i", "pipe:0", "-frames:v", "1", "-f", "mjpeg", "pipe:1"], input=image.tobytes(), capture_output=True, timeout=60, check=False)
+                                      "-i", "pipe:0", "-frames:v", "1", "-f", "mjpeg", "pipe:1"], input=image.tobytes(), capture_output=True, timeout=60, check=False, env=child_environment())
         except subprocess.TimeoutExpired:
             raise RuntimeError("The picture could not be encoded") from None
         if encoded.returncode != 0 or not encoded.stdout:

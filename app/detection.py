@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from app.child_env import child_environment
+
 import asyncio
 import hashlib
 import json
@@ -490,7 +492,7 @@ async def _decode_frames(source: str, fps: float, hardware: bool):
     args = [executable, "-nostdin", "-hide_banner", "-loglevel", "error", *(acceleration.decode_args() if hardware else []), "-f", "concat", "-safe", "0",
             "-protocol_whitelist", _PROTOCOLS, "-i", "pipe:0", "-an", "-vf", f"fps={fps},scale={MODEL_WIDTH}:{MODEL_HEIGHT}:flags=bilinear",
             "-pix_fmt", "bgr24", "-f", "rawvideo", "pipe:1"]
-    proc = await asyncio.create_subprocess_exec(*args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+    proc = await asyncio.create_subprocess_exec(*args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL, env=child_environment())
     assert proc.stdin and proc.stdout
     proc.stdin.write(_manifest_bytes(source))
     await proc.stdin.drain()

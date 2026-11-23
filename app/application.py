@@ -1,6 +1,8 @@
 """Application factory: one place that assembles middleware, routers and lifecycle."""
 from __future__ import annotations
 
+from app import child_env
+
 import asyncio
 import logging
 import os
@@ -211,7 +213,7 @@ def create_app(*, start_workers: bool = True) -> FastAPI:
 
     app.add_middleware(
         SessionMiddleware,
-        secret_key=os.environ.get("NVR_OIDC_SESSION_SECRET") or secrets.token_urlsafe(48),
+        secret_key=child_env.secret("NVR_OIDC_SESSION_SECRET") or secrets.token_urlsafe(48),  # Or NVR_OIDC_SESSION_SECRET_FILE (#547)
         same_site="lax",
         https_only=secure_cookie(),
         session_cookie="nvr_oidc_flow",

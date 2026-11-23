@@ -12,6 +12,8 @@ Pure scoring is separate from the model, so it is tested without one, and the sa
 """
 from __future__ import annotations
 
+from app.child_env import child_environment
+
 import argparse
 import json
 import shutil
@@ -155,7 +157,7 @@ def decode_frame(path: Path) -> bytes:
     if not executable:
         raise RuntimeError("FFmpeg is required")
     result = subprocess.run([executable, "-nostdin", "-hide_banner", "-loglevel", "error", "-i", str(path), "-vf", f"scale={MODEL_WIDTH}:{MODEL_HEIGHT}:flags=bilinear",
-                             "-frames:v", "1", "-pix_fmt", "bgr24", "-f", "rawvideo", "-"], capture_output=True, timeout=60)
+                             "-frames:v", "1", "-pix_fmt", "bgr24", "-f", "rawvideo", "-"], capture_output=True, timeout=60, env=child_environment())
     if result.returncode != 0 or len(result.stdout) != MODEL_FRAME_BYTES:
         raise RuntimeError(f"{path.name} could not be read as a picture")
     return result.stdout
@@ -179,7 +181,7 @@ def extract(video: Path, folder: Path, every: float, limit: int) -> int:
         raise RuntimeError("FFmpeg is required")
     folder.mkdir(parents=True, exist_ok=True)
     subprocess.run([executable, "-nostdin", "-hide_banner", "-loglevel", "error", "-i", str(video), "-vf", f"fps=1/{every}", "-frames:v", str(limit), "-q:v", "3",
-                    str(folder / "frame_%05d.jpg")], check=True, timeout=1800)
+                    str(folder / "frame_%05d.jpg")], check=True, timeout=1800, env=child_environment())
     return len(list(folder.glob("frame_*.jpg")))
 
 

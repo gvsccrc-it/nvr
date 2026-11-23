@@ -15,6 +15,8 @@ many processes a camera can start a minute, however it fails.
 """
 from __future__ import annotations
 
+from app.child_env import child_environment
+
 import asyncio
 import logging
 import shutil
@@ -51,7 +53,7 @@ async def start_decoder(source: str, protocols: str | None = None) -> "asyncio.s
     from .recording import _PROTOCOLS, _manifest_bytes  # Here, not at the top: recording pulls in much more than this needs
 
     process = await asyncio.create_subprocess_exec(*decoder_arguments(ffmpeg, protocols or _PROTOCOLS), stdin=asyncio.subprocess.PIPE,
-                                                   stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+                                                   stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL, env=child_environment())
     assert process.stdin is not None
     try:
         process.stdin.write(_manifest_bytes(source))

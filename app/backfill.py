@@ -18,6 +18,8 @@ The camera's replay address is taken on the host the administrator entered, as e
 """
 from __future__ import annotations
 
+from app.child_env import child_environment
+
 import asyncio
 import json
 import logging
@@ -275,7 +277,7 @@ async def _probe_seconds(path: Path) -> float:
     if not executable:
         raise RuntimeError("ffprobe is unavailable")
     process = await asyncio.create_subprocess_exec(executable, "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path),
-                                                   stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+                                                   stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL, env=child_environment())
     out, _ = await run_to_end(process, timeout=PROBE_TIMEOUT_SECONDS)
     try:
         return max(0.0, float(out.decode().strip()))
@@ -293,7 +295,7 @@ async def fetch_chunk(url: str, offset: float, duration: float, target: Path, re
                 f"inpoint {offset:.3f}\noutpoint {offset + duration:.3f}\n").encode()
     args = [executable, "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0", "-protocol_whitelist", PROTOCOLS, "-readrate", f"{readrate:.3f}",
             "-i", "pipe:0", "-map", "0:v:0", "-map", "0:a?", "-c", "copy", "-t", f"{duration:.3f}", "-movflags", "+faststart", "-y", str(target)]
-    process = await asyncio.create_subprocess_exec(*args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+    process = await asyncio.create_subprocess_exec(*args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL, env=child_environment())
     try:
         await asyncio.wait_for(process.communicate(manifest), timeout=duration / readrate + FETCH_SLACK_SECONDS)
     except (asyncio.TimeoutError, asyncio.CancelledError):

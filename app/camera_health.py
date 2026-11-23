@@ -10,6 +10,8 @@ below the newest are flagged as outdated.
 """
 from __future__ import annotations
 
+from app.child_env import child_environment
+
 import asyncio
 import csv
 import io
@@ -135,7 +137,7 @@ def _probe_fps(path: Any) -> float | None:
         return None
     try:
         result = subprocess.run([probe, "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=avg_frame_rate", "-of", "json", str(path)],
-                                capture_output=True, text=True, timeout=15, check=False)
+                                capture_output=True, text=True, timeout=15, check=False, env=child_environment())
         rate = json.loads(result.stdout)["streams"][0]["avg_frame_rate"]
         numerator, _, denominator = rate.partition("/")
         value = float(numerator) / float(denominator or 1)

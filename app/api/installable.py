@@ -6,6 +6,8 @@ installed app picks up a new name, colour or icon on its next load.
 """
 from __future__ import annotations
 
+from app.child_env import child_environment
+
 import hashlib
 import shutil
 import subprocess
@@ -69,7 +71,7 @@ def _render(version: str, size: int, maskable: bool, primary: str, accent: str) 
                    "-vf", f"scale={artwork}:{artwork}:force_original_aspect_ratio=decrease,pad={size}:{size}:(ow-iw)/2:(oh-ih)/2:color={background}"]
     command += ["-frames:v", "1", "-f", "image2pipe", "-vcodec", "png", "pipe:1"]
     try:
-        result = subprocess.run(command, input=image, capture_output=True, timeout=10, check=False)
+        result = subprocess.run(command, input=image, capture_output=True, timeout=10, check=False, env=child_environment())
     except subprocess.TimeoutExpired:
         return None
     return result.stdout if result.returncode == 0 and result.stdout.startswith(b"\x89PNG") else None

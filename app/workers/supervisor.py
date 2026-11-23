@@ -7,6 +7,8 @@ incident stays active until it is running and reporting again.
 """
 from __future__ import annotations
 
+from app.child_env import worker_environment
+
 import logging
 import os
 import signal
@@ -84,7 +86,9 @@ class Worker:
     rss_sampled_at: float = 0.0
 
     def start(self) -> None:
-        environment = {**os.environ, "NVR_SUPERVISED": "1"}
+        # Without the secrets this worker does not use (#547): the sign-in secrets reach only the web worker, the backup passphrase only it and
+        # the background worker
+        environment = {**worker_environment(self.name), "NVR_SUPERVISED": "1"}
         self.process = subprocess.Popen([sys.executable, "-m", self.module], env=environment, start_new_session=True)  # Its own process group: see end_group
         self.started_at = time.monotonic()
         self.killed_reason, self.last_rss, self.peak_rss, self.rss_sampled_at = None, None, None, 0.0

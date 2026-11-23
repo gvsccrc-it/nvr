@@ -16,6 +16,8 @@ Either of the first two raises an incident for the volume (``disk_health``), whi
 """
 from __future__ import annotations
 
+from app.child_env import child_environment
+
 import json
 import logging
 import os
@@ -106,7 +108,7 @@ def run_smartctl(device: str) -> dict[str, Any]:
     if not executable:
         raise Unavailable("smartctl is not installed in this container")
     try:
-        result = subprocess.run([executable, "-j", "-a", device], capture_output=True, timeout=SMARTCTL_TIMEOUT_SECONDS, check=False)
+        result = subprocess.run([executable, "-j", "-a", device], capture_output=True, timeout=SMARTCTL_TIMEOUT_SECONDS, check=False, env=child_environment())
     except subprocess.TimeoutExpired:
         raise Unavailable("The disk did not answer in time") from None
     except OSError as exc:

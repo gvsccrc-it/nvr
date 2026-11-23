@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from app.child_env import child_environment
+
 import asyncio
 import hashlib
 import io
@@ -287,7 +289,7 @@ def _has_audio(path: Path) -> bool:
     if not probe:
         raise RuntimeError("ffprobe is unavailable; optional audio cannot be verified")
     try:
-        result = subprocess.run([probe, "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=index", "-of", "csv=p=0", str(path)], capture_output=True, text=True, timeout=15, check=False)
+        result = subprocess.run([probe, "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=index", "-of", "csv=p=0", str(path)], capture_output=True, text=True, timeout=15, check=False, env=child_environment())
     except subprocess.TimeoutExpired:
         # The export's stored error was this exception's text, which includes the command line and the file's path (#386).
         raise RuntimeError("The recording's audio could not be checked in time") from None
@@ -561,7 +563,7 @@ def _first_frame_times(paths: list[Path], stream: str = "v:0") -> dict[Path, flo
             return 0.0
         try:
             result = subprocess.run([probe, "-v", "error", "-select_streams", stream, "-show_entries", "stream=start_time", "-of", "csv=p=0", str(path)],
-                                    capture_output=True, text=True, timeout=15, check=False)
+                                    capture_output=True, text=True, timeout=15, check=False, env=child_environment())
             return max(0.0, float(result.stdout.strip().splitlines()[0]))
         except (subprocess.TimeoutExpired, ValueError, IndexError):
             return 0.0
@@ -1509,7 +1511,7 @@ class ExportManager:
         args[-1:-1] = ["-fs", str(output_limit)]
         args[3:3] = ["-progress", "pipe:1", "-nostats"]
         process = await asyncio.create_subprocess_exec(
-            executable, *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            executable, *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=child_environment()
         )
         self._processes[job_id] = process
         # Cancellation can arrive while create_subprocess_exec is yielding,
@@ -1561,7 +1563,7 @@ def _video_size(path: Path) -> tuple[int, int]:
         raise RuntimeError("ffprobe is unavailable; the recorded picture's size cannot be read for dewarping")
     try:
         result = subprocess.run([executable, "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0", str(path)],
-                                capture_output=True, text=True, timeout=30, check=False)
+                                capture_output=True, text=True, timeout=30, check=False, env=child_environment())
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError("The recorded picture's size could not be read for dewarping in time") from exc
     try:

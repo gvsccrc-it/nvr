@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from app.child_env import child_environment
+
 import asyncio
 import random
 import csv
@@ -201,7 +203,7 @@ async def probe_stream(raw: str, timeout_seconds: float = 8.0) -> dict[str, obje
     ]
     try:
         proc = await asyncio.create_subprocess_exec(
-            *args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
+            *args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL, env=child_environment()
         )
         stdout, _ = await asyncio.wait_for(proc.communicate(_manifest_bytes(source)), timeout=timeout_seconds)
     except (asyncio.TimeoutError, OSError):
@@ -948,7 +950,7 @@ class RecordingManager:
         try:
             args = _motion_buffer_args(executable, spool, row)
             proc = await asyncio.create_subprocess_exec(
-                *args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                *args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=child_environment()
             )
             progress_task = asyncio.create_task(camera_health.watch_progress(proc.stdout, camera_id), name=f"progress-{camera_id}")
             stderr_task = asyncio.create_task(log_stream_warnings(proc.stderr, camera_id), name=f"ffmpeg-log-{camera_id}")
@@ -1071,7 +1073,7 @@ class RecordingManager:
         process: asyncio.subprocess.Process | None = None
         try:
             process = await asyncio.create_subprocess_exec(
-                *args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+                *args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL, env=child_environment()
             )
             if process.stdin is None or process.stdout is None:
                 raise OSError("Unable to start server motion detector")
@@ -1246,8 +1248,7 @@ class RecordingManager:
             list_path = output_dir / "segments.csv"
             await self._status(camera_id, "connecting")
             args = _continuous_args(executable, bool(row["audio_enabled"]), output_dir, list_path, segment_duration)
-            env = os.environ.copy()
-            env["TZ"] = "UTC"
+            env = child_environment(TZ="UTC")  # The listed variables only (#547): FFmpeg reads what cameras send and is given no secret
             process: asyncio.subprocess.Process | None = None
             progress_task: asyncio.Task[None] | None = None
             indexed = False

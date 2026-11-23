@@ -3,6 +3,8 @@
 Licence-plate crops, face pictures and the face-finding frame differ only in how they are scaled, how hard they are compressed and how long they may take."""
 from __future__ import annotations
 
+from app.child_env import child_environment
+
 import shutil
 import subprocess
 
@@ -20,7 +22,7 @@ def encode(image: np.ndarray | None, *, scale: str, quality: int, timeout: float
     try:
         result = subprocess.run([ffmpeg, "-v", "error", "-threads", "1", "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{width}x{height}", "-i", "pipe:0",
                                  "-vf", scale, "-frames:v", "1", "-q:v", str(quality), "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"],
-                                input=np.ascontiguousarray(image, dtype=np.uint8).tobytes(), capture_output=True, timeout=timeout, check=False)
+                                input=np.ascontiguousarray(image, dtype=np.uint8).tobytes(), capture_output=True, timeout=timeout, check=False, env=child_environment())
     except subprocess.TimeoutExpired:
         return None
     return result.stdout if result.returncode == 0 and result.stdout.startswith(b"\xff\xd8") else None

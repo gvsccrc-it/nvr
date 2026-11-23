@@ -16,6 +16,8 @@ Nothing here needs a licence; the models are the ones the NVR already uses.
 """
 from __future__ import annotations
 
+from app.child_env import child_environment
+
 import argparse
 import asyncio
 import json
@@ -107,7 +109,7 @@ async def _frames(path: Path, fps: float, counter: dict[str, int]):
         raise RuntimeError("FFmpeg is required to read the clips")
     process = await asyncio.create_subprocess_exec(
         ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-i", str(path), "-an", "-vf", f"fps={fps},scale={MODEL_WIDTH}:{MODEL_HEIGHT}:flags=bilinear",
-        "-pix_fmt", "bgr24", "-f", "rawvideo", "pipe:1", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        "-pix_fmt", "bgr24", "-f", "rawvideo", "pipe:1", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL, env=child_environment())
     assert process.stdout
     try:
         while True:
@@ -127,7 +129,7 @@ def clip_seconds(path: Path) -> float:
     ffprobe = shutil.which("ffprobe")
     if not ffprobe:
         raise RuntimeError("FFprobe is required to read the clips")
-    result = subprocess.run([ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)], capture_output=True, text=True, check=True)
+    result = subprocess.run([ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)], capture_output=True, text=True, check=True, env=child_environment())
     return float(result.stdout.strip() or 0)
 
 

@@ -13,6 +13,8 @@ one alarm. It carries no session or API token.
 """
 from __future__ import annotations
 
+from app.child_env import child_environment
+
 import asyncio
 import hashlib
 import hmac
@@ -516,7 +518,7 @@ def thumbnail(alarm_id: str) -> bytes | None:
                     [shutil.which("ffmpeg"), "-nostdin", "-hide_banner", "-loglevel", "error", "-threads", "1", "-ss", f"{offset:.3f}", "-i", str(path),
                      "-frames:v", "1", "-vf", (f"{drawbox_filter(segment_zones)}," if segment_zones else "") + "scale=640:-2:force_original_aspect_ratio=decrease",
                      "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"],
-                    capture_output=True, timeout=15, check=False)
+                    capture_output=True, timeout=15, check=False, env=child_environment())
             except subprocess.TimeoutExpired:
                 result = None
             finally:

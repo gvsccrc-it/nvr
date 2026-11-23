@@ -58,13 +58,15 @@ The `nvr-data` volume stores the database and account/session state. `nvr-secret
 | `NVR_LOG_FORWARD_CA` / `NVR_LOG_FORWARD_LEVEL` / `NVR_LOG_FORWARD_QUEUE` | system CAs / `INFO` / `2000` | CA bundle for TLS, lowest level forwarded, records allowed to wait |
 | `NVR_OIDC_TENANT_ID` | unset | Microsoft Entra workforce tenant GUID |
 | `NVR_OIDC_CLIENT_ID` | unset | Entra app registration client ID |
-| `NVR_OIDC_CLIENT_SECRET` | unset | Entra app registration client secret; supply through a secret manager |
+| `NVR_OIDC_CLIENT_SECRET` | unset | Entra app registration client secret; supply through a secret manager, better as a file (next row) |
+| `NVR_OIDC_CLIENT_SECRET_FILE` | unset | Path of a file holding the client secret (a Docker or Compose secret), used when `NVR_OIDC_CLIENT_SECRET` is empty: the preferred form, so the secret is not in the container's environment (#547) |
 | `NVR_OIDC_SESSION_SECRET` | unset | Long random key for the short-lived signed OIDC state cookie |
+| `NVR_OIDC_SESSION_SECRET_FILE` | unset | Path of a file holding the session key, used when `NVR_OIDC_SESSION_SECRET` is empty (preferred, as above) |
 | `NVR_OIDC_ADMIN_ROLES` | unset | Comma-separated Entra app-role values mapped to NVR administrators |
 | `NVR_OIDC_OPERATOR_ROLES` | unset | Comma-separated Entra app-role values mapped to NVR operators |
 | `NVR_DISCOVERY_INTERFACE` | unset | Optional IPv4 address of the NVR host interface attached to the camera VLAN |
-| `NVR_BACKUP_PASSPHRASE` | unset | Enables encrypted configuration backups (at least 16 characters) |
-| `NVR_BACKUP_PASSPHRASE_FILE` | unset | Path of a file holding the backup passphrase, used when `NVR_BACKUP_PASSPHRASE` is empty |
+| `NVR_BACKUP_PASSPHRASE_FILE` | unset | **Preferred:** path of a file holding the backup passphrase (a Docker or Compose secret), so it is not in the container's environment (#547) |
+| `NVR_BACKUP_PASSPHRASE` | unset | Enables encrypted configuration backups (at least 16 characters); used in place of the file when set |
 | `NVR_BACKUP_KEEP` | `14` | Number of configuration backups kept |
 | `NVR_LIVE_TILES_PER_PERSON` / `NVR_LIVE_TILES_PER_WALL` | `16` / `16` | Live tiles one person or API token, and one video wall, may have open at once ([live video](docs/live-video-ready.md)) |
 | `NVR_LIVE_STREAMS` | `32` | Distinct camera streams open for live viewers on the whole server |
@@ -80,6 +82,7 @@ The `nvr-data` volume stores the database and account/session state. `nvr-secret
 | `NVR_UPDATE_CHECK` | `true` | `false` turns the release check off for the whole installation: no request is made at all ([guided updates](docs/guided-updates.md)) |
 | `NVR_UPDATE_FEED_URL` / `NVR_UPDATE_IMAGE` | GitHub's releases / `ghcr.io/gvsccrc-it/nvr` | A different releases feed (a mirror), and the image the upgrade commands name |
 | `NVR_LOG_FORWARD_HEADERS` | none | HTTP headers added to OTLP log requests, `Name=value,Name2=value2` (a token for the collector); never logged |
+| `NVR_LOG_FORWARD_HEADERS_FILE` | unset | Path of a file holding those headers, used when `NVR_LOG_FORWARD_HEADERS` is empty |
 | `NVR_MS_LOGIN_URL` / `NVR_MS_GRAPH_URL` | Microsoft's public cloud | The sign-in and Graph addresses for sending mail through Microsoft 365, for a national cloud |
 | `NVR_SEGMENT_SECONDS` | `60` | Length of each recorded segment, 10 to 3600 seconds |
 | `NVR_MOTION_BUFFER_PATH` | `/tmp/nvr-motion-buffer` | Where motion-only cameras keep the seconds before an event until it is confirmed |
@@ -218,7 +221,7 @@ Migrations are forward-only. An image older than the database's recorded schema 
 
 ### Configuration backups and restore
 
-Set `NVR_BACKUP_PASSPHRASE` (at least 16 characters), or point `NVR_BACKUP_PASSPHRASE_FILE` at a file containing it (for example a Docker secret), to enable encrypted configuration backups. Keep a copy of the passphrase off the NVR host. Without it, backups are disabled, the Settings status says so, and nothing is written. A backup contains the database (users, cameras and encrypted camera credentials, groups and policies, saved views, branding, webhooks, and the footage index) and the credential key. It is encrypted with AES-256-GCM using a key derived from the passphrase with scrypt. **Footage is never included**, so protect recordings separately; losing the only recordings disk loses that footage permanently.
+Point `NVR_BACKUP_PASSPHRASE_FILE` at a file containing the passphrase (at least 16 characters; a Docker or Compose secret is best), or set `NVR_BACKUP_PASSPHRASE` itself, to enable encrypted configuration backups. The file is the preferred form: a value in the environment can be seen by anyone who can run `docker inspect`. Either way, only the web and background workers are given it, and no FFmpeg or other program the NVR starts is (#547). Keep a copy of the passphrase off the NVR host. Without it, backups are disabled, the Settings status says so, and nothing is written. A backup contains the database (users, cameras and encrypted camera credentials, groups and policies, saved views, branding, webhooks, and the footage index) and the credential key. It is encrypted with AES-256-GCM using a key derived from the passphrase with scrypt. **Footage is never included**, so protect recordings separately; losing the only recordings disk loses that footage permanently.
 
 The number of cameras the AI analyses is not fixed: it follows what the machine can carry (CPU, AI model time, memory), or can be set by hand: see [docs/ai-capacity.md](docs/ai-capacity.md).
 
