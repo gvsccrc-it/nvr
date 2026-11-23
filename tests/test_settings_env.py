@@ -86,7 +86,9 @@ class NumbersTests(unittest.TestCase):
     SETTINGS = (("NVR_STOP_GRACE_SECONDS", "app.workers.supervisor", "STOP_GRACE_SECONDS", 25, 1, 600),
                 ("NVR_TAMPER_SAMPLE_SECONDS", "app.tamper", "SAMPLE_SECONDS", 15, 1, 3600),
                 ("NVR_SMART_INTERVAL_SECONDS", "app.smart", "REFRESH_SECONDS", 6 * 3600, 60, 7 * 86400),
-                ("NVR_WORKER_START_SECONDS", "app.workers.liveness", "START_LIMIT_SECONDS", 300, 30, 3600))
+                ("NVR_WORKER_START_SECONDS", "app.workers.liveness", "START_LIMIT_SECONDS", 300, 30, 3600),
+                ("NVR_HEAVY_REQUESTS", "app.heavy", "AT_ONCE", 4, 1, 64),
+                ("NVR_HEAVY_REQUEST_SECONDS", "app.heavy", "BUDGET_SECONDS", 30, 1, 600))
 
     def loaded(self, variable: str, value: str, module: str, attribute: str) -> float:
         """What the setting comes to in a fresh interpreter: the module must load."""

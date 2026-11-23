@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from fastapi import APIRouter, HTTPException, Query, Response
 
 from app import console
-from app import clip, privacy, search, semantic, similar, track_pictures, track_privacy
+from app import clip, heavy, privacy, search, semantic, similar, track_pictures, track_privacy
 from app.attributes import DIRECTIONS, PALETTE, VEHICLE_TYPES
 from app.principal import CurrentUser, requires_scope
 from app.store import connect
@@ -64,7 +64,7 @@ def search_tracks(
         "direction": _choice("direction", direction, DIRECTIONS),
     }
     searched_until = min(end_time, datetime.now(timezone.utc))
-    with connect() as db:
+    with heavy.limited("search"), connect() as db:
         names = {row["id"]: row["name"] for row in db.execute("SELECT id,name FROM cameras")}
         # Cameras this person may not see are not searched, and are not distinguishable from cameras that do not exist.
         wanted = [camera_id for camera_id in (camera_ids or names) if camera_id in names]
@@ -101,7 +101,7 @@ def ask(
         raise HTTPException(status_code=422, detail="start and end must be timestamps with a time zone") from None
     if (end_time - start_time).total_seconds() <= 0 or (end_time - start_time) > search.MAX_RANGE:
         raise HTTPException(status_code=422, detail=f"The range must be positive and at most {search.MAX_RANGE.days} days")
-    with connect() as db:
+    with heavy.limited("search"), connect() as db:
         if utc_offset_minutes is None:
             # "6 pm" and "yesterday" mean the site's clock, the one every time in the application is shown in.
             row = db.execute("SELECT time_zone FROM site_display_settings WHERE singleton_id=1").fetchone()
@@ -167,7 +167,7 @@ def similar_tracks(
         raise HTTPException(status_code=422, detail="start and end must be timestamps with a time zone") from None
     if (end_time - start_time).total_seconds() <= 0 or (end_time - start_time) > search.MAX_RANGE:
         raise HTTPException(status_code=422, detail=f"The range must be positive and at most {search.MAX_RANGE.days} days")
-    with connect() as db:
+    with heavy.limited("search for similar objects"), connect() as db:
         source = db.execute("SELECT camera_id FROM ai_tracks WHERE id=?", (track_id,)).fetchone()
         if source is None or not user.access.can_see(source["camera_id"]) or not track_privacy.whole_track_visible(db, track_id, source["camera_id"]):
             raise HTTPException(status_code=404, detail="Object not found")  # Also an object that touches a privacy mask: its appearance is from the unmasked frames

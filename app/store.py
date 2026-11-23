@@ -43,6 +43,9 @@ def connect() -> sqlite3.Connection:
     db.execute("PRAGMA busy_timeout = 10000")
     db.execute(f"PRAGMA synchronous = {_synchronous()}")
     db.execute(f"PRAGMA journal_size_limit = {log_limit_bytes()}")
+    from . import heavy
+
+    heavy.watch(db)  # Inside a limited request (Insights, search, a rule's test), stopped when its time is up (#515)
     return db
 
 
