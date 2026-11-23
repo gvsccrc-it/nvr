@@ -53,3 +53,5 @@ Storage space comes before the retention policy. A recorder fills its disks by d
 ## Sections of Settings › Recording & storage
 
 The page shows one section at a time, chosen from the tabs along its top: Volumes, Headroom, Disk health, Forecast, Retention (the default and the alarm footage period) and Backups. The tabs work with the arrow keys. The page opens on Volumes each time.
+
+**Reconnects are spread out (#495).** A camera whose stream drops is tried again after 2 to 3 seconds, then after waits that double up to 30 seconds, each with a random share (from half to one and a half times the step, the same on average). Cameras that dropped together, after a switch rebooted or the power went, no longer all start FFmpeg, test their connection and write their status in the same second, and do not all reconnect in the same second when the network comes back: with 200 cameras, at most about 60 attempts fall in any one second, and about 20 once the waits reach their longest. At start the recorder starts cameras 16 at a time, half a second apart.

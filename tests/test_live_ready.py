@@ -6,6 +6,7 @@ import json
 import os
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 from unittest.mock import patch
 
@@ -175,6 +176,11 @@ class KeeperTests(Case):
         asyncio.run(go())
 
     def test_a_failed_stream_is_tried_again_after_a_gap_that_grows(self):
+        # The gaps have a random share added (#495): pinned here at their shortest, as they were before
+        patch = mock.patch("app.live_ready.random.uniform", lambda low, high: low)
+        patch.start()
+        self.addCleanup(patch.stop)
+
         async def go():
             self.camera("a", "Alpha")
             hub, keeper = self.keeper()
@@ -197,6 +203,21 @@ class KeeperTests(Case):
             self.assertNotIn(key, keeper.held)
             keeper.apply("all", desired, now=49.0)
             self.assertIn(key, keeper.held)
+        asyncio.run(go())
+
+    def test_streams_that_failed_together_are_not_all_tried_again_in_the_same_second(self):
+        async def go():
+            for number in range(20):
+                self.camera(f"c{number:02}", f"Camera {number:02}")
+            hub, keeper = self.keeper()
+            desired = self.wanted()
+            keeper.apply("all", desired, now=0.0)
+            for key, _ in desired:
+                hub.streams[key].failed = "The network went down"
+            keeper.apply("all", desired, now=1.0)  # All let go at once (#495)
+            retry_at = [keeper._retry[key][0] for key, _ in desired]
+            self.assertTrue(all(1.0 + live_ready.RETRY_FIRST_SECONDS <= moment <= 1.0 + live_ready.RETRY_FIRST_SECONDS * 1.5 for moment in retry_at), retry_at)
+            self.assertGreater(len({int(moment) for moment in retry_at}), 3)  # Spread over several seconds, not one
         asyncio.run(go())
 
     def test_a_camera_that_is_removed_stops_being_held(self):
