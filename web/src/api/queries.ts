@@ -5,7 +5,7 @@ import { isNativeApp } from "@/native/platform";
 import { disableNativePush } from "@/native/push";
 import { forgetThisPhone, resumeFromSecureStorage } from "@/native/session";
 import type { Lens } from "@/features/dewarp/geometry";
-import type { Branding, MfaChallenge, Camera, CameraGroup, DisplaySettings, ExportJob, ExportRequest, Incident, LiveWorkspaceState, Me, PlaybackTimeline, RedactionEdit, RedactionReview, SavedView, ThemePreference } from "./types";
+import type { Branding, MfaChallenge, Camera, CameraGroup, DisplaySettings, ExportJob, ExportLimits, ExportRequest, Incident, LiveWorkspaceState, Me, PlaybackTimeline, RedactionEdit, RedactionReview, SavedView, ThemePreference } from "./types";
 
 export const keys = {
   setup: ["setup"] as const,
@@ -173,6 +173,15 @@ export function useExportJobs(enabled = true) {
     queryFn: ({ signal }) => api<{ exports: ExportJob[] }>("/api/exports", { signal }).then(result => result.exports),
     // Follow progress closely while work is queued or running.
     refetchInterval: query => (query.state.data?.some(job => job.status === "queued" || job.status === "running") ? 2_000 : STATUS_REFRESH_MS),
+  });
+}
+
+/** The export queue's limits as they apply to this person (#504). */
+export function useExportLimits() {
+  return useQuery({
+    queryKey: [...keys.exports, "limits"],
+    queryFn: ({ signal }) => api<ExportLimits>("/api/exports/limits", { signal }),
+    refetchInterval: STATUS_REFRESH_MS,
   });
 }
 

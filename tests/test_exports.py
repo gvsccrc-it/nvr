@@ -468,7 +468,7 @@ class ExportJobTests(unittest.TestCase):
         self.assertEqual(cleanup["removed_segments"], 1)
 
     def test_queue_limit_is_enforced(self):
-        for _ in range(4):
+        for _ in range(2):  # One person's share of the queue (#504; the whole queue's size is in tests/test_export_queue_turns.py)
             self._create()
         full = self.client.post("/api/exports", json={
             "camera_ids": [self.camera], "start": "2026-10-20T09:59:59Z", "end": "2026-10-20T10:00:02Z",

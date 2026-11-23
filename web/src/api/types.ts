@@ -140,6 +140,15 @@ export interface Incident {
   details?: Record<string, unknown>;
 }
 
+/** The export queue's limits for the person asking (#504). */
+export interface ExportLimits {
+  places: number;
+  kept_for_case_packages: number;
+  job_hours: number;
+  each: number;
+  active: number;
+}
+
 export interface ExportJob {
   id: string;
   status: "queued" | "running" | "completed" | "failed" | "cancelled";

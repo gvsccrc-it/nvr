@@ -29,7 +29,7 @@ from typing import Any, Callable, Iterable
 
 import numpy as np
 
-from . import privacy, viewing_audit
+from . import privacy, queue_turns, viewing_audit
 from .detection import box_iou
 from .recording import recordings_path
 from .retention import acquire_playback, release_playback
@@ -58,7 +58,6 @@ MAX_TRACKS_PER_CAMERA = 2000
 MAX_MANUAL = 50
 MAX_KEYFRAMES = 100
 MAX_CAMERA_SECONDS = 2 * 3600  # Cameras times seconds of footage one review may cover
-MAX_ACTIVE_REVIEWS = 2
 REVIEW_TTL = timedelta(hours=24)
 FOLLOW_SCALES = (0.25, 4.0)
 
@@ -329,6 +328,30 @@ def get_review(review_id: str, requester_id: int, is_admin: bool = False) -> sql
         return db.execute("SELECT * FROM redaction_reviews WHERE id=? AND requested_by=?", (review_id, requester_id)).fetchone()
 
 
+_TYPICAL_REVIEW = "SELECT started_at,analysed_at FROM redaction_reviews WHERE analysed_at IS NOT NULL AND started_at IS NOT NULL ORDER BY analysed_at DESC LIMIT ?"
+
+
+def _check_queue(db: sqlite3.Connection, requested_by: int) -> None:
+    """Refuse a review there is no place for, saying how many are ahead and roughly how long (#504): ``each`` per person, ``places`` in all."""
+    limits = queue_turns.review_limits()
+    active = db.execute("SELECT requested_by,state,started_at FROM redaction_reviews WHERE state IN ('queued','analysing') ORDER BY created_at,rowid").fetchall()
+    mine = [row for row in active if row["requested_by"] == requested_by]
+    if len(mine) < limits["each"] and len(active) < limits["places"]:
+        return
+    now = _now()
+    typical = queue_turns.typical_seconds(db, _TYPICAL_REVIEW)
+    analysing = next((row for row in active if row["state"] == "analysing"), None)
+    analysing_left = queue_turns.remaining(analysing["started_at"], typical, now) if analysing else 0.0
+    frees = analysing_left or typical
+    if len(mine) >= limits["each"]:
+        first = mine[0]
+        wait = queue_turns.remaining(first["started_at"], typical, now) if first["state"] == "analysing" else analysing_left + typical
+        raise queue_turns.QueueFull(f"Your redaction review is still being prepared; it should be ready in {queue_turns.about(wait)}. "
+                                    "Wait for it before asking for another.", wait)
+    raise queue_turns.QueueFull(f"Redaction reviews are busy: {queue_turns.jobs(len(active))} queued or being prepared. "
+                                f"A place usually frees in {queue_turns.about(frees)}.", frees)
+
+
 def create_review(requested_by: int, camera_ids: list[str], start: datetime, end: datetime, kinds: list[str]) -> str:
     wanted = [word for word in kinds if word in KINDS]
     if not wanted or len(set(wanted)) != len(wanted) or len(wanted) != len(kinds):
@@ -342,8 +365,7 @@ def create_review(requested_by: int, camera_ids: list[str], start: datetime, end
     now = _now().isoformat()
     with connect() as db:
         db.execute("BEGIN IMMEDIATE")
-        if db.execute("SELECT COUNT(*) FROM redaction_reviews WHERE state IN ('queued','analysing')").fetchone()[0] >= MAX_ACTIVE_REVIEWS:
-            raise OverflowError("Redaction reviews are busy; wait for one to finish")
+        _check_queue(db, requested_by)
         placeholders = ",".join("?" for _ in camera_ids)
         if {row[0] for row in db.execute(f"SELECT id FROM cameras WHERE id IN ({placeholders})", tuple(camera_ids))} != set(camera_ids):
             raise LookupError("Redaction request contains an unknown camera")
@@ -432,7 +454,8 @@ def _claim_review(review_id: str) -> Any:
         row = db.execute("SELECT * FROM redaction_reviews WHERE id=? AND state='queued'", (review_id,)).fetchone()
         if row is None:
             return None
-        db.execute("UPDATE redaction_reviews SET state='analysing',progress=1,updated_at=? WHERE id=?", (_now().isoformat(), review_id))
+        now = _now().isoformat()
+        db.execute("UPDATE redaction_reviews SET state='analysing',progress=1,started_at=?,updated_at=? WHERE id=?", (now, now, review_id))
         return row
 
 
@@ -462,30 +485,41 @@ async def analyse(review_id: str, detector: RedactionDetector | None = None) -> 
     start, end = _parse(row["requested_start"]), _parse(row["requested_end"])
     held: list[Path] = []
     work = recordings_path() / ".redaction" / review_id
+    hours = queue_turns.review_limits()["job_hours"]
+    limit = asyncio.timeout(hours * 3600)  # A whole review's time limit (#504)
     try:
-        detector = detector or shared_detector()
-        if detector is None:
-            raise RuntimeError("The redaction models are not installed")
-        work.mkdir(parents=True, exist_ok=True)
-        tracks: list[dict[str, Any]] = []
-        durations: dict[str, float] = {}
-        await asyncio.to_thread(fetch_cold_sources, camera_ids, start, end)  # Downloads happen before the lock (#358)
-        plans = await asyncio.to_thread(_plan_and_lease, camera_ids, start, end, held)
-        for index, (camera_id, plan) in enumerate(plans):
-            manifest = work / f"{index}.ffconcat"
-            manifest.write_text(_concat_text(plan["spans"]), encoding="utf-8")
-            durations[camera_id] = round(sum(span["output_end"] - span["output_start"] for span in plan["spans"]), 3)
-            samples: list[tuple[float, list[dict[str, Any]]]] = []
-            number = 0
-            async for data in _frames(manifest, plan["zones"]):
-                image = np.frombuffer(data, dtype=np.uint8).reshape(FRAME_HEIGHT, FRAME_WIDTH, 3)
-                samples.append((number / SAMPLE_FPS, await asyncio.to_thread(detector.detect, image, kinds)))
-                number += 1
-                if number % 25 == 0:
-                    await asyncio.to_thread(_set, review_id, progress=min(95, 1 + int(94 * (index + min(1.0, number / SAMPLE_FPS / max(durations[camera_id], 1))) / len(plans))))
-            tracks.extend(link(samples, camera_id))
-        await asyncio.to_thread(_set, review_id, state="ready", progress=100, error=None, regions_json=json.dumps({"tracks": tracks, "manual": [], "durations": durations, "fingerprint": fingerprint(plans)}, separators=(",", ":")),
-             models_json=json.dumps({"model": detector.model_id, "kinds": sorted(detector.kinds()), "threshold": THRESHOLD, "sample_fps": SAMPLE_FPS}))
+        async with limit:
+            detector = detector or shared_detector()
+            if detector is None:
+                raise RuntimeError("The redaction models are not installed")
+            work.mkdir(parents=True, exist_ok=True)
+            tracks: list[dict[str, Any]] = []
+            durations: dict[str, float] = {}
+            await asyncio.to_thread(fetch_cold_sources, camera_ids, start, end)  # Downloads happen before the lock (#358)
+            plans = await asyncio.to_thread(_plan_and_lease, camera_ids, start, end, held)
+            for index, (camera_id, plan) in enumerate(plans):
+                manifest = work / f"{index}.ffconcat"
+                manifest.write_text(_concat_text(plan["spans"]), encoding="utf-8")
+                durations[camera_id] = round(sum(span["output_end"] - span["output_start"] for span in plan["spans"]), 3)
+                samples: list[tuple[float, list[dict[str, Any]]]] = []
+                number = 0
+                async for data in _frames(manifest, plan["zones"]):
+                    image = np.frombuffer(data, dtype=np.uint8).reshape(FRAME_HEIGHT, FRAME_WIDTH, 3)
+                    samples.append((number / SAMPLE_FPS, await asyncio.to_thread(detector.detect, image, kinds)))
+                    number += 1
+                    if number % 25 == 0:
+                        await asyncio.to_thread(_set, review_id, progress=min(95, 1 + int(94 * (index + min(1.0, number / SAMPLE_FPS / max(durations[camera_id], 1))) / len(plans))))
+                tracks.extend(link(samples, camera_id))
+            await asyncio.to_thread(_set, review_id, state="ready", progress=100, error=None, analysed_at=_now().isoformat(), regions_json=json.dumps({"tracks": tracks, "manual": [], "durations": durations, "fingerprint": fingerprint(plans)}, separators=(",", ":")),
+                 models_json=json.dumps({"model": detector.model_id, "kinds": sorted(detector.kinds()), "threshold": THRESHOLD, "sample_fps": SAMPLE_FPS}))
+    except TimeoutError as exc:
+        if limit.expired():
+            log.warning("Redaction review %s passed its %d-hour limit and was stopped", review_id, hours)
+            reason = f"The review took more than {hours} hour{'s' if hours != 1 else ''}, the most one may take, and was stopped. Ask for a shorter range or fewer cameras."
+        else:  # Something inside timed out on its own account: its reason, as any other failure
+            log.exception("Redaction review %s failed", review_id)
+            reason = str(exc)[:300] or "The review failed"
+        await asyncio.to_thread(_set, review_id, state="failed", error=reason)
     except asyncio.CancelledError:
         _set(review_id, state="failed", error="Interrupted by application shutdown")  # Stopping: written at once, not in a thread a second cancellation could cut short
         raise
