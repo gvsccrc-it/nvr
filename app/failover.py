@@ -25,6 +25,7 @@ That overlap is the price of never losing recording to a failure of the standby;
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import hmac
 import json
@@ -352,12 +353,26 @@ def recorders_idle(db: sqlite3.Connection) -> bool:
     return db.execute(f"SELECT 1 FROM cameras WHERE enabled=1 AND recording_status IN ({marks}) LIMIT 1", RECORDING_STATES).fetchone() is None
 
 
+_EPISODE_SEGMENTS = "source='live' AND unavailable_at IS NULL AND ends_at>? AND starts_at<?"
+
+
+def _episode_range(db: sqlite3.Connection, episode: sqlite3.Row) -> tuple[str, str]:
+    """From when to when the standby's footage belongs to this takeover: from its start up to the next takeover, if there was one before this
+    episode's footage was collected (#498), since that footage is the next episode's."""
+    following = db.execute("SELECT MIN(started_at) FROM failover_episodes WHERE role='standby' AND epoch>?", (episode["epoch"],)).fetchone()[0]
+    return episode["started_at"], following or episode["ended_at"] or "9999"
+
+
 def _segments_of(db: sqlite3.Connection, episode: sqlite3.Row) -> list[sqlite3.Row]:
     """Footage the standby recorded since it took over (a segment that began just before is its own: the recorder starts a segment when it starts)."""
-    # Up to the next takeover, if there was one before this episode's footage was collected (#498): that footage is the next episode's.
-    following = db.execute("SELECT MIN(started_at) FROM failover_episodes WHERE role='standby' AND epoch>?", (episode["epoch"],)).fetchone()[0]
-    return db.execute("SELECT id,camera_id,relative_path,starts_at,ends_at,size_bytes FROM recording_segments WHERE source='live' AND unavailable_at IS NULL AND ends_at>? AND starts_at<? "
-                      "ORDER BY starts_at,id", (episode["started_at"], following or episode["ended_at"] or "9999")).fetchall()
+    return db.execute(f"SELECT id,camera_id,relative_path,starts_at,ends_at,size_bytes FROM recording_segments WHERE {_EPISODE_SEGMENTS} ORDER BY starts_at,id",
+                      _episode_range(db, episode)).fetchall()
+
+
+def _segment_of(db: sqlite3.Connection, episode: sqlite3.Row, segment_id: int) -> sqlite3.Row | None:
+    """One segment of a takeover, found by its id and checked to be one of ``_segments_of``: the same work however long the takeover was (#510)."""
+    return db.execute(f"SELECT id,camera_id,relative_path,starts_at,ends_at,size_bytes FROM recording_segments WHERE id=? AND {_EPISODE_SEGMENTS}",
+                      (segment_id, *_episode_range(db, episode))).fetchone()
 
 
 def standby_lease(payload: dict[str, Any]) -> dict[str, Any]:
@@ -416,7 +431,7 @@ def standby_footage_file(epoch: int, segment_id: int) -> tuple[Path, str]:
         episode = db.execute("SELECT * FROM failover_episodes WHERE role='standby' AND epoch=?", (epoch,)).fetchone()
         if episode is None:
             raise PeerError(404, "No such takeover")
-        row = next((row for row in _segments_of(db, episode) if row["id"] == segment_id), None)
+        row = _segment_of(db, episode, segment_id)
     if row is None:
         raise PeerError(404, "No such footage in that takeover")
     try:
@@ -833,12 +848,16 @@ class FailoverManager:
         if pending is not None and not held_now():
             await self._import(settings, secret, int(pending["epoch"]))
 
-    async def _call(self, settings: dict[str, Any], secret: str, method: str, path: str, payload: dict[str, Any] | None = None, **options: Any) -> httpx.Response:
+    async def _call(self, settings: dict[str, Any], secret: str, method: str, path: str, payload: dict[str, Any] | None = None, *,
+                    client: httpx.AsyncClient | None = None, **options: Any) -> httpx.Response:
         body = json.dumps(payload, separators=(",", ":")).encode() if payload is not None else b""
         headers = {**sign(secret, method, path, body), "Content-Type": "application/json"}
         url = check_peer_url(settings["peer_url"], settings["allow_private"]) + path
-        async with httpx.AsyncClient(timeout=TIMEOUT, follow_redirects=False, trust_env=False) as client:
-            response = await client.request(method, url, content=body or None, headers=headers, **options)
+        if client is not None:  # An import's own connection, kept open across its requests (#510)
+            response = await client.request(method, url, content=body or None, headers=headers, timeout=TIMEOUT, **options)
+        else:
+            async with httpx.AsyncClient(timeout=TIMEOUT, follow_redirects=False, trust_env=False) as fresh:
+                response = await fresh.request(method, url, content=body or None, headers=headers, **options)
         response.extensions["failover_request_signature"] = headers["X-Failover-Signature"]  # What a signed answer must be an answer to
         return response
 
@@ -919,12 +938,26 @@ class FailoverManager:
             learn_of_takeover(answer["handback"])
 
     async def _import(self, settings: dict[str, Any], secret: str, epoch: int) -> None:
-        """Bring back the footage the standby recorded: each segment once, checked against the digest the standby gives, then tell it so it can recover."""
+        """Bring back the footage the standby recorded: each segment once, checked against the digest the standby gives, then tell it so it can recover.
+
+        One connection carries the whole import, and the lease is renewed between files as it falls due: a long takeover's footage takes
+        a while, and a primary that stopped renewing for all of it looked silent to its standby (#510)."""
+        if self._last_renewal == float("-inf"):
+            self._last_renewal = time.monotonic()  # The pass that leads here renews first; counted from the import's start otherwise
+        async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=4.0), follow_redirects=False, trust_env=False) as client:
+            await self._import_over(client, settings, secret, epoch)
+
+    async def _keep_lease(self, settings: dict[str, Any], secret: str) -> None:
+        if self._renewal_due(settings, held=False):
+            self._last_renewal = time.monotonic()
+            await self._renew(settings, secret)
+
+    async def _import_over(self, client: httpx.AsyncClient, settings: dict[str, Any], secret: str, epoch: int) -> None:
         from .storage import camera_recordings_dir
 
         path = f"/api/inbound/failover/footage?epoch={epoch}"
         try:
-            listing = await self._call(settings, secret, "GET", path)
+            listing = await self._call(settings, secret, "GET", path, client=client)
             if listing.status_code != 200:
                 return
             # Only a list the standby signed, for this request, is used: one added to or cut on the way is no list, and is asked for again (#502).
@@ -953,8 +986,9 @@ class FailoverManager:
             if directory is None:
                 continue
             target = directory / f"failover-e{epoch}-{item['id']}-{started:%Y%m%dT%H%M%SZ}.mp4"
+            await self._keep_lease(settings, secret)
             try:
-                digest = await self._download(settings, secret, epoch, int(item["id"]), target, item["size_bytes"])
+                digest = await self._download(settings, secret, epoch, int(item["id"]), target, item["size_bytes"], client=client)
             except NoRoom as exc:
                 await asyncio.to_thread(self._record_peer, "no_room", str(exc))
                 return  # Tried again at the next pass, when retention may have made room
@@ -972,7 +1006,7 @@ class FailoverManager:
         with connect() as db:
             totals = db.execute("SELECT COUNT(i.segment_id),COALESCE(SUM(s.size_bytes),0) FROM failover_imports i LEFT JOIN recording_segments s ON s.id=i.segment_id WHERE i.epoch=?", (epoch,)).fetchone()
         try:
-            confirmed = await self._call(settings, secret, "POST", "/api/inbound/failover/handback-complete", {"epoch": epoch, "imported": totals[0], "bytes": totals[1]})
+            confirmed = await self._call(settings, secret, "POST", "/api/inbound/failover/handback-complete", {"epoch": epoch, "imported": totals[0], "bytes": totals[1]}, client=client)
         except (httpx.HTTPError, ValueError):
             return
         # The handback is done only when the standby says so in a signed answer: an unsigned "done" would leave the standby waiting (#502).
@@ -989,7 +1023,8 @@ class FailoverManager:
         with connect() as db:
             return db.execute("SELECT 1 FROM cameras WHERE id=?", (camera_id,)).fetchone() is not None
 
-    async def _download(self, settings: dict[str, Any], secret: str, epoch: int, segment_id: int, target: Path, listed_size: int) -> str:
+    async def _download(self, settings: dict[str, Any], secret: str, epoch: int, segment_id: int, target: Path, listed_size: int, *,
+                        client: httpx.AsyncClient | None = None) -> str:
         """One segment, believed only as the standby signed it: its digest and size, signed as the answer to this request, the size the one it
         listed, and the bytes checked against both as they arrive (#502). Nothing is written that would take the recordings volume below its
         headroom, and "no such footage" counts only when signed."""
@@ -1005,8 +1040,13 @@ class FailoverManager:
             raise NoRoom("There is not enough free space on the recordings volume to bring back the standby's footage without the recorder deleting footage")
         partial = target.with_name(f".{target.name}.partial")
         digest, received = hashlib.sha256(), 0
+        own = client is None
+        if own:
+            client = httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=4.0), follow_redirects=False, trust_env=False)
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=4.0), follow_redirects=False, trust_env=False) as client:
+            async with contextlib.AsyncExitStack() as stack:
+                if own:
+                    await stack.enter_async_context(client)
                 async with client.stream("GET", url, headers=headers) as response:
                     response.extensions["failover_request_signature"] = headers["X-Failover-Signature"]
                     if response.status_code == 404:
