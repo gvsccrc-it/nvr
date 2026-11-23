@@ -48,10 +48,6 @@ class GivenUpTests(unittest.TestCase):
         for process in processes:
             self.assertIsNotNone(process.returncode, "a process was left running after its caller gave up on it")
 
-    def test_a_cancelled_plate_frame_grab_ends_its_ffmpeg(self):
-        from app.plates import ffmpeg_snapshot
-        self.assertEnded(self.give_up(lambda: ffmpeg_snapshot("rtsp://camera.invalid/stream", timeout=60)))
-
     def test_a_cancelled_privacy_mask_ends_its_ffmpeg(self):
         from app.privacy import _ffmpeg
         self.assertEnded(self.give_up(lambda: _ffmpeg(["-i", "pipe:0", "-f", "image2pipe", "pipe:1"], stdin=b"picture", timeout=60)))

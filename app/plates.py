@@ -40,7 +40,6 @@ from typing import Any, Awaitable, Callable, Iterable
 import numpy as np
 
 from . import jpeg
-from .processes import run_to_end
 
 logger = logging.getLogger("nvr.plates")
 
@@ -526,26 +525,6 @@ def decode_bmp(data: bytes) -> np.ndarray | None:
         return None
     pixels = np.frombuffer(data, dtype=np.uint8, count=rows * row_bytes, offset=offset).reshape(rows, row_bytes)[:, :width * 3].reshape(rows, width, 3)
     return pixels[::-1] if height > 0 else pixels  # a positive height is stored bottom row first
-
-
-async def ffmpeg_snapshot(source: str, timeout: float = 12.0, protocols: str | None = None) -> np.ndarray | None:
-    """One frame of a camera's stream at the stream's own size (BGR), or None when it could not be had. ``protocols`` is for tests that read a generated file;
-    a camera's stream is only ever opened with the recorder's network protocols."""
-    ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
-        return None
-    from .recording import _PROTOCOLS, _manifest_bytes  # Here, not at the top: recording pulls in much more than plates needs
-
-    # The address carries the camera's login, so it goes to FFmpeg over stdin like the recorder's, never in a process listing (#272).
-    # BMP is uncompressed, so it costs no encoding time and carries its own size: the frame is not scaled, whatever the camera's resolution or shape.
-    arguments = [ffmpeg, "-v", "error", "-threads", "1", "-f", "concat", "-safe", "0", "-protocol_whitelist", protocols or _PROTOCOLS, "-i", "pipe:0",
-                 "-frames:v", "1", "-f", "image2pipe", "-c:v", "bmp", "-pix_fmt", "bgr24", "pipe:1"]
-    process = await asyncio.create_subprocess_exec(*arguments, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
-    try:
-        data, _ = await run_to_end(process, _manifest_bytes(source), timeout)
-    except asyncio.TimeoutError:
-        return None
-    return decode_bmp(data)
 
 
 # --- accuracy on a labelled sample ------------------------------------------------------------------------------------------------------------

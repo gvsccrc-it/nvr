@@ -11,7 +11,7 @@ from unittest.mock import patch
 import numpy as np
 from fastapi.testclient import TestClient
 
-from app import plate_models, plates
+from app import detection, plate_models, plates
 from app.migrations import m0045_plate_region
 from app.security import hash_password
 from app.store import connect
@@ -319,7 +319,7 @@ class WorkerFollowsRegionTests(SceneTestCase):
             return None
 
         with patch.object(plates, "load_reader", load), patch.object(plates, "plate_region", region_now), patch.object(plates, "SETTINGS_REFRESH", 0.0), \
-                patch.object(plates, "ffmpeg_snapshot", no_snapshot):
+                patch.object(detection.DetectionManager, "full_frame", no_snapshot):
             self.analyse_footage()
         self.assertEqual(loaded, ["worldwide", "europe"])  # Each region is loaded once, the second when the setting changed, with no restart
 
