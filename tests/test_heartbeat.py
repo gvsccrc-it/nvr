@@ -14,6 +14,7 @@ import httpx
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
+from tests.test_support import as_given
 from app.main import app
 from app.principal import administrator, current_user
 from app.store import connect, initialize
@@ -68,7 +69,8 @@ class ExternalHeartbeatTests(unittest.TestCase):
             kwargs["transport"] = httpx.MockTransport(receiver)
             return real_client(*args, **kwargs)
 
-        with patch("app.heartbeat.httpx.AsyncClient", side_effect=client_factory), patch("app.heartbeat.validate_target_url", side_effect=lambda target, allow_private: target):
+        with patch("app.heartbeat.httpx.AsyncClient", side_effect=client_factory), patch("app.heartbeat.validate_target_url", side_effect=lambda target, allow_private: target), \
+             patch("app.heartbeat.pin_target_url", side_effect=as_given):
             configured = self.client.put("/api/heartbeat", json={
                 "target_url": "https://receiver.example.invalid/nvr",
                 "interval_seconds": 30,
