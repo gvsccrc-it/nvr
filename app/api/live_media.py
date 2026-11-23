@@ -1,6 +1,8 @@
 """Authenticated live video and audio delivery with bounded viewer admission."""
 from __future__ import annotations
 
+from app.child_env import child_environment
+
 import asyncio
 import json
 import shutil
@@ -270,7 +272,7 @@ def live_camera_audio(
                 "-protocol_whitelist", "concat,pipe,rtsp,rtsps,tcp,udp,rtp,tls,crypto", "-i", "pipe:0",
                 "-map", "0:a:0", "-vn", "-ac", "1", "-ar", "44100", "-b:a", "96k",
                 "-c:a", "libmp3lame", "-f", "mp3", "pipe:1",
-                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL, env=child_environment()
             )
             if process.stdin is None or process.stdout is None:
                 return
@@ -318,7 +320,7 @@ async def _mjpeg_frames(camera_id: str, source: str, quality: str, zones: list |
         "-q:v", str(jpeg_quality), "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1",
     ]
     process = await asyncio.create_subprocess_exec(
-        *args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        *args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL, env=child_environment()
     )
     if process.stdin is None or process.stdout is None:
         raise RuntimeError("Live video transcoder did not start")

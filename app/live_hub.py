@@ -10,6 +10,8 @@ camera connection closes a few seconds after the last viewer leaves.
 """
 from __future__ import annotations
 
+from app.child_env import child_environment
+
 import asyncio
 import collections
 import time
@@ -403,7 +405,7 @@ class LiveStream:
         self.accelerated = hardware
         try:
             self.process = await asyncio.create_subprocess_exec(
-                *self._arguments(executable, hardware), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+                *self._arguments(executable, hardware), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL, env=child_environment()
             )
             self.connections += 1
             self._stage("spawned_ms")

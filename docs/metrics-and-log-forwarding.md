@@ -64,6 +64,7 @@ Set `NVR_LOG_FORWARD_URL` on the container to send the NVR's application logs of
 | `NVR_LOG_FORWARD_LEVEL` | `INFO` | the lowest level sent |
 | `NVR_LOG_FORWARD_QUEUE` | `2000` | records that may wait for the endpoint, per process |
 | `NVR_LOG_FORWARD_HEADERS` | none | `Name=value,Name2=value2` added to OTLP requests, for a collector that wants a token |
+| `NVR_LOG_FORWARD_HEADERS_FILE` | unset | Path of a file holding the same, used when `NVR_LOG_FORWARD_HEADERS` is empty, so the token is not in the container's environment |
 
 Syslog messages use the daemon facility, the application name `nvr-<process>` (`nvr-web`, `nvr-recorder`, …), the logger as the message id, and octet-counting framing (RFC 6587, as RFC 5425 requires over TLS). A traceback is part of its message. OTLP records carry the severity, the logger name, and `service.name=nvr`, `service.version` and `nvr.process` as resource attributes.
 

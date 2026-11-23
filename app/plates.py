@@ -19,6 +19,8 @@ nothing. Recognition quality depends on the camera and the site and is reported 
 """
 from __future__ import annotations
 
+from app.child_env import child_environment
+
 import asyncio
 import csv
 import fnmatch
@@ -579,10 +581,10 @@ def _decode_image(path: Path) -> np.ndarray | None:
     if not ffmpeg or not path.is_file():
         return None
     probe = subprocess.run([shutil.which("ffprobe") or "ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0", str(path)],
-                           capture_output=True, text=True, timeout=10, check=False)
+                           capture_output=True, text=True, timeout=10, check=False, env=child_environment())
     try:
         width, height = (int(item) for item in probe.stdout.strip().split(","))
-        data = subprocess.run([ffmpeg, "-v", "error", "-i", str(path), "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "bgr24", "pipe:1"], capture_output=True, timeout=10, check=False).stdout
+        data = subprocess.run([ffmpeg, "-v", "error", "-i", str(path), "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "bgr24", "pipe:1"], capture_output=True, timeout=10, check=False, env=child_environment()).stdout
     except (ValueError, subprocess.TimeoutExpired):
         return None
     return np.frombuffer(data, dtype=np.uint8).reshape(height, width, 3) if len(data) == width * height * 3 else None

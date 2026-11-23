@@ -1,6 +1,8 @@
 """Synchronized playback timeline, segment media, snapshots and frame navigation."""
 from __future__ import annotations
 
+from app.child_env import child_environment
+
 import asyncio
 import shutil
 import json
@@ -195,7 +197,7 @@ async def snapshot_segment(
                 shutil.which("ffmpeg"), "-nostdin", "-hide_banner", "-loglevel", "error", "-ss", f"{offset:.3f}",
                 "-i", str(path), "-frames:v", "1", "-vf", privacy.with_mask("scale=1280:-2:force_original_aspect_ratio=decrease", zones),
                 "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1",
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL, env=child_environment()
             )
             image, _ = await run_to_end(process, timeout=15)
         if process.returncode != 0 or not image.startswith(b"\xff\xd8"):
@@ -262,7 +264,7 @@ async def playback_frame_neighbor(
                 process = await asyncio.create_subprocess_exec(
                     shutil.which("ffprobe"), "-v", "error", "-read_intervals", f"{window_start:.3f}%+{read_duration:.3f}",
                     "-select_streams", "v:0", "-show_frames", "-show_entries", "frame=best_effort_timestamp_time", "-of", "json", str(path),
-                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL, env=child_environment())
                 output, _ = await run_to_end(process, timeout=12)
         except asyncio.TimeoutError as exc:
             raise HTTPException(status_code=503, detail="Frame timestamp extraction timed out") from exc

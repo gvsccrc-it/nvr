@@ -1,6 +1,8 @@
 """Site display settings and branding."""
 from __future__ import annotations
 
+from app.child_env import child_environment
+
 import base64
 import binascii
 import hashlib
@@ -145,7 +147,7 @@ def _decode_branding_asset(asset: BrandingAssetRequest) -> tuple[bytes, str]:
     stage="probe"
     try:
         probed=subprocess.run([ffprobe,"-v","error","-select_streams","v:0","-show_entries","stream=codec_name,width,height","-of","json","-i","pipe:0"],
-                              input=data,capture_output=True,timeout=8,check=False)
+                              input=data,capture_output=True,timeout=8,check=False, env=child_environment())
         metadata=json.loads(probed.stdout) if probed.returncode==0 else {}
         streams=metadata.get("streams") or []
         if len(streams)!=1:
@@ -156,7 +158,7 @@ def _decode_branding_asset(asset: BrandingAssetRequest) -> tuple[bytes, str]:
             raise ValueError("Image type or dimensions are unsupported")
         stage="decode"
         decoded=subprocess.run([ffmpeg,"-hide_banner","-v","error","-threads","1","-max_pixels","16777216","-i","pipe:0","-frames:v","1","-f","null","-"],
-                               input=data,capture_output=True,timeout=8,check=False)
+                               input=data,capture_output=True,timeout=8,check=False, env=child_environment())
         if decoded.returncode!=0:
             raise ValueError("Image could not be decoded")
     except subprocess.TimeoutExpired as exc:

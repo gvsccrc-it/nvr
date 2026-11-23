@@ -9,6 +9,8 @@ only through a short grant given for a stated reason, which is audited.
 """
 from __future__ import annotations
 
+from app.child_env import child_environment
+
 import asyncio
 import collections
 import hashlib
@@ -278,7 +280,7 @@ async def _ffmpeg(args: list[str], stdin: bytes | None = None, timeout: float = 
         raise RuntimeError("FFmpeg is unavailable")
     process = await asyncio.create_subprocess_exec(executable, "-nostdin", "-hide_banner", "-loglevel", "error", *args,
                                                    stdin=asyncio.subprocess.PIPE if stdin is not None else asyncio.subprocess.DEVNULL,
-                                                   stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+                                                   stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL, env=child_environment())
     output, _ = await run_to_end(process, stdin, timeout)
     if process.returncode != 0:
         raise RuntimeError("FFmpeg could not apply the privacy mask")
@@ -344,7 +346,7 @@ def mask_jpeg_sync(jpeg: bytes, zones: list[dict[str, float]]) -> bytes | None:
     try:
         result = subprocess.run([executable, "-nostdin", "-hide_banner", "-loglevel", "error", "-f", "image2pipe", "-i", "pipe:0",
                                  "-vf", drawbox_filter(zones), "-frames:v", "1", "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"],
-                                input=jpeg, capture_output=True, timeout=20, check=False)
+                                input=jpeg, capture_output=True, timeout=20, check=False, env=child_environment())
     except subprocess.TimeoutExpired:
         return None
     return result.stdout if result.returncode == 0 and result.stdout.startswith(b"\xff\xd8") else None

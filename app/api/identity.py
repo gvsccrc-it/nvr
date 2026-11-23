@@ -1,6 +1,8 @@
 """First-run setup, local and Entra sign-in, and session administration."""
 from __future__ import annotations
 
+from app.child_env import secret
+
 import asyncio
 import json
 import os
@@ -34,9 +36,12 @@ USERNAME_RE = re.compile(r"^[a-zA-Z0-9_.@-]{3,128}$")
 oauth = OAuth()
 
 
+SECRET_SETTINGS = ("NVR_OIDC_CLIENT_SECRET", "NVR_OIDC_SESSION_SECRET")  # Also from a file: NVR_OIDC_CLIENT_SECRET_FILE, NVR_OIDC_SESSION_SECRET_FILE (#547)
+
+
 def _oidc_settings() -> dict[str, str] | None:
     required = ("NVR_PUBLIC_URL", "NVR_OIDC_TENANT_ID", "NVR_OIDC_CLIENT_ID", "NVR_OIDC_CLIENT_SECRET", "NVR_OIDC_SESSION_SECRET")
-    values = {key: os.environ.get(key, "").strip() for key in required}
+    values = {key: secret(key).strip() if key in SECRET_SETTINGS else os.environ.get(key, "").strip() for key in required}
     if not all(values.values()) or len(values["NVR_OIDC_SESSION_SECRET"]) < 32:
         return None
     if not any(os.environ.get(key, "").strip() for key in ("NVR_OIDC_ADMIN_ROLES", "NVR_OIDC_OPERATOR_ROLES")):

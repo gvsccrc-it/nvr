@@ -8,6 +8,8 @@ analysis loop; after a restart, objects start new tracks.
 """
 from __future__ import annotations
 
+from app.child_env import child_environment
+
 import json
 import shutil
 import sqlite3
@@ -306,7 +308,7 @@ def encode_jpeg(frame: bytes) -> bytes | None:
     try:
         result = subprocess.run([ffmpeg, "-v", "error", "-threads", "1", "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{MODEL_WIDTH}x{MODEL_HEIGHT}",
                                  "-i", "pipe:0", "-frames:v", "1", "-q:v", "5", "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"],
-                                input=frame, capture_output=True, timeout=5, check=False)
+                                input=frame, capture_output=True, timeout=5, check=False, env=child_environment())
     except subprocess.TimeoutExpired:
         return None
     return result.stdout if result.returncode == 0 and result.stdout.startswith(b"\xff\xd8") else None

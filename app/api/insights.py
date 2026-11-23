@@ -1,6 +1,8 @@
 """Activity insights: counts per camera, zone and line by hour or day, a heatmap of where objects go, and a CSV of the counts (#135)."""
 from __future__ import annotations
 
+from app.child_env import child_environment
+
 import asyncio
 import shutil
 from datetime import datetime, timezone
@@ -132,7 +134,7 @@ async def reference_frame(camera_id: str, user: CurrentUser, at: str | None = Qu
         process = await asyncio.create_subprocess_exec(
             ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-ss", "1", "-i", str(path), "-frames:v", "1",
             "-vf", privacy.with_mask("scale=960:-2:force_original_aspect_ratio=decrease", zones), "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1",
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL, env=child_environment())
         image, _ = await run_to_end(process, timeout=15)
         if process.returncode != 0 or not image.startswith(b"\xff\xd8"):
             raise HTTPException(status_code=422, detail="A still could not be extracted from the recording")

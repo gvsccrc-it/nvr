@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from app.child_env import child_environment
+
 import asyncio
 import json
 import shutil
@@ -254,7 +256,7 @@ class MotionClipAssembler:
         proc = await asyncio.create_subprocess_exec(
             executable, "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", str(manifest),
             "-map", "0:v:0", *audio_args, "-c:v", "copy", "-movflags", "+faststart", "-y", str(output),
-            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL, env=child_environment()
         )
         try:
             # Joining is a copy, and takes longer for a longer clip: two minutes, or half a second for each two-second part if that is more (#339).

@@ -20,6 +20,8 @@ Sensitivity (1 to 100, more is more sensitive) moves all the thresholds together
 """
 from __future__ import annotations
 
+from app.child_env import child_environment
+
 import asyncio
 import json
 import logging
@@ -347,7 +349,7 @@ async def grab_frame(source: str, protocols: str | None = None) -> bytes | None:
         return None
     args = [executable, "-nostdin", "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0", "-protocol_whitelist", protocols or _PROTOCOLS, "-i", "pipe:0",
             "-an", "-frames:v", "1", "-vf", f"scale={FRAME_WIDTH}:{FRAME_HEIGHT}:flags=area,format=gray", "-f", "rawvideo", "-pix_fmt", "gray", "pipe:1"]
-    process = await asyncio.create_subprocess_exec(*args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+    process = await asyncio.create_subprocess_exec(*args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL, env=child_environment())
     try:
         output, _ = await asyncio.wait_for(process.communicate(_manifest_bytes(source)), timeout=GRAB_TIMEOUT_SECONDS)
     except (asyncio.TimeoutError, OSError):

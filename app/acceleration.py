@@ -9,6 +9,8 @@ the status. Without acceleration everything uses software (libx264), within the 
 """
 from __future__ import annotations
 
+from app.child_env import child_environment
+
 import glob
 import os
 import shutil
@@ -42,7 +44,7 @@ class Encoder:
 
 def _run(args: list[str], timeout: int) -> tuple[int, str]:
     try:
-        result = subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=False)
+        result = subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=False, env=child_environment())
     except (OSError, subprocess.TimeoutExpired):
         return 1, ""
     return result.returncode, result.stdout

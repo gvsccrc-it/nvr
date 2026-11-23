@@ -15,6 +15,8 @@ unavailable instead of being presented as recorded footage.
 """
 from __future__ import annotations
 
+from app.child_env import secret
+
 import argparse
 import asyncio
 import contextlib
@@ -66,14 +68,8 @@ class BackupError(RuntimeError):
 # --- configuration ------------------------------------------------------------
 
 def passphrase() -> str | None:
-    """The backup passphrase from NVR_BACKUP_PASSPHRASE, or from the file NVR_BACKUP_PASSPHRASE_FILE names."""
-    value = os.environ.get("NVR_BACKUP_PASSPHRASE", "")
-    if not value and os.environ.get("NVR_BACKUP_PASSPHRASE_FILE"):
-        try:
-            value = Path(os.environ["NVR_BACKUP_PASSPHRASE_FILE"]).read_text(encoding="utf-8").strip()
-        except OSError:
-            value = ""
-    return value or None
+    """The backup passphrase from NVR_BACKUP_PASSPHRASE, or from the file NVR_BACKUP_PASSPHRASE_FILE names (the preferred form: #547)."""
+    return secret("NVR_BACKUP_PASSPHRASE") or None
 
 
 def destination() -> Path:

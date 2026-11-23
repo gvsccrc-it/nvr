@@ -8,6 +8,8 @@ NVR chose, never by the connection opening. Nothing in the report holds a creden
 """
 from __future__ import annotations
 
+from app.child_env import child_environment
+
 import asyncio
 import shutil
 import weakref
@@ -65,7 +67,7 @@ async def verify_video(source: str, protocols: str | None = None) -> dict[str, A
         return {"decoded": False, "opened": False, "reason": f"The camera's video stream could not be opened: {opened.get('reason', 'no answer')}"}
     args = [executable, "-nostdin", "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0", "-protocol_whitelist", protocols or STREAM_PROTOCOLS or _PROTOCOLS,
             "-i", "pipe:0", "-an", "-frames:v", "1", "-pix_fmt", "gray", "-f", "rawvideo", "-"]
-    process = await asyncio.create_subprocess_exec(*args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+    process = await asyncio.create_subprocess_exec(*args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL, env=child_environment())
     try:
         frame, _ = await asyncio.wait_for(process.communicate(_manifest_bytes(source)), timeout=DECODE_TIMEOUT_SECONDS)
     except (asyncio.TimeoutError, OSError):
