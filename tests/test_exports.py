@@ -16,7 +16,7 @@ import time
 import unittest
 import uuid
 import zipfile
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -220,14 +220,16 @@ class ExportJobTests(unittest.TestCase):
         output = self.root / "exports" / f"{job_id}.zip"
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_bytes(b"evidence")
+        # Expired yesterday: the manifest is kept for 30 days after the package expires (#505), so it is still here.
+        expired = (datetime.now(timezone.utc) - timedelta(days=1)).replace(microsecond=0).isoformat()
         with connect() as db:
             db.execute("UPDATE exports SET status='completed',metadata_json=?,output_relative_path=?,expires_at=?,completed_at=? WHERE id=?",
-                       (json.dumps({"audio": {"included": False}, "expires_at": "2026-01-01T00:00:00+00:00"}), f"exports/{job_id}.zip", "2026-01-01T00:00:00+00:00", "2025-12-25T00:00:00+00:00", job_id))
-        expire_exports(datetime.fromisoformat("2026-01-02T00:00:00+00:00"))
+                       (json.dumps({"audio": {"included": False}, "expires_at": expired}), f"exports/{job_id}.zip", expired, "2025-12-25T00:00:00+00:00", job_id))
+        expire_exports()
         status = self.client.get(f"/api/exports/{job_id}")
         self.assertEqual(status.status_code, 200, status.text)
-        self.assertEqual(status.json()["metadata"], {"audio": {"included": False}, "expires_at": "2026-01-01T00:00:00+00:00"})
-        self.assertEqual(status.json()["expires_at"], "2026-01-01T00:00:00+00:00")
+        self.assertEqual(status.json()["metadata"], {"audio": {"included": False}, "expires_at": expired})
+        self.assertEqual(status.json()["expires_at"], expired)
         self.assertIsNone(status.json()["download_url"])
         self.assertFalse(output.exists())
         download = self.client.get(f"/api/exports/{job_id}/download")
@@ -315,8 +317,10 @@ class ExportJobTests(unittest.TestCase):
         self.assertEqual(len(grid["global_gaps_compressed"]), 1)
         self.assertEqual(grid["overlays"][empty]["missing_tile_label_alignment"], "center")
         self.assertEqual(grid["overlays"][empty]["missing_tile_time_labels"], ["Shared source time", "Last frame captured"])
-        frozen_cues = grid["overlays"][self.camera]["missing_tile_cues"]
-        self.assertTrue(any(cue["shared_source_time"] == "2026-10-20T10:00:02+00:00" and cue["last_frame_capture_time"] == "2026-10-20T10:00:01+00:00" for cue in frozen_cues))
+        # Each stretch with no picture is one interval (#505), not a cue a second: the frozen stretch covers shared time 10:00:02, last frame 10:00:01.
+        frozen = grid["overlays"][self.camera]["missing_tile_intervals"]
+        self.assertTrue(any(item["shared_source_start"] <= "2026-10-20T10:00:02+00:00" < item["shared_source_end"]
+                            and item["last_frame_capture_time"] == "2026-10-20T10:00:01+00:00" for item in frozen), frozen)
         probe = subprocess.run([self.ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "json", str(rendered)], capture_output=True, check=True, timeout=15)
         self.assertAlmostEqual(float(json.loads(probe.stdout)["format"]["duration"]), 4.0, delta=0.2)
         # Decode one frame during camera A's frozen interval: its image remains
@@ -852,3 +856,82 @@ class ExportJobTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ManifestSizeTests(unittest.TestCase):
+    """An export's manifest stays small, the list sends no manifest, and old manifests are dropped while the record is kept (#505)."""
+
+    # The export tests' fixture, borrowed rather than inherited so that their tests do not run a second time here
+    setUp, tearDown = ExportJobTests.setUp, ExportJobTests.tearDown
+    _create, _wait_for_status = ExportJobTests._create, ExportJobTests._wait_for_status
+
+    def test_a_tile_offline_for_four_hours_is_one_interval_not_a_cue_a_second(self):
+        from app.exports import _write_grid_subtitles
+
+        start = datetime(2026, 10, 20, 6, 0, tzinfo=timezone.utc)
+        intervals = [{"source_start": start, "source_end": start + timedelta(hours=4), "output_start": 0.0, "output_end": 4 * 3600.0, "skipped": False}]
+        settings = {"time_zone": "UTC", "date_format": "iso", "clock_format": "24"}
+        with tempfile.TemporaryDirectory() as folder:
+            offline = _write_grid_subtitles(Path(folder) / "a.srt", "Dock", [], intervals, 4 * 3600.0, settings)
+            # A camera recording on motion: a minute of footage each half hour, so eight stretches without a picture
+            spans = [{"source_start": start + timedelta(minutes=30 * index), "source_end": start + timedelta(minutes=30 * index + 1)} for index in range(8)]
+            motion = _write_grid_subtitles(Path(folder) / "b.srt", "Gate", spans, intervals, 4 * 3600.0, settings)
+        (gap,) = offline["missing_tile_intervals"]
+        self.assertEqual((gap["output_start_seconds"], gap["output_end_seconds"]), (0.0, 14400.0))
+        self.assertEqual((gap["shared_source_start"], gap["shared_source_end"]), (start.isoformat(), (start + timedelta(hours=4)).isoformat()))
+        self.assertIsNone(gap["last_frame_capture_time"])
+        self.assertLess(len(json.dumps(offline)), 1000)  # Was 14,400 entries, about 1.5 MB
+        self.assertEqual(len(motion["missing_tile_intervals"]), 8)
+        self.assertEqual([item["last_frame_capture_time"] for item in motion["missing_tile_intervals"]][0:2],
+                         [(start + timedelta(minutes=1)).isoformat(), (start + timedelta(minutes=31)).isoformat()])
+
+    def big_finished_export(self, expired_days_ago: float | None = None) -> str:
+        job_id = self._create()
+        expires = (datetime.now(timezone.utc) - timedelta(days=expired_days_ago)) if expired_days_ago is not None else datetime.now(timezone.utc) + timedelta(days=7)
+        manifest = {"export_id": job_id, "signed_footage": {"cameras": {self.camera: "signed"}}, "generated_at": "2026-10-20T10:00:00+00:00",
+                    "requested_interval": {"start": "a", "end": "b"}, "grid": {"overlays": {self.camera: {"missing_tile_cues": [{"output_start_seconds": second} for second in range(14400)]}}}}
+        with connect() as db:
+            db.execute("UPDATE exports SET status='completed',metadata_json=?,expires_at=?,completed_at=?,package_sha256=? WHERE id=?",
+                       (json.dumps(manifest), expires.isoformat(), datetime.now(timezone.utc).isoformat(), "ab" * 32, job_id))
+        return job_id
+
+    def test_the_list_sends_no_manifest_and_stays_small_and_the_single_export_has_it(self):
+        with patch("app.exports.expire_exports"):  # Only the shape of the answer is measured here
+            jobs = [self.big_finished_export() for _ in range(50)]
+            listed = self.client.get("/api/exports")
+            single = self.client.get(f"/api/exports/{jobs[0]}").json()
+        self.assertEqual(listed.status_code, 200)
+        self.assertEqual(len(listed.json()["exports"]), 50)
+        self.assertLess(len(listed.content), 100_000, "the list carried the manifests")  # Fifty manifests of these were about 15 MB
+        self.assertTrue(all(job["metadata"] is None for job in listed.json()["exports"]))
+        self.assertEqual(len(single["metadata"]["grid"]["overlays"][self.camera]["missing_tile_cues"]), 14400)
+
+    def test_the_manifest_is_dropped_thirty_days_after_the_package_expired_and_the_record_is_kept(self):
+        recent, old = self.big_finished_export(expired_days_ago=29), self.big_finished_export(expired_days_ago=31)
+        expire_exports()
+        with connect() as db:
+            rows = {row["id"]: row for row in db.execute("SELECT * FROM exports")}
+        self.assertIsNone(rows[recent]["manifest_dropped_at"])
+        self.assertIn("grid", json.loads(rows[recent]["metadata_json"]))
+        self.assertIsNotNone(rows[old]["manifest_dropped_at"])
+        kept = json.loads(rows[old]["metadata_json"])
+        self.assertEqual(set(kept), {"export_id", "signed_footage", "generated_at", "requested_interval"})
+        self.assertEqual((rows[old]["package_sha256"], json.loads(rows[old]["camera_ids_json"]), rows[old]["requested_start"]),
+                         ("ab" * 32, [self.camera], rows[recent]["requested_start"]))  # Who asked, what and when, and the hash: kept for good
+        self.assertLess(len(rows[old]["metadata_json"]), 500)
+        self.assertEqual(self.client.get(f"/api/exports/{old}").json()["manifest_dropped_at"], rows[old]["manifest_dropped_at"])
+
+    def test_a_package_still_verifies_after_its_manifest_was_dropped(self):
+        if not self.ffmpeg:
+            self.skipTest("FFmpeg is required to create an evidence export")
+        job_id = self._create()
+        completed = self._wait_for_status(job_id, "completed", "failed")
+        self.assertEqual(completed["status"], "completed", completed)
+        package = self.client.get(completed["download_url"]).content
+        with connect() as db:  # Its package expired long ago, and the manifest has been dropped since
+            db.execute("UPDATE exports SET expires_at=? WHERE id=?", ((datetime.now(timezone.utc) - timedelta(days=60)).isoformat(), job_id))
+        expire_exports()
+        with connect() as db:
+            self.assertIsNotNone(db.execute("SELECT manifest_dropped_at FROM exports WHERE id=?", (job_id,)).fetchone()[0])
+        checked = self.client.post(f"/api/exports/{job_id}/verify", content=package, headers={"content-type": "application/zip"}).json()
+        self.assertEqual((checked["checksums_valid"], checked["issued_hash_recorded"], checked["matches_issued_package"]), (True, True, True))

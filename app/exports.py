@@ -228,6 +228,29 @@ def expire_exports(now: datetime | None = None) -> None:
             if path is not None and not unlink_if_unleased(path):
                 continue
             db.execute("UPDATE exports SET output_relative_path=NULL,updated_at=? WHERE id=?", (moment, row["id"]))
+        drop_old_manifests(db, now)
+
+
+MANIFEST_KEPT_AFTER_EXPIRY = timedelta(days=30)
+MANIFEST_DROP_BATCH = 50
+KEPT_FROM_MANIFEST = ("signed_footage", "export_id", "generated_at", "requested_interval")  # Small, and what checking a package against it reads
+
+
+def drop_old_manifests(db: sqlite3.Connection, now: datetime | None = None) -> int:
+    """Drop the bulky manifest of exports whose package expired more than MANIFEST_KEPT_AFTER_EXPIRY ago, keeping the record of the export and
+    the few manifest fields that checking a presented package reads (#505). A bounded number at a time; returns how many."""
+    moment = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    cutoff = (moment - MANIFEST_KEPT_AFTER_EXPIRY).isoformat()
+    rows = db.execute("SELECT id,metadata_json FROM exports WHERE manifest_dropped_at IS NULL AND expires_at IS NOT NULL AND expires_at<=? AND metadata_json IS NOT NULL "
+                      "LIMIT ?", (cutoff, MANIFEST_DROP_BATCH)).fetchall()
+    for row in rows:
+        try:
+            manifest = json.loads(row["metadata_json"])
+        except ValueError:
+            manifest = {}
+        kept = {key: manifest[key] for key in KEPT_FROM_MANIFEST if isinstance(manifest, dict) and key in manifest}
+        db.execute("UPDATE exports SET metadata_json=?,manifest_dropped_at=? WHERE id=?", (json.dumps(kept), moment.isoformat(), row["id"]))
+    return len(rows)
 
 
 def _ensure_export_space(directory: Path, requested_bytes: int = 0) -> None:
@@ -418,7 +441,23 @@ def _write_grid_subtitles(path: Path, camera_name: str, spans: list[dict[str, An
                "end": _union_output_time(span["source_end"], intervals), "span": span} for span in spans]
     cursor = 0.0
     last_capture: datetime | None = None
-    missing_cues: list[dict[str, Any]] = []
+    # The manifest records each stretch with no picture once, as an interval, not a cue a second: a tile offline for four hours was 14,400
+    # entries, about 1.5 MB of the export's record for that one tile, kept in the database and sent with every export list (#505).
+    missing: list[dict[str, Any]] = []
+
+    def note_missing(start: float, end: float, shared_time: datetime | None) -> None:
+        previous = missing[-1] if missing else None
+        last = last_capture.isoformat() if last_capture else None
+        shared = shared_time.isoformat() if shared_time else None
+        if previous is not None and previous["output_end_seconds"] == round(start, 6) and previous["last_frame_capture_time"] == last \
+                and previous["shared_source_end"] == shared:
+            previous["output_end_seconds"] = round(end, 6)
+            previous["shared_source_end"] = (shared_time + timedelta(seconds=end - start)).isoformat() if shared_time else None
+            return
+        missing.append({"output_start_seconds": round(start, 6), "output_end_seconds": round(end, 6), "shared_source_start": shared,
+                        "shared_source_end": (shared_time + timedelta(seconds=end - start)).isoformat() if shared_time else None,
+                        "last_frame_capture_time": last})
+
     def display(value: datetime) -> str:
         return format_display_datetime(value, display_settings["time_zone"], display_settings["date_format"], display_settings["clock_format"])
     for event in events:
@@ -431,9 +470,7 @@ def _write_grid_subtitles(path: Path, camera_name: str, spans: list[dict[str, An
             if last_capture:
                 lines.append(f"Last frame captured: {display(last_capture)}")
             cues.append((cursor, cue_end, lines))
-            missing_cues.append({"output_start_seconds": round(cursor, 6),
-                                 "shared_source_time": shared_time.isoformat() if shared_time else None,
-                                 "last_frame_capture_time": last_capture.isoformat() if last_capture else None})
+            note_missing(cursor, cue_end, shared_time)
             cursor = cue_end
         span = event["span"]
         elapsed = 0.0
@@ -454,9 +491,7 @@ def _write_grid_subtitles(path: Path, camera_name: str, spans: list[dict[str, An
         if last_capture:
             lines.append(f"Last frame captured: {display(last_capture)}")
         cues.append((cursor, cue_end, lines))
-        missing_cues.append({"output_start_seconds": round(cursor, 6),
-                             "shared_source_time": shared_time.isoformat() if shared_time else None,
-                             "last_frame_capture_time": last_capture.isoformat() if last_capture else None})
+        note_missing(cursor, cue_end, shared_time)
         cursor = cue_end
     with path.open("w", encoding="utf-8") as subtitle:
         for number, (left, right, lines) in enumerate(cues, 1):
@@ -465,7 +500,7 @@ def _write_grid_subtitles(path: Path, camera_name: str, spans: list[dict[str, An
     return {"source_to_output_intervals": [{"source_start": span["source_start"].isoformat(), "source_end": span["source_end"].isoformat(),
              "output_start_seconds": round(_union_output_time(span["source_start"], intervals), 6),
              "output_end_seconds": round(_union_output_time(span["source_end"], intervals), 6)} for span in spans],
-            "missing_tile_cues": missing_cues}
+            "missing_tile_intervals": missing}
 
 
 def _span_list(path: Path, spans: list[dict[str, Any]], offsets: list[float], end: float, *, inpoint_of: Any) -> str:
@@ -707,8 +742,10 @@ def _ffconcat_quote(path: Path) -> str:
     return "file '" + rendered.replace("'", "'\\''") + "'\n"
 
 
-def _job_view(row: sqlite3.Row) -> dict[str, Any]:
-    return {
+def _job_view(row: sqlite3.Row, *, manifest: bool = True) -> dict[str, Any]:
+    """An export as the API shows it. ``manifest`` False leaves the manifest out (the list, refreshed every two seconds while anything runs,
+    sent a full manifest for each of 50 exports: megabytes a poll, #505); the single export's route and the package carry it."""
+    view = {
         "id": row["id"],
         "status": row["status"],
         "created_at": row["created_at"],
@@ -725,7 +762,8 @@ def _job_view(row: sqlite3.Row) -> dict[str, Any]:
         "audio_camera_id": row["audio_camera_id"],
         "progress": int(row["progress"]),
         "expires_at": row["expires_at"],
-        "metadata": json.loads(row["metadata_json"]) if row["metadata_json"] else None,
+        "metadata": (json.loads(row["metadata_json"]) if row["metadata_json"] else None) if manifest else None,
+        "manifest_dropped_at": row["manifest_dropped_at"],
         "error": row["error"],
         "download_url": f"/api/exports/{row['id']}/download" if row["status"] == "completed" and row["output_relative_path"] and (not row["expires_at"] or _parse_time(row["expires_at"]) > datetime.now(timezone.utc)) else None,
         "cancel_requested": bool(row["cancel_requested"]),
@@ -734,6 +772,7 @@ def _job_view(row: sqlite3.Row) -> dict[str, Any]:
         "dewarp": {camera_id: entry["view"] for camera_id, entry in json.loads(row["dewarp_json"] or "{}").items()},
         "dewarp_lenses": {camera_id: entry["lens"] for camera_id, entry in json.loads(row["dewarp_json"] or "{}").items()},
     }
+    return view
 
 
 @dataclass
@@ -1614,14 +1653,20 @@ def get_export(job_id: str, requester_id: int, is_admin: bool = False) -> sqlite
         return db.execute("SELECT * FROM exports WHERE id=? AND requested_by=?", (job_id, requester_id)).fetchone()
 
 
+# What the list shows of each export: everything but the manifest, which is not read from the database at all (#505).
+LIST_COLUMNS = ("id,status,created_at,updated_at,completed_at,requested_start,requested_end,camera_ids_json,output_modes_json,display_settings_json,"
+                "tile_camera_ids_json,grid_resolution,include_audio,audio_camera_id,progress,expires_at,manifest_dropped_at,error,output_relative_path,"
+                "cancel_requested,retry_of,redaction_review_id,dewarp_json")
+
+
 def list_exports(requester_id: int, is_admin: bool = False, limit: int = 50) -> list[dict[str, Any]]:
     expire_exports()
     with connect() as db:
         if is_admin:
-            rows = db.execute("SELECT * FROM exports ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+            rows = db.execute(f"SELECT {LIST_COLUMNS} FROM exports ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
         else:
-            rows = db.execute("SELECT * FROM exports WHERE requested_by=? ORDER BY created_at DESC LIMIT ?", (requester_id, limit)).fetchall()
-    return [_job_view(row) for row in rows]
+            rows = db.execute(f"SELECT {LIST_COLUMNS} FROM exports WHERE requested_by=? ORDER BY created_at DESC LIMIT ?", (requester_id, limit)).fetchall()
+    return [_job_view(row, manifest=False) for row in rows]
 
 
 def request_cancel(job_id: str, actor_id: int, is_admin: bool = False) -> str:
