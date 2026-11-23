@@ -404,7 +404,8 @@ test("an export of a 360° camera can render a panorama or a virtual view", asyn
     return finished ? finished : jobs[0];
   };
   await expect.poll(async () => (await metadata())?.status, { timeout: 200_000 }).toBe("completed");
-  const job = await metadata();
+  // The list leaves manifests out (#505): the finished export's own route has it.
+  const job = await (await page.request.get(`/api/exports/${(await metadata()).id}`)).json();
   expect(job.dewarp).toEqual({ [fixtures.camera_ids[0]]: { mode: "view", pan: 30, tilt: -50, fov: 75 } });
   const camera = job.metadata.cameras.find(item => item.camera_id === fixtures.camera_ids[0]);
   expect(camera.dewarp).toMatchObject({ mode: "view", pan: 30, tilt: -50, fov: 75, output_size: [1280, 720] });

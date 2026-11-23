@@ -64,7 +64,8 @@ def list_windows(user: CurrentUser) -> dict[str, Any]:
         rows = db.execute("SELECT * FROM maintenance_windows WHERE COALESCE(ended_at,ends_at)>? ORDER BY starts_at DESC LIMIT 300", (since,)).fetchall()
         views = [item for item in (_visible(db, user, row) for row in rows) if item is not None]
         site = any(item["state"] == "active" and item["scope"] == "site" for item in views)
-        covered = [camera["id"] for camera in db.execute("SELECT id FROM cameras") if user.access.can_see(camera["id"]) and maintenance.covering(db, camera["id"]) is not None]
+        quieted = maintenance.covered_cameras(db)
+        covered = [camera["id"] for camera in db.execute("SELECT id FROM cameras") if camera["id"] in quieted and user.access.can_see(camera["id"])]
     order = {"active": 0, "upcoming": 1, "ended": 2}
     views.sort(key=lambda item: (order[item["state"]], item["starts_at"] if item["state"] != "ended" else ""), reverse=False)
     return {"now": now, "windows": views, "site_active": site, "covered_camera_ids": covered,

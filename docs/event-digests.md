@@ -6,7 +6,7 @@ its clip or record. It is made from stored data only, in the same words every ti
 
 ## Where to find them
 
-- **Digests** in the top navigation: make one now for the last 12 hours, 24 hours or 7 days (the whole site or one group), and read the ones scheduled for you.
+- **Digests** in the top navigation: make one now for the last 12 hours, 24 hours or 7 days (the whole site or one group), and read the ones scheduled for you. A digest made now (`GET /api/digests/preview`) covers at most 7 days for the whole site and 31 for chosen cameras or groups; each person has one being made at a time and three are made at once in all, and another is answered `429` with a `Retry-After` of a few seconds (#508). Scheduled digests are not affected.
 - **Settings > Digests** (administrators): schedules, where each is delivered, and the optional summarising model.
 
 ## What is in one

@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import json
+import threading
 import uuid
-from datetime import datetime, timezone
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
@@ -97,6 +99,36 @@ def list_digests(user: CurrentUser, limit: int = Query(default=50, ge=1, le=200)
     return {"digests": items}
 
 
+# A preview reads every alarm, person track, segment and gap of its range for each camera: about 0.13 s a camera for 31 days, so 27 s of a
+# thread at 200 cameras, and nothing limited how many ran at once (#508). As decided on the ticket: one at a time for each person, three in
+# all, and a whole-site preview covers at most a week (one of chosen cameras or groups may still cover 31 days). Scheduled digests are made
+# by the background worker, not here, and are unchanged.
+PREVIEWS_EACH = 1
+PREVIEWS_IN_ALL = 3
+WHOLE_SITE_RANGE = timedelta(days=7)
+_previews_lock = threading.Lock()
+_previews_running: dict[int, int] = {}
+
+
+@contextmanager
+def _preview_turn(person_id: int):
+    with _previews_lock:
+        if _previews_running.get(person_id, 0) >= PREVIEWS_EACH:
+            raise HTTPException(status_code=429, detail="Your previous digest preview is still being made: wait for it to finish", headers={"Retry-After": "5"})
+        if sum(_previews_running.values()) >= PREVIEWS_IN_ALL:
+            raise HTTPException(status_code=429, detail=f"{PREVIEWS_IN_ALL} digest previews are being made now: try again in a few seconds", headers={"Retry-After": "5"})
+        _previews_running[person_id] = _previews_running.get(person_id, 0) + 1
+    try:
+        yield
+    finally:
+        with _previews_lock:
+            left = _previews_running.get(person_id, 1) - 1
+            if left > 0:
+                _previews_running[person_id] = left
+            else:
+                _previews_running.pop(person_id, None)
+
+
 @router.get("/api/digests/preview")
 def preview(
     user: CurrentUser,
@@ -111,6 +143,15 @@ def preview(
     """A digest of the range for the site, groups or cameras, made now from stored data and not kept. It covers only what the reader may see."""
     start_time, end_time = _range(start, end)
     window = {"start": after_hours_start, "end": after_hours_end}
+    if (site or not (group_ids or camera_ids)) and end_time - start_time > WHOLE_SITE_RANGE:
+        raise HTTPException(status_code=422, detail=f"A preview of the whole site covers at most {WHOLE_SITE_RANGE.days} days; choose cameras or groups for a longer range "
+                                                    f"(up to {digests.MAX_RANGE.days} days)")
+    with _preview_turn(int(user["id"])):
+        return _preview(user, start_time, end_time, window, site, group_ids, camera_ids, after_hours_start, after_hours_end)
+
+
+def _preview(user, start_time: datetime, end_time: datetime, window: dict[str, str], site: bool, group_ids: list[str] | None, camera_ids: list[str] | None,
+             after_hours_start: str, after_hours_end: str) -> dict[str, object]:
     try:
         digests._clock(after_hours_start), digests._clock(after_hours_end)
         with connect() as db:

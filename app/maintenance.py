@@ -53,6 +53,20 @@ def covering(db: sqlite3.Connection, camera_id: str | None, at: datetime | None 
     return next((row for row in rows if _scope_matches(db, row, camera_id)), None)
 
 
+def covered_cameras(db: sqlite3.Connection, at: datetime | None = None) -> set[str]:
+    """Every camera a window quiets at that moment, worked out from the active windows at once: what ``covering`` says camera by camera, without
+    a query or two for each camera (the maintenance list asked it of every camera on every refresh, #508)."""
+    stamp = iso(at or _now())
+    rows = db.execute("SELECT scope,camera_ids_json,group_ids_json FROM maintenance_windows WHERE starts_at<=? AND COALESCE(ended_at,ends_at)>?", (stamp, stamp)).fetchall()
+    if any(row["scope"] == "site" for row in rows):
+        return {row["id"] for row in db.execute("SELECT id FROM cameras")}
+    cameras = {camera_id for row in rows if row["scope"] == "cameras" for camera_id in json.loads(row["camera_ids_json"])}
+    groups = {group_id for row in rows if row["scope"] == "groups" for group_id in json.loads(row["group_ids_json"])}
+    if groups:
+        cameras |= {row["id"] for row in db.execute(f"SELECT id FROM cameras WHERE group_id IN ({','.join('?' * len(groups))})", tuple(groups))}
+    return cameras
+
+
 def count_held(db: sqlite3.Connection, window_id: str, kind: str) -> None:
     column = "suppressed_alarms" if kind == "alarm" else "suppressed_incidents"
     db.execute(f"UPDATE maintenance_windows SET {column}={column}+1 WHERE id=?", (window_id,))

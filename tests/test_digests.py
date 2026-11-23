@@ -450,3 +450,58 @@ DigestCase.schedule = ScheduleTests.schedule
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PreviewLimitTests(DigestCase):
+    """A preview reads every alarm, track, segment and gap of its range for each camera; as decided on #508, one runs at a time for each person,
+    three in all, and a whole-site preview covers at most a week."""
+
+    def test_a_whole_site_preview_covers_at_most_a_week_and_one_of_chosen_cameras_a_month(self):
+        week = {"start": DAY.isoformat(), "end": (DAY + timedelta(days=7)).isoformat()}
+        longer = {"start": DAY.isoformat(), "end": (DAY + timedelta(days=8)).isoformat()}
+        month = {"start": DAY.isoformat(), "end": (DAY + timedelta(days=31)).isoformat()}
+        self.assertEqual(self.admin.get("/api/digests/preview", params=week).status_code, 200)
+        refused = self.admin.get("/api/digests/preview", params=longer)
+        self.assertEqual(refused.status_code, 422)
+        self.assertIn("at most 7 days", refused.json()["detail"])
+        self.assertEqual(self.admin.get("/api/digests/preview", params={**longer, "site": "true"}).status_code, 422)
+        self.assertEqual(self.admin.get("/api/digests/preview", params={**month, "camera_ids": [self.d1]}).status_code, 200)
+        self.assertEqual(self.admin.get("/api/digests/preview", params={**month, "group_ids": [self.dock]}).status_code, 200)
+
+    def test_one_preview_at_a_time_for_each_person_and_three_in_all(self):
+        from app.api import digests as digests_api
+
+        with digests_api._preview_turn(1):  # The administrator's preview is still being made
+            busy = self.admin.get("/api/digests/preview", params=RANGE)
+            self.assertEqual(busy.status_code, 429)
+            self.assertIn("still being made", busy.json()["detail"])
+            self.assertEqual(busy.headers["Retry-After"], "5")
+            self.assertEqual(self.full.get("/api/digests/preview", params=RANGE).status_code, 200)  # Someone else's is not held up
+            with digests_api._preview_turn(self.limited_id), digests_api._preview_turn(999):  # Three under way in all, none of them this person's
+                crowded = self.full.get("/api/digests/preview", params=RANGE)
+                self.assertEqual(crowded.status_code, 429)
+                self.assertIn("3 digest previews", crowded.json()["detail"])
+        self.assertEqual(digests_api._previews_running, {})  # Every turn is given back, a refused one too
+        self.assertEqual(self.admin.get("/api/digests/preview", params=RANGE).status_code, 200)
+
+    def test_a_preview_that_fails_gives_its_turn_back(self):
+        from app.api import digests as digests_api
+
+        with patch.object(digests, "build", side_effect=digests.DigestError("broken")):
+            self.assertEqual(self.admin.get("/api/digests/preview", params=RANGE).status_code, 422)
+        self.assertEqual(digests_api._previews_running, {})
+
+
+class NarrowedTests(unittest.TestCase):
+    def body(self, cameras: list[str], alarm_cameras: list[str]) -> dict:
+        return {"cameras": [{"id": camera, "name": camera} for camera in cameras],
+                "alarms": {"items": [{"camera_id": camera} for camera in alarm_cameras]},
+                "tracks": {"after_hours_people": {"items": []}, "vehicles_at_gates": {"items": []}}, "gaps": {"items": []}, "incidents": {"items": []}}
+
+    def test_a_digest_made_for_a_camera_the_reader_may_not_see_is_narrowed_even_when_its_shown_items_are_all_visible(self):
+        # Items are cut at ALARM_ITEMS: the 200 shown can all be on the camera the reader sees while the totals and summary counted the other (#508).
+        made = self.body(["seen", "hidden"], ["seen"] * digests.ALARM_ITEMS)
+        restricted = self.body(["seen"], ["seen"] * digests.ALARM_ITEMS)
+        self.assertTrue(digests.narrowed(made, restricted))
+        self.assertFalse(digests.narrowed(made, json.loads(json.dumps(made))))
+        self.assertTrue(digests.narrowed(self.body(["a", "b"], ["a", "b"]), self.body(["a", "b"], ["a"])))

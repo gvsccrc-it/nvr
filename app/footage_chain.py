@@ -558,9 +558,18 @@ def _check_stretches(db: sqlite3.Connection, camera_id: str, seqs: list[int], in
     return None
 
 
-def verify(camera_id: str, start: datetime, end: datetime) -> dict[str, Any]:
-    """Check a camera's footage in [start, end) against its signed chain."""
-    from .storage import recording_file_path, segment_available
+class VerificationCancelled(Exception):
+    """The person who asked for a verification left or cancelled it: it stops between two files (#508)."""
+
+
+def verify(camera_id: str, start: datetime, end: datetime, *, include_archived: bool = True, cancel: Any = None,
+           progress: Any = None) -> dict[str, Any]:
+    """Check a camera's footage in [start, end) against its signed chain.
+
+    ``include_archived`` False leaves footage that has moved to a cold tier unread (``not_checked_archived``): reading it downloads it from an
+    object store, which only an administrator may start (#508). ``cancel`` is an event checked between files; ``progress`` is called with
+    (files checked, files in all) as the check goes."""
+    from .storage import _hot_file_path, recording_file_path, segment_available
 
     # Stored times are UTC ISO text, so compare in UTC.
     start, end = start.astimezone(timezone.utc), end.astimezone(timezone.utc)
@@ -607,7 +616,11 @@ def verify(camera_id: str, start: datetime, end: datetime) -> dict[str, Any]:
     in_range = [link for link in chained.values() if link["starts_at"] < end.isoformat() and link["ends_at"] > start.isoformat()]
     present = {(segment["id"], segment["relative_path"]): segment for segment in segments}
     results = []
-    for segment in segments:
+    for done, segment in enumerate(segments):
+        if cancel is not None and cancel.is_set():
+            raise VerificationCancelled
+        if progress is not None:
+            progress(done, len(segments))
         key = (segment["id"], segment["relative_path"])
         link = chained.get(key)
         entry = {"segment_id": segment["id"], "starts_at": segment["starts_at"], "ends_at": segment["ends_at"]}
@@ -624,6 +637,8 @@ def verify(camera_id: str, start: datetime, end: datetime) -> dict[str, Any]:
             entry["status"] = "out_of_order"
         elif segment["unavailable_at"]:
             entry["status"] = "unavailable"
+        elif not include_archived and segment["tier_id"] and not _hot_file(_hot_file_path, segment["relative_path"]):
+            entry["status"] = "not_checked_archived"  # On a cold tier: reading it would download it; not a problem, and not proven either
         else:
             try:
                 path = recording_file_path(segment["relative_path"])
@@ -638,6 +653,8 @@ def verify(camera_id: str, start: datetime, end: datetime) -> dict[str, Any]:
         key = (link["segment_id"], link["relative_path"])
         if key not in present and key not in removed:
             results.append({"segment_id": link["segment_id"], "starts_at": link["starts_at"], "ends_at": link["ends_at"], "status": "missing"})
+    if progress is not None:
+        progress(len(segments), len(segments))
     results.sort(key=lambda item: (item["starts_at"], item["segment_id"]))
     problems = [entry for entry in results if entry["status"] in PROBLEMS]
     # Footage older than the kept chain: its links were dropped KEEP_DAYS after it was removed. That is said as such, and is never a problem.
@@ -646,6 +663,13 @@ def verify(camera_id: str, start: datetime, end: datetime) -> dict[str, Any]:
             "valid": chain_error is None and not problems, "chain_error": chain_error, "signed_upto": signed_upto, "breaks": breaks,
             "public_key": installation_key, "segments": results, "problems": problems,
             "before_kept_chain": before_kept_chain, "kept_from": kept["kept_from"] if kept is not None else None}
+
+
+def _hot_file(hot_path: Any, relative_path: str) -> bool:
+    try:
+        return hot_path(relative_path).is_file()
+    except OSError:
+        return False
 
 
 def extract(db: sqlite3.Connection, camera_id: str, segment_ids: Iterable[int]) -> dict[str, Any] | None:
