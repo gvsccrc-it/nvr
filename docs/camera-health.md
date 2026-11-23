@@ -13,6 +13,7 @@ It only reads values the NVR has stored. Opening it (even with 200 cameras) star
 | Bitrate and frame rate "set" | the camera's recording profile (ONVIF), the one the NVR records | Not reported |
 | Bitrate "seen" | the recorded files of the last 30 minutes: bytes over seconds | Not reported |
 | Frame rate "seen" | the newest recording's frame rate (FFprobe, run by the background sampler, never by the page) | Not reported |
+| "Keyframes N s apart: live view starts slowly" | the live view, when the camera's keyframes came more than 18 seconds apart (a "smart codec" mode, or a long I-frame interval); cleared when they no longer do. Live video starts at a keyframe, so a viewer may wait that long for the picture: shorten the camera's keyframe interval for live view to start at once (#496) | Not shown |
 | Recording uptime | how long the recorder has been recording since its last break | Not reported while it is not recording |
 | Dropped frames | FFmpeg's own `drop_frames` report for the recorder's processes, added up (also on `/metrics`) | Not reported until the recorder has counted the camera |
 | Reconnects | counted whenever the recorder's state changes to reconnecting, whichever part of the recorder sets it | Not reported until the recorder has counted the camera |

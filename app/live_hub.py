@@ -27,6 +27,13 @@ logger = logging.getLogger("nvr.live")
 
 LINGER_SECONDS = 5.0
 VIEWER_QUEUE_FRAGMENTS = 120
+# What is kept since the latest keyframe, for a viewer who joins between two (#496). At most half a viewer's queue, so handing it over
+# never fills the queue (a camera in a "smart codec" mode can go a minute between keyframes, and the joiner was closed as too slow before
+# it saw anything), and at most this many bytes. Past either, nothing is kept until the next keyframe, and a joiner waits for it.
+MAX_GOP_FRAGMENTS = VIEWER_QUEUE_FRAGMENTS // 2
+MAX_GOP_BYTES = 32 * 1024 * 1024
+FRAGMENT_SECONDS = 0.3  # The fragment duration FFmpeg is asked for (-frag_duration 300000)
+LONG_KEYFRAME_GAP_SECONDS = MAX_GOP_FRAGMENTS * FRAGMENT_SECONDS  # Keyframes further apart than this: a late viewer waits for the next
 READ_TIMEOUT_SECONDS = 15.0
 MAX_BOX_BYTES = 32 * 1024 * 1024
 NON_SYNC_SAMPLE = 0x00010000
@@ -228,6 +235,12 @@ class LiveStream:
         self.init: bytes | None = None
         self.mime: str | None = None
         self.gop: list[bytes] = []
+        self._gop_bytes = 0
+        self._gop_whole = False  # Whether ``gop`` holds everything since the latest keyframe (not once it passed its bounds)
+        self._decodable = False  # Whether a keyframe has been seen: before one, nothing is sent
+        self._waiting: set[Viewer] = set()  # Joined while nothing decodable was kept: sent nothing until the next keyframe
+        self._last_keyframe: float | None = None
+        self.keyframe_gap: float | None = None  # The latest interval between keyframes, in seconds, when it was too long for a late joiner
         self.ready = asyncio.Event()
         self.failed: str | None = None
         self.process: asyncio.subprocess.Process | None = None
@@ -259,21 +272,70 @@ class LiveStream:
             self.linger.cancel()
             self.linger = None
         self.viewers.add(viewer)
-        # Start the newcomer at the latest keyframe so its first frame decodes at once.
-        for fragment in self.gop:
-            viewer.offer(fragment)
+        # Start the newcomer at the latest keyframe so its first frame decodes at once. When what came since is more than is kept, the
+        # newcomer is sent nothing until the next keyframe: what follows a keyframe cannot be decoded without it.
+        if self.gop and self._gop_whole:
+            for fragment in self.gop:
+                viewer.offer(fragment)
+        elif self._decodable:
+            self._waiting.add(viewer)
 
     def remove(self, viewer: Viewer, on_idle: Callable[[], None]) -> None:
         self.viewers.discard(viewer)
+        self._waiting.discard(viewer)
         if not self.viewers and self.linger is None:
             # A conversion from H.265 is a full decode and re-encode: it is never kept for the next viewer, whatever "keep live video ready"
             # says, or someone clicking through H.265 cameras leaves one running for ten minutes behind each (#344).
             seconds = LINGER_SECONDS if self.transcode or self.linger_seconds is None else self.linger_seconds
             self.linger = asyncio.get_running_loop().call_later(seconds, on_idle)
 
-    def _broadcast(self, item: object) -> None:
+    def _broadcast(self, item: object, keyframe: bool = False) -> None:
+        if keyframe:
+            self._waiting.clear()
         for viewer in list(self.viewers):
-            viewer.offer(item)
+            if viewer not in self._waiting:
+                viewer.offer(item)
+
+    def _take(self, data: bytes, keyframe: bool) -> bool:
+        """One media fragment from FFmpeg: kept for late joiners and sent to the viewers. False, and nothing sent, before the first keyframe."""
+        if keyframe:
+            self._stage("first_keyframe_ms")
+            self._decodable = True
+        elif not self._decodable:
+            return False
+        self._keep(data, keyframe)
+        self._broadcast(data, keyframe)
+        return True
+
+    def _keep(self, data: bytes, keyframe: bool) -> None:
+        """Keep what a late joiner needs: everything since the latest keyframe, within ``MAX_GOP_FRAGMENTS`` and ``MAX_GOP_BYTES``."""
+        if keyframe:
+            now = time.monotonic()
+            if self._last_keyframe is not None:
+                self._note_keyframe_gap(now - self._last_keyframe)
+            self._last_keyframe = now
+            self.gop, self._gop_bytes, self._gop_whole = [data], len(data), True
+            return
+        if not self._gop_whole:
+            return
+        if len(self.gop) >= MAX_GOP_FRAGMENTS or self._gop_bytes + len(data) > MAX_GOP_BYTES:
+            self.gop, self._gop_bytes, self._gop_whole = [], 0, False  # Too long to hand over: a joiner waits for the next keyframe
+            return
+        self.gop.append(data)
+        self._gop_bytes += len(data)
+
+    def _note_keyframe_gap(self, seconds: float) -> None:
+        """Say in camera health when this camera's keyframes are too far apart for instant live view, and when they no longer are."""
+        long = seconds > LONG_KEYFRAME_GAP_SECONDS
+        if long == (self.keyframe_gap is not None) and (not long or abs(seconds - (self.keyframe_gap or 0)) < 5):
+            return  # Nothing new to say
+        self.keyframe_gap = round(seconds, 1) if long else None
+        from . import camera_health
+
+        try:
+            asyncio.get_running_loop().run_in_executor(None, camera_health.note_keyframe_gap, self.key[0], self.keyframe_gap)
+        except RuntimeError:
+            pass
 
     @property
     def converts(self) -> bool:
@@ -361,14 +423,8 @@ class LiveStream:
                 for fragment in fragments:
                     if self.init is None:
                         continue
-                    if fragment.keyframe:
-                        self._stage("first_keyframe_ms")
-                        self.gop = [fragment.data]
-                    elif self.gop:
-                        self.gop.append(fragment.data)
-                    else:
+                    if not self._take(fragment.data, fragment.keyframe):
                         continue  # nothing decodable yet
-                    self._broadcast(fragment.data)
                     if self.on_fragment:
                         self.on_fragment()
         finally:
