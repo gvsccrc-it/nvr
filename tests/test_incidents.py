@@ -9,6 +9,7 @@ import uuid
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
@@ -119,6 +120,19 @@ class IncidentApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 404)
 
     def test_storage_pressure_groups_affected_cameras_and_recovers(self):
+        # The recorder's own storage check runs once as the client starts, in a thread, with the threshold as it was then: when it finished
+        # between this test's request and its read, it marked the volume healthy again (main's run after #600). What is tested here is the
+        # storage page's check, so the client is started again without that loop.
+        self.context.__exit__(None, None, None)
+
+        async def no_storage_loop(manager):
+            return None
+
+        patch = mock.patch.object(RecordingManager, "_storage_loop", no_storage_loop)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.context = TestClient(app)
+        self.client = self.context.__enter__()
         os.environ["NVR_STORAGE_PRESSURE_FREE_BYTES"] = "9999999999999999"
         self.active_user = principal(self.admin_id, "administrator", "administrator")
         volume = self.client.get("/api/storage")
