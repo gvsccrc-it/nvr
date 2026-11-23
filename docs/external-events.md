@@ -37,7 +37,11 @@ The same answer (401) is given for an unknown source, a disabled one, a missing 
 
 ## MQTT
 
-Add an *MQTT subscription* source with the broker address (`mqtt://user:password@host:1883` or `mqtts://…`) and a topic filter such as `building/doors/#`. Whoever can publish to the broker is trusted, so give the NVR's login read access to only those topics. A JSON message in the format above is an event; any other message becomes an `mqtt_message` event whose subject is its topic.
+Add an *MQTT subscription* source with the broker address (`mqtt://user:password@host:1883` or `mqtts://…`) and a topic filter such as `building/doors/#`. Whoever can publish to the broker is trusted, so give the NVR's login read access to only those topics. A JSON message in the format above is an event. Any other message becomes an `mqtt_message` event whose subject is its topic, but only when a mapping takes it (its subject is the topic or `*`, with no types or with `mqtt_message`); otherwise it is not stored, only counted (#528).
+
+- **An allowance, as for HTTP sources.** At most 600 messages a minute are kept from one source; the rest are not stored. Home Assistant's events topic has the same allowance.
+- **What was not kept** is counted on the source and shown beside it in Settings → Event sources: "… over the allowance of 600 a minute, not kept", "… messages no mapping takes, not kept". The counts are saved once a pass, never once a message.
+- **A topic filter must name at least one fixed level** (`site/doors/#`, not `#` or `+/#`): one of only `#` and `+` takes every message on the broker. A source saved with one before this keeps running, under the allowance, is marked on the page, and must be narrowed the next time it is edited; it can always be switched off as it is.
 
 ## Home Assistant
 
