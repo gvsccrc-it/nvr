@@ -11,6 +11,7 @@ interface Row {
   configured: { codec: string | null; width: number | null; height: number | null; fps: number | null; bitrate_kbps: number | null };
   measured: { fps: number | null; bitrate_kbps: number | null; at: string | null };
   dropped_frames: number | null; reconnects: number | null; onvif_contact_at: string | null; onvif_error: string | null; onvif_failed: boolean;
+  keyframe_gap_seconds: number | null;
 }
 interface Fleet {
   generated_at: string; cameras: Row[]; outdated: number;
@@ -113,7 +114,14 @@ export function FleetHealth() {
                 </td>
                 <td>{duration(row.uptime_seconds)}</td>
                 <td title={row.measured.at ? `Seen over the half hour to ${row.measured.at}` : undefined}>{pair(row.configured.bitrate_kbps, row.measured.bitrate_kbps, "kbit/s")}</td>
-                <td>{pair(row.configured.fps, row.measured.fps, "fps")}</td>
+                <td>
+                  {pair(row.configured.fps, row.measured.fps, "fps")}
+                  {row.keyframe_gap_seconds ? (
+                    <span className="muted" title="Live view starts at a keyframe: a viewer may wait this long for the picture. Shorten the camera's keyframe (I-frame) interval, or turn off its smart codec, for live view to start at once.">
+                      {" "}· keyframes {Math.round(row.keyframe_gap_seconds)} s apart: live view starts slowly
+                    </span>
+                  ) : null}
+                </td>
                 <td>{row.dropped_frames ?? NOT_REPORTED}</td>
                 <td>{row.reconnects ?? NOT_REPORTED}</td>
                 <td title={row.onvif_error ?? undefined}>{row.onvif_contact_at ? formatRelative(row.onvif_contact_at) : NOT_REPORTED}{row.onvif_failed ? <span className="muted"> · last try failed</span> : null}</td>

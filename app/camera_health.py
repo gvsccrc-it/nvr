@@ -173,6 +173,17 @@ def _store_one(camera_id: str, values: dict[str, Any]) -> None:
         _store(db, camera_id, values)
 
 
+def note_keyframe_gap(camera_id: str, seconds: float | None) -> None:
+    """What the live view saw of a camera's keyframes: the interval between two when it is too long for a viewer to join at once (#496),
+    or None when it no longer is. Blocking: the live hub calls it in a thread."""
+    try:
+        with connect() as db:
+            if db.execute("SELECT 1 FROM cameras WHERE id=?", (camera_id,)).fetchone() is not None:
+                _store(db, camera_id, {"keyframe_gap_seconds": seconds, "keyframe_gap_at": _iso(_now())})
+    except sqlite3.Error:
+        logger.debug("A camera's keyframe interval could not be stored this time", exc_info=True)
+
+
 def sample_seconds(camera_id: str) -> float:
     """How long after its last check this camera is checked again: SAMPLE_SECONDS moved by an amount of its own, the same every time, in
     [-SPREAD/2, +SPREAD/2). Cameras checked together drift apart and stay apart."""
@@ -337,6 +348,8 @@ def fleet(db: sqlite3.Connection, visible: set[str] | None, now: datetime | None
             "dropped_segments": int(counters.get((metrics.SEGMENTS_DROPPED, camera["id"]), 0)) if counted else None,
             "onvif_contact_at": camera["onvif_contact_at"], "onvif_checked_at": camera["onvif_checked_at"], "onvif_failed": bool(camera["onvif_error"]),
             "onvif_error": camera["onvif_error"] if show_errors else None,  # What the camera answered can name its address: administrators only
+            # Keyframes too far apart for instant live view (#496): a viewer who joins waits up to this long for the picture
+            "keyframe_gap_seconds": camera["keyframe_gap_seconds"],
         })
     models = firmware_status(rows, visible)
     shown = [row for row in rows if visible is None or row["camera_id"] in visible]
@@ -353,9 +366,9 @@ def to_csv(report: dict[str, Any]) -> str:
     out = io.StringIO()
     writer = csv.writer(out, lineterminator="\r\n")
     writer.writerow(["camera", "group", "manufacturer", "model", "firmware", "firmware_status", "newest_firmware", "stream_uptime_seconds", "configured_bitrate_kbps",
-                     "measured_bitrate_kbps", "configured_fps", "measured_fps", "dropped_frames", "reconnects", "last_onvif_contact"])
+                     "measured_bitrate_kbps", "configured_fps", "measured_fps", "dropped_frames", "reconnects", "last_onvif_contact", "keyframe_gap_seconds"])
     for row in report["cameras"]:
         writer.writerow([_safe(value) for value in (row["name"], row["group"], row["manufacturer"], row["model"], row["firmware"], row["firmware_status"], row["newest_firmware"],
                                                     row["uptime_seconds"], row["configured"]["bitrate_kbps"], row["measured"]["bitrate_kbps"], row["configured"]["fps"],
-                                                    row["measured"]["fps"], row["dropped_frames"], row["reconnects"], row["onvif_contact_at"])])
+                                                    row["measured"]["fps"], row["dropped_frames"], row["reconnects"], row["onvif_contact_at"], row["keyframe_gap_seconds"])])
     return out.getvalue()

@@ -25,3 +25,5 @@ A camera that does not answer is tried again after 15 seconds, then 30, 60, up t
 ## Reading Diagnostics
 
 Settings › Diagnostics › Live video start-up counts viewers who **started the camera's stream** and those who **joined a running stream**. With streams held ready, almost every viewer joins a running one (about 0.1 s), and the "started" row stays empty except after a camera was offline or the mode was changed.
+
+**Cameras with keyframes far apart (#496).** A viewer who joins a running stream is given what came since the latest keyframe, so the picture decodes at once. That is kept up to 60 fragments (about 18 seconds) and 32 MB. A camera whose keyframes are further apart (a "smart codec" mode can go a minute between them) has nothing kept past that point: a viewer who joins then is sent nothing until the next keyframe, and then plays from it, rather than being given more than a viewer's queue holds and closed as too slow. Camera health says which cameras these are.
