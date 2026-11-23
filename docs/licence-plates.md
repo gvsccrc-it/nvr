@@ -63,6 +63,17 @@ A plate reader knows only the plates it was trained on, so the administrator pic
 
 The shipped models are the MIT-licensed [open-image-models](https://github.com/ankandrew/open-image-models) YOLOv9 plate detector and [fast-plate-ocr](https://github.com/ankandrew/fast-plate-ocr) recognisers, downloaded from their GitHub releases when the image is built. The Dockerfile checks each file against a pinned SHA-256 (`app/plate_models.py` is the single registry; a test keeps the Dockerfile in step with it), and CI downloads the real files, reads a rendered plate through each region and runs `python -m scripts.check_plate_models` in the built image. The licence of the trained weights was taken from those projects' MIT licences and was not independently verified; check it before relying on it commercially. Models are looked for in `/opt/nvr/models/plates` (`NVR_PLATE_MODELS_DIR`).
 
+### The plate detector's licence (#552)
+
+What the image ships as the plate detector, exactly:
+
+- **The model:** `yolo-v9-t-640-license-plates-end2end.onnx`, a YOLOv9-t network at 640 pixels, trained to find licence plates.
+- **Where it comes from:** the [open-image-models](https://github.com/ankandrew/open-image-models) project, release `assets`. It is downloaded when the image is built and checked against the SHA-256 pinned in the `Dockerfile` and `app/plate_models.py`.
+- **The licence its distributor states:** MIT, the open-image-models project's licence.
+- **What is open:** the YOLOv9 code the network was trained with is licensed GPL-3.0. Whether weights trained with GPL code can be offered under MIT, or carry the GPL with them, is an unsettled legal question. No legal advice has been taken. It is the owner's to obtain, and until then the cautious reading is that publishing an image that contains this file carries some risk.
+- **If no risk is wanted meanwhile:** the plate models can be left out of the published image and fetched by the installer. That has not been done; the owner would say so on #552.
+- **The plate readers:** the readers (`global_mobile_vit_v2_ocr`, `european_mobile_vit_v2_ocr`) come from [fast-plate-ocr](https://github.com/ankandrew/fast-plate-ocr) under MIT, as that project states (not independently verified). They are listed with everything else the image redistributes in `THIRD_PARTY_NOTICES.md`.
+
 **Accuracy on your cameras is not known.** The test reads a clean rendered plate; real cameras, angles, night and speed differ. Measure it (below) and record the result.
 
 Regions that are not offered (for example Argentina, Brazil, India) have no shipped recogniser; use the hand-installed path.
