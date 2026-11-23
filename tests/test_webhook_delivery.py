@@ -6,6 +6,7 @@ import os
 import tempfile
 import unittest
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -46,7 +47,8 @@ class DeliveryCase(unittest.IsolatedAsyncioTestCase):
     def queue(self, endpoint: str) -> str:
         self.moment += 1
         delivery = str(uuid.uuid4())
-        at = f"2026-01-01T00:00:{self.moment:02d}+00:00"
+        # Queued moments ago, in order and due now: an event that has waited over an hour is dropped, not delivered (#526)
+        at = (datetime.now(timezone.utc) - timedelta(seconds=100 - self.moment)).isoformat()
         with connect() as db:
             db.execute("INSERT INTO webhook_deliveries(id,endpoint_id,endpoint_name,event_id,event_type,payload_json,status,attempt_count,next_attempt_at,created_at,updated_at) "
                        "VALUES(?,?,'r',?,'webhook.test','{}','queued',0,?,?,?)", (delivery, endpoint, str(uuid.uuid4()), at, at, at))

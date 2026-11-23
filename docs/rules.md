@@ -39,6 +39,8 @@ Besides raising an alarm, each event can run up to 10 actions. Add them in the r
 - **Delivery.** The background worker queues each action once per event and runs deliveries side by side, so a long relay hold never delays a message. Delivery is at least once: a receiver that answers too late may get a retry, so use `event_id` to ignore repeats.
   - **Retries:** connection failures, `429` and `5xx` answers are retried with backoff (2 s, 5 s, 15 s, 1 min, 5 min, 30 min, then hourly; 8 attempts in all).
   - **No retry:** other refusals fail at once, for example a `404`, a broker that rejects the credentials (`mqtt_refused_5`) or a camera with no relay outputs. A relay is always switched off again (retried a few times); one that cannot be is reported as `relay_not_released` and never switched on again by a retry.
+  - **A receiver that does not answer** holds up only its own action: each action gets one delivery at a time, each attempt has 15 seconds in all (a relay, its hold time more), and only the receiver's status is read, never the rest of its answer. It counts as a connection failure and is retried. The NVR's own emails (incidents, digests) have a worker of their own, so rule actions never hold them up (#527).
+  - **A restart during a relay pulse** may have left the output on. The relay is then switched off only, never pulsed again, and the delivery shows `interrupted_by_restart_released` (or `…_release_failed` when the camera could not be reached).
   - **Log:** the rule's **Action deliveries** log shows each delivery's status, attempts and last error code for 30 days.
 - **Test mode** lists the actions each event would run and runs none of them.
 

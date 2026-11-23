@@ -63,3 +63,19 @@ async def pulse(device_service_url: str, username: str, password: str, relay_tok
                         raise RelayNotReleased() from exc
                     await asyncio.sleep(0.5 * (attempt + 1))
         return token
+
+
+async def release(device_service_url: str, username: str, password: str, relay_token: str | None) -> str:
+    """Switch the relay off, and nothing else: for a pulse cut off by a restart, which may have left it on. Sending the whole pulse again
+    would switch it on a second time (#527)."""
+    auth = httpx.DigestAuth(username, password) if username else None
+    async with httpx.AsyncClient(auth=auth, timeout=httpx.Timeout(10, connect=5), trust_env=False, follow_redirects=False) as client:
+        token = relay_token
+        if not token:
+            relays = await _call(client, device_service_url, GET_RELAYS, "<tds:GetRelayOutputs/>")
+            token = next((node.get("token") for node in relays.iter() if _local(node.tag) == "RelayOutputs" and node.get("token")), None)
+            if not token:
+                raise NoRelayOutputs()
+        await _call(client, device_service_url, SET_STATE, f"<tds:SetRelayOutputState><tds:RelayOutputToken>{_escape(token)}</tds:RelayOutputToken>"
+                                                          "<tds:LogicalState>inactive</tds:LogicalState></tds:SetRelayOutputState>")
+        return token
