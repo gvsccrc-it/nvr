@@ -695,16 +695,19 @@ def verify_package_file(package: Any, case_id: str, package_id: str, installatio
     temporary file to be opened (#359). Blocking: callers on an event loop run it in a thread.
 
     ``complete`` says the case's clips are all there (a package of someone with less access can be valid and not complete)."""
+    from . import package_checks
     from .exports import member_digest, read_integrity_manifest, verify_evidence_file
+    budget = package_checks.Budget()  # The package and every clip in it together (#503)
     try:
+        package_checks.check_directory(package)
         with zipfile.ZipFile(package) as archive:
-            names, manifest = read_integrity_manifest(archive)
+            names, manifest = read_integrity_manifest(archive, budget)
             expected = {entry["path"]: entry for entry in manifest["files"]}
             delivered = set(names) - {"integrity.json"}
             if len(expected) != len(manifest["files"]) or delivered != set(expected):
                 return {"checksums_valid": False, "files": [], "clips": [], "complete": False, "error": "package contents do not match the integrity manifest"}
-            metadata = json.loads(archive.read("metadata.json"))
-            if metadata.get("case_id") != case_id or metadata.get("package_id") != package_id or metadata.get("audit_reference") != {"resource_type": "case", "resource_id": case_id}:
+            metadata = package_checks.read_json(archive, "metadata.json")
+            if not isinstance(metadata, dict) or metadata.get("case_id") != case_id or metadata.get("package_id") != package_id or metadata.get("audit_reference") != {"resource_type": "case", "resource_id": case_id}:
                 return {"checksums_valid": False, "files": [], "clips": [], "complete": False, "error": "package identity does not match the requested package"}
             files, valid = [], True
             for name in sorted(delivered):
@@ -712,7 +715,7 @@ def verify_package_file(package: Any, case_id: str, package_id: str, installatio
                 matches = size == expected[name].get("size_bytes") and digest == expected[name].get("sha256")
                 valid = valid and matches
                 files.append({"path": name, "size_bytes": size, "sha256": digest, "matches": matches})
-            document = json.loads(archive.read("case.json"))
+            document = package_checks.read_json(archive, "case.json")
             clips, every_clip = [], True
             for entry in (item for item in document.get("items", []) if item.get("kind") == "clip"):
                 name = entry.get("package_file")
@@ -720,10 +723,15 @@ def verify_package_file(package: Any, case_id: str, package_id: str, installatio
                     clips.append({"item_id": entry.get("id"), "export_id": entry.get("export_id"), "present": False, "valid": False, "error": "the clip's file is missing from the package"})
                     every_clip = False
                     continue
-                with tempfile.TemporaryFile() as spooled, archive.open(name) as member:
-                    shutil.copyfileobj(member, spooled, 1024 * 1024)  # A package inside a package: opened from disk, not from memory
+                # A package inside a package: opened from disk, not from memory (#359), and on the recordings volume within its headroom,
+                # never in the system's temporary folder (#503). What it declares inside is drawn from the same budget as the package.
+                folder = package_checks.directory()
+                folder.mkdir(parents=True, exist_ok=True)
+                package_checks.ensure_room(folder, archive.getinfo(name).file_size)
+                with tempfile.TemporaryFile(dir=folder, prefix="clip-") as spooled, archive.open(name) as member:
+                    shutil.copyfileobj(member, spooled, 1024 * 1024)
                     spooled.seek(0)
-                    inner = verify_evidence_file(spooled, entry.get("export_id"), installation_key)
+                    inner = verify_evidence_file(spooled, entry.get("export_id"), installation_key, budget)
                 inner_valid = bool(inner["checksums_valid"]) and (inner.get("chain") is None or bool(inner["chain"]["valid"]))
                 every_clip = every_clip and inner_valid
                 clips.append({"item_id": entry.get("id"), "export_id": entry.get("export_id"), "present": True, "valid": inner_valid, "error": inner.get("error"),
@@ -734,7 +742,7 @@ def verify_package_file(package: Any, case_id: str, package_id: str, installatio
             return {"checksums_valid": valid, "files": files, "clips": clips, "clips_valid": every_clip, "notes_and_audit_present": notes_present, "partial_clips": partial,
                     "omitted_items": metadata.get("omitted_items", 0), "complete": valid and every_clip and notes_present and metadata.get("omitted_items", 0) == 0,
                     "error": None if valid else "one or more file checksums do not match"}
-    except (zipfile.BadZipFile, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+    except (zipfile.BadZipFile, KeyError, TypeError, ValueError, AttributeError, json.JSONDecodeError) as exc:
         return {"checksums_valid": False, "files": [], "clips": [], "complete": False, "error": f"invalid case package: {str(exc)[:200]}"}
 
 

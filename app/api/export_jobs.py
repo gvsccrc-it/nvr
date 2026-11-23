@@ -23,9 +23,8 @@ from app import exports as export_rules
 from app.store import connect
 from app.retention import acquire_playback, release_playback
 from app import dewarp, footage_chain, viewing_audit
-from app import copies_budget, queue_turns
-from app.exports import create_export_record, export_output_path, get_export, list_exports, request_cancel, verify_evidence_file, _job_view, EXPORT_DIRECTORY, MAX_EXPORT_CAMERAS, MAX_EXPORT_WINDOW, MAX_VERIFY_PACKAGE_BYTES
-from app.recording import recordings_path
+from app import copies_budget, package_checks, queue_turns
+from app.exports import create_export_record, export_output_path, get_export, list_exports, request_cancel, verify_evidence_file, _job_view, MAX_EXPORT_CAMERAS, MAX_EXPORT_WINDOW, MAX_VERIFY_PACKAGE_BYTES
 from app.audit import record as audit_record
 
 router = APIRouter()
@@ -261,28 +260,48 @@ async def received_package(request: Request, too_large: str) -> AsyncIterator[tu
     """The uploaded package as a temporary file and its SHA-256, written as it arrives and removed afterwards whatever happens.
 
     It used to be collected in memory, copied, and each file in it read whole: three times the upload at the peak, about 6 GiB in the web
-    worker for a package near the limit (#359). The file goes beside the exports, on the recordings volume, not on the system disk."""
+    worker for a package near the limit (#359). The file goes on the recordings volume, not on the system disk, in a folder of its own that
+    the exports' budget does not count (#503). At most ``package_checks.MAX_UPLOADS`` checks run at once (429 past that), and an upload that
+    would take the volume below its headroom is refused part-way (507) and its file removed."""
     declared = request.headers.get("content-length")
     if declared and declared.isdigit() and int(declared) > MAX_VERIFY_PACKAGE_BYTES:
         raise HTTPException(status_code=413, detail=too_large)
-    folder = recordings_path() / EXPORT_DIRECTORY
-    await run_in_threadpool(folder.mkdir, parents=True, exist_ok=True)
-    handle = await run_in_threadpool(lambda: tempfile.NamedTemporaryFile(dir=folder, prefix=".verify-", suffix=".upload", delete=False))
-    path = Path(handle.name)
     try:
-        digest, size = hashlib.sha256(), 0
+        slot = package_checks.Slot().__enter__()
+    except package_checks.Busy as exc:
+        raise HTTPException(status_code=429, detail=str(exc), headers={"Retry-After": "30"}) from exc
+    path: Path | None = None
+    try:
+        folder = package_checks.directory()
+        await run_in_threadpool(folder.mkdir, parents=True, exist_ok=True)
         try:
-            async for chunk in request.stream():
-                size += len(chunk)
-                if size > MAX_VERIFY_PACKAGE_BYTES:
-                    raise HTTPException(status_code=413, detail=too_large)
-                digest.update(chunk)
-                await run_in_threadpool(handle.write, chunk)
-        finally:
-            await run_in_threadpool(handle.close)
-        yield path, digest.hexdigest()
+            if declared and declared.isdigit():
+                await run_in_threadpool(package_checks.ensure_room, folder, int(declared))
+            handle = await run_in_threadpool(lambda: tempfile.NamedTemporaryFile(dir=folder, prefix="upload-", suffix=".zip", delete=False))
+            path = Path(handle.name)
+            digest, size, checked = hashlib.sha256(), 0, 0
+            try:
+                async for chunk in request.stream():
+                    size += len(chunk)
+                    if size > MAX_VERIFY_PACKAGE_BYTES:
+                        raise HTTPException(status_code=413, detail=too_large)
+                    if size - checked >= package_checks.ROOM_CHECK_EVERY:  # What has arrived since the last look, before it is written
+                        await run_in_threadpool(package_checks.ensure_room, folder, size - checked)
+                        checked = size
+                    digest.update(chunk)
+                    await run_in_threadpool(handle.write, chunk)
+            finally:
+                await run_in_threadpool(handle.close)
+        except package_checks.NoRoom as exc:
+            raise HTTPException(status_code=507, detail=str(exc)) from exc
+        try:
+            yield path, digest.hexdigest()
+        except package_checks.NoRoom as exc:  # A case package's clips are copied beside the upload to be opened
+            raise HTTPException(status_code=507, detail=str(exc)) from exc
     finally:
-        await run_in_threadpool(path.unlink, missing_ok=True)
+        if path is not None:
+            await run_in_threadpool(path.unlink, missing_ok=True)
+        slot.__exit__(None, None, None)
 
 
 @router.post("/api/exports/{job_id}/verify")
