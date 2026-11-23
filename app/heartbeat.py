@@ -180,9 +180,11 @@ class HeartbeatManager:
                 "X-NVR-Event-Type": "nvr.heartbeat", "X-NVR-Timestamp": sent_at,
                 "X-NVR-Signature": f"sha256={signature}",
             }
-            async with httpx.AsyncClient(timeout=httpx.Timeout(REQUEST_TIMEOUT_SECONDS, connect=3), follow_redirects=False, trust_env=False) as client:
-                response = await client.post(target, content=body, headers=headers)
-            status_code = int(response.status_code)
+            # A deadline for the whole attempt, and only the status read: one receiver answering a byte at a time stopped heartbeats for good (#527)
+            async with asyncio.timeout(REQUEST_TIMEOUT_SECONDS + 5):
+                async with httpx.AsyncClient(timeout=httpx.Timeout(REQUEST_TIMEOUT_SECONDS, connect=3), follow_redirects=False, trust_env=False) as client:
+                    async with client.stream("POST", target, content=body, headers=headers) as response:
+                        status_code = int(response.status_code)
             await asyncio.to_thread(record_heartbeat_result, success=200 <= status_code < 300, http_status=status_code, error=None if 200 <= status_code < 300 else f"receiver_http_{status_code}")
         except asyncio.CancelledError:
             raise

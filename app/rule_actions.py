@@ -34,6 +34,7 @@ MAX_ATTEMPTS = 8
 RETRY_SECONDS = (2, 5, 15, 60, 300, 1800, 3600)
 KEEP_DELIVERIES = timedelta(days=30)
 REQUEST_TIMEOUT_SECONDS = 10
+ATTEMPT_DEADLINE_SECONDS = REQUEST_TIMEOUT_SECONDS + 5  # For a whole attempt: the HTTP timeout is per read, and a receiver can answer a byte at a time (#527)
 MIN_SIGNING_SECRET = 16
 MAX_RELAY_SECONDS = 60
 # One noisy rule must not send hundreds of emails: a limit per rule and one for the whole site, each over the last hour.
@@ -242,9 +243,41 @@ def deliveries(rule_id: str, limit: int = 100) -> list[dict[str, Any]]:
                                         "next_attempt_at", "response_status", "last_error", "created_at", "updated_at", "delivered_at")} for row in rows]
 
 
-def recover_inflight() -> None:
+def recover_inflight() -> list[dict[str, Any]]:
+    """Deliveries cut off by a restart are tried again, except a relay pulse: it may have switched the output on and not off, and sending
+    it again would switch it on a second time. Those are returned, to be switched off only, and recorded as failed (#527)."""
     with connect() as db:
+        relays = [dict(row) for row in db.execute(
+            "SELECT d.id,d.attempt_count,a.settings_json FROM rule_action_deliveries d LEFT JOIN rule_actions a ON a.id=d.action_id "
+            "WHERE d.status='sending' AND d.action_type='relay'")]
+        if relays:
+            db.executemany("UPDATE rule_action_deliveries SET status='failed',last_error='interrupted_by_restart',updated_at=? WHERE id=?",
+                           [(_now().isoformat(), relay["id"]) for relay in relays])
         db.execute("UPDATE rule_action_deliveries SET status='queued',next_attempt_at=?,last_error='process_restarted' WHERE status='sending'", (_now().isoformat(),))
+    return relays
+
+
+async def release_interrupted(relays: list[dict[str, Any]]) -> None:
+    """Switch off each relay whose pulse a restart cut off, once, under a deadline; the delivery says whether that worked."""
+    from .onvif_relay import release
+
+    for relay in relays:
+        settings = json.loads(relay["settings_json"] or "{}")
+        try:
+            with connect() as db:
+                camera = db.execute("SELECT device_service_url,motion_credentials_ciphertext FROM cameras WHERE id=?", (settings.get("camera_id"),)).fetchone()
+            if camera is None or not camera["device_service_url"]:
+                raise LookupError
+            credentials = json.loads(decrypt(camera["motion_credentials_ciphertext"])) if camera["motion_credentials_ciphertext"] else {}
+            async with asyncio.timeout(ATTEMPT_DEADLINE_SECONDS):
+                await release(camera["device_service_url"], credentials.get("username", ""), credentials.get("password", ""), settings.get("relay_token"))
+            outcome = "interrupted_by_restart_released"
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - recorded by name only: a message might quote an address
+            outcome = "interrupted_by_restart_release_failed"
+        with connect() as db:
+            db.execute("UPDATE rule_action_deliveries SET last_error=? WHERE id=?", (outcome, relay["id"]))
 
 
 def _claim() -> dict[str, Any] | None:
@@ -256,7 +289,10 @@ def _claim() -> dict[str, Any] | None:
         try:
             row = db.execute(
                 "SELECT d.*, a.settings_json, a.secret_ciphertext, a.enabled AS action_enabled FROM rule_action_deliveries d "
-                "LEFT JOIN rule_actions a ON a.id=d.action_id WHERE d.status='queued' AND d.next_attempt_at<=? ORDER BY d.next_attempt_at, d.created_at LIMIT 1",
+                "LEFT JOIN rule_actions a ON a.id=d.action_id WHERE d.status='queued' AND d.next_attempt_at<=? "
+                # One delivery at a time for each action (its destination), so a receiver that does not answer holds up only its own (#527)
+                "AND NOT EXISTS (SELECT 1 FROM rule_action_deliveries busy WHERE busy.action_id=d.action_id AND busy.status='sending') "
+                "ORDER BY d.next_attempt_at, d.created_at LIMIT 1",
                 (now,),
             ).fetchone()
             if row is None:
@@ -306,10 +342,12 @@ def _message(payload: dict[str, Any]) -> str:
 
 
 async def _post(url: str, body: bytes, headers: dict[str, str], allow_private: bool) -> int:
+    """The receiver's status, under a deadline for the whole attempt; its answer's body is never read, so it is never held (#527)."""
     target = await asyncio.wait_for(asyncio.to_thread(_checked, url, allow_private), timeout=5)
-    async with httpx.AsyncClient(timeout=httpx.Timeout(REQUEST_TIMEOUT_SECONDS, connect=3), follow_redirects=False, trust_env=False) as client:
-        response = await client.post(target, content=body, headers=headers)
-    return int(response.status_code)
+    async with asyncio.timeout(ATTEMPT_DEADLINE_SECONDS):
+        async with httpx.AsyncClient(timeout=httpx.Timeout(REQUEST_TIMEOUT_SECONDS, connect=3), follow_redirects=False, trust_env=False) as client:
+            async with client.stream("POST", target, content=body, headers=headers) as response:
+                return int(response.status_code)
 
 
 def _email(delivery: dict[str, Any], settings: dict[str, Any], payload: dict[str, Any]) -> tuple[int | None, str | None, bool]:
@@ -430,7 +468,13 @@ async def deliver_one() -> bool:
     if delivery["action_id"] is None or not delivery["action_enabled"]:
         await asyncio.to_thread(_finish, delivery["id"], attempt, error="action_removed_or_disabled")
         return True
-    status, error, retryable = await _perform(delivery)
+    try:
+        # A deadline for the whole delivery, whatever kind: a relay's is its hold time longer, so switching off is always reached (#527)
+        hold = float(json.loads(delivery["settings_json"] or "{}").get("duration_seconds", 0)) if delivery["action_type"] == "relay" else 0.0
+        async with asyncio.timeout(ATTEMPT_DEADLINE_SECONDS + min(hold, MAX_RELAY_SECONDS) + 10):
+            status, error, retryable = await _perform(delivery)
+    except TimeoutError:
+        status, error, retryable = None, "deadline_passed", delivery["action_type"] != "relay"  # A relay is never pulsed again on its own
     await asyncio.to_thread(_finish, delivery["id"], attempt, response_status=status, error=error, retryable=retryable)
     return True
 
@@ -448,9 +492,13 @@ class RuleActionManager:
         self.tasks: list[asyncio.Task[None]] = []
 
     async def start(self) -> None:
-        await asyncio.to_thread(recover_inflight)
+        interrupted = await asyncio.to_thread(recover_inflight)
         await asyncio.to_thread(email_outbox.recover_inflight)
         self.tasks = [asyncio.create_task(self._run(), name=f"rule-action-worker-{index}") for index in range(WORKERS)]
+        # The NVR's own emails (incidents, digests) have a worker of their own: they were sent only when no rule action was due (#527)
+        self.tasks.append(asyncio.create_task(self._run_email(), name="email-worker"))
+        if interrupted:
+            self.tasks.append(asyncio.create_task(release_interrupted(interrupted), name="relay-release"))
 
     async def stop(self) -> None:
         for task in self.tasks:
@@ -461,7 +509,17 @@ class RuleActionManager:
     async def _run(self) -> None:
         while True:
             try:
-                if not await deliver_one() and not await asyncio.to_thread(email_outbox.deliver_one):
+                if not await deliver_one():
+                    await asyncio.sleep(self.poll_seconds)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                await asyncio.sleep(self.poll_seconds)
+
+    async def _run_email(self) -> None:
+        while True:
+            try:
+                if not await asyncio.to_thread(email_outbox.deliver_one):
                     await asyncio.sleep(self.poll_seconds)
             except asyncio.CancelledError:
                 raise
