@@ -66,6 +66,8 @@ class Tier:
     s3_prefix: str
     access_key: str | None
     secret_key: str | None
+    read_back: bool = False  # Read every file back from an object store after upload, instead of trusting the store's checksum (#486)
+    checksums: str | None = None  # Whether the object store keeps the checksum it is sent: 'yes', 'no', or None until a move finds out
 
 
 def load_tier(db: sqlite3.Connection, tier_id: str) -> Tier | None:
@@ -74,26 +76,58 @@ def load_tier(db: sqlite3.Connection, tier_id: str) -> Tier | None:
         return None
     credentials = json.loads(decrypt(row["credentials_ciphertext"])) if row["credentials_ciphertext"] is not None else {}
     return Tier(row["id"], row["name"], row["kind"], row["local_path"], row["s3_endpoint"], row["s3_bucket"], row["s3_region"], row["s3_prefix"],
-                credentials.get("access_key"), credentials.get("secret_key"))
+                credentials.get("access_key"), credentials.get("secret_key"), bool(row["read_back"]), row["checksums"])
 
 
 def seal_credentials(access_key: str, secret_key: str) -> bytes:
     return encrypt(json.dumps({"access_key": access_key, "secret_key": secret_key}))
 
 
+class Rate:
+    """The rate limit of a policy: ``kib_per_second`` kibibytes (1,024 bytes) a second, which the page shows as MiB a second.
+
+    One is shared by every move of a policy (``rate_for``), so the limit holds overall, not per segment: passes now follow each other at
+    once while footage is waiting (#486), and a fresh allowance per segment would have let a run of small segments go far faster. It is
+    a token bucket holding at most ``BURST_SECONDS`` of allowance, so time spent idle is not saved up as a burst; a call never sleeps
+    more than five seconds (so a stop is noticed), and what it still owes is carried to the next."""
+
+    BURST_SECONDS = 1.0
+
+    def __init__(self, kib_per_second: int) -> None:
+        self.kib_per_second = kib_per_second
+        self.per_second = max(1, kib_per_second) * 1024
+        self.allowance = self.per_second * self.BURST_SECONDS
+        self.at = time.monotonic()
+        self.lock = threading.Lock()
+
+    def wait(self, size: int) -> None:
+        with self.lock:
+            now = time.monotonic()
+            self.allowance = min(self.per_second * self.BURST_SECONDS, self.allowance + (now - self.at) * self.per_second) - size
+            self.at = now
+            owed = -self.allowance / self.per_second
+        if owed > 0:
+            time.sleep(min(owed, 5.0))
+
+    __call__ = wait
+
+
 def throttle(rate_kbps: int) -> Callable[[int], None]:
-    """A function to call with the size of each chunk moved: it sleeps so the average stays at or under the rate."""
-    started, moved = time.monotonic(), 0
-    per_second = max(1, rate_kbps) * 1024
+    """A function to call with the size of each chunk moved: it sleeps so the average stays at or under the rate (KiB a second)."""
+    return Rate(rate_kbps).wait
 
-    def wait(size: int) -> None:
-        nonlocal moved
-        moved += size
-        ahead = moved / per_second - (time.monotonic() - started)
-        if ahead > 0:
-            time.sleep(min(ahead, 5.0))
 
-    return wait
+_rates: dict[str, Rate] = {}
+_rates_guard = threading.Lock()
+
+
+def rate_for(volume_id: str, rate_kbps: int) -> Rate:
+    """The rate every move of this volume's policy shares; a changed limit starts a new one."""
+    with _rates_guard:
+        rate = _rates.get(volume_id)
+        if rate is None or rate.kib_per_second != rate_kbps:
+            rate = _rates[volume_id] = Rate(rate_kbps)
+        return rate
 
 
 class LocalStore:
@@ -146,6 +180,12 @@ class LocalStore:
                 size += len(chunk)
         return digest.hexdigest(), size
 
+    def confirm(self, key: str, sha256: str, size: int, rate: Callable[[int], None] | None = None) -> str:
+        """Read the copy back in full (it costs only disk time) and check it: how it was checked, or TierError."""
+        if self.read_digest(key, rate) != (sha256, size):
+            raise TierError(MISMATCH)
+        return "read_back"
+
     def delete(self, key: str) -> None:
         self.path(key).unlink(missing_ok=True)
 
@@ -164,6 +204,7 @@ class ObjectStore:
     kind = "s3"
 
     def __init__(self, tier: Tier, client: S3Client | None = None) -> None:
+        self.tier = tier
         self.client = client or S3Client(tier.s3_endpoint or "", tier.s3_bucket or "", tier.access_key or "", tier.secret_key or "", region=tier.s3_region, prefix=tier.s3_prefix)
 
     def put(self, source: Path, key: str, sha256: str, size: int, rate: Callable[[int], None] | None = None) -> None:
@@ -171,6 +212,27 @@ class ObjectStore:
 
     def read_digest(self, key: str, rate: Callable[[int], None] | None = None) -> tuple[str, int]:
         return self.client.read_digest(key, rate=rate)
+
+    def confirm(self, key: str, sha256: str, size: int, rate: Callable[[int], None] | None = None) -> str:
+        """Check the uploaded copy: how it was checked ('checksum' or 'read_back'), or TierError.
+
+        The upload was signed with the file's SHA-256 and sent it as the object's checksum, so the store itself refuses a body that does not
+        match. Here, a request for the object's details confirms its size and the checksum the store kept, with no download (the owner's
+        decision on #486). A store that keeps no checksum, or a tier set to read every file back, is read back in full, as before."""
+        if not self.tier.read_back:
+            details = self.client.details(key)
+            if details is None:
+                raise TierError("The copy is not on the cold tier; the next pass sends it again")
+            kept_size, kept_sha = details
+            if kept_sha is not None:
+                _note_checksums(self.tier, "yes")
+                if (kept_sha, kept_size) != (sha256, size):
+                    raise TierError(MISMATCH)
+                return "checksum"
+            _note_checksums(self.tier, "no")
+        if self.read_digest(key, rate) != (sha256, size):
+            raise TierError(MISMATCH)
+        return "read_back"
 
     def fetch(self, key: str, target: Path) -> tuple[str, int]:
         return self.client.download(key, target)
@@ -183,6 +245,20 @@ class ObjectStore:
 
     def close(self) -> None:
         self.client.close()
+
+
+MISMATCH = "The copy on the cold tier did not match the footage; the next pass sends it again"  # The key is shared with any other mover: it is overwritten, not deleted
+
+
+def _note_checksums(tier: Tier, kept: str) -> None:
+    """Remember whether the store keeps checksums, for the tiering page; written only when it changes."""
+    if tier.checksums == kept:
+        return
+    tier.checksums = kept
+    with connect() as db:
+        db.execute("UPDATE cold_tiers SET checksums=? WHERE id=?", (kept, tier.id))
+    if kept == "no":
+        logger.warning("The cold tier %s keeps no checksums: every file is read back in full after it is uploaded", tier.name)
 
 
 def open_store(tier: Tier) -> LocalStore | ObjectStore:
@@ -486,12 +562,10 @@ def move_segment(segment_id: int, now: datetime | None = None, opener: Callable[
             db.execute("INSERT INTO tier_moves(segment_id,tier_id,tier_key,state,sha256,size_bytes,attempts) VALUES(?,?,?,'copying',?,?,1) "
                        "ON CONFLICT(segment_id) DO UPDATE SET tier_id=excluded.tier_id,tier_key=excluded.tier_key,state='copying',sha256=excluded.sha256,size_bytes=excluded.size_bytes,"
                        "attempts=attempts+1,last_error=NULL,updated_at=?", (segment_id, tier.id, key, sha, size, now.isoformat()))
-        rate = throttle(int(policy["rate_kbps"]))
+        rate = rate_for(policy["volume_id"], int(policy["rate_kbps"]))
         try:
             store.put(source, key, sha, size, rate)
-            copied_sha, copied_size = store.read_digest(key, rate)
-            if (copied_sha, copied_size) != (sha, size):
-                raise TierError("The copy on the cold tier did not match the footage; the next pass sends it again")  # The key is shared with any other mover: it is overwritten, not deleted
+            _confirm(store, key, sha, size, rate)
         except (OSError, S3Error) as exc:
             message = str(exc)
             note_health(tier.id, message)
@@ -526,6 +600,13 @@ def move_segment(segment_id: int, now: datetime | None = None, opener: Callable[
     return "moved"
 
 
+def _confirm(store: Any, key: str, sha256: str, size: int, rate: Callable[[int], None]) -> None:
+    if hasattr(store, "confirm"):
+        store.confirm(key, sha256, size, rate)
+    elif store.read_digest(key, rate) != (sha256, size):
+        raise TierError(MISMATCH)
+
+
 def _discard_copy(store: Any, key: str, segment_id: int) -> None:
     try:
         store.delete(key)
@@ -556,27 +637,32 @@ MISSING_ERROR = "The footage file is missing from its volume"
 MISSING_RETRY = timedelta(hours=1)  # A file that is not there is looked for again this often, not on every pass
 
 
+# The oldest due footage still on the recorder's disks. ``recording_segments_tier_due_idx`` (ends_at, for rows with no tier and not
+# unavailable) is read in order and stops at ``LIMIT``: this scanned and sorted the whole table on every pass (#486).
+CANDIDATES_SQL = (
+    "SELECT s.id FROM recording_segments s INDEXED BY recording_segments_tier_due_idx JOIN cameras c ON c.id=s.camera_id LEFT JOIN camera_groups g ON g.id=c.group_id "
+    "WHERE s.tier_id IS NULL AND s.unavailable_at IS NULL AND s.ends_at<? AND COALESCE(g.storage_volume_id,'default')=? "
+    "AND NOT EXISTS (SELECT 1 FROM tier_moves m WHERE m.segment_id=s.id AND (m.last_error LIKE 'The footage no longer matches%' OR (m.last_error IS NOT NULL AND m.updated_at>?) "
+    "OR (m.last_error LIKE ? AND m.updated_at>?))) "
+    "AND NOT EXISTS (SELECT 1 FROM recording_holds h WHERE h.segment_id=s.id AND h.released_at IS NULL AND (h.expires_at IS NULL OR h.expires_at>?)) "
+    "AND NOT EXISTS (SELECT 1 FROM export_sources x JOIN exports e ON e.id=x.export_id WHERE x.segment_id=s.id AND e.status IN ('queued','running')) "
+    "ORDER BY s.ends_at LIMIT ?")
+
+
 def candidates(db: sqlite3.Connection, policy: sqlite3.Row, now: datetime, limit: int) -> list[int]:
     """The policy's oldest segments that can move now. Footage that is held or in an export, and footage whose file was missing when it
     was last tried, is left out here, as retention and headroom leave held footage out: a pass took the 20 oldest whatever they were,
     so 20 held segments at the front were picked again on every pass and nothing behind them ever moved (#485)."""
     cutoff = (now - timedelta(days=int(policy["after_days"]))).isoformat()
-    return [row[0] for row in db.execute(
-        "SELECT s.id FROM recording_segments s JOIN cameras c ON c.id=s.camera_id LEFT JOIN camera_groups g ON g.id=c.group_id "
-        "WHERE s.tier_id IS NULL AND s.unavailable_at IS NULL AND s.ends_at<? AND COALESCE(g.storage_volume_id,'default')=? "
-        "AND NOT EXISTS (SELECT 1 FROM tier_moves m WHERE m.segment_id=s.id AND (m.last_error LIKE 'The footage no longer matches%' OR (m.last_error IS NOT NULL AND m.updated_at>?) "
-        "OR (m.last_error LIKE ? AND m.updated_at>?))) "
-        "AND NOT EXISTS (SELECT 1 FROM recording_holds h WHERE h.segment_id=s.id AND h.released_at IS NULL AND (h.expires_at IS NULL OR h.expires_at>?)) "
-        "AND NOT EXISTS (SELECT 1 FROM export_sources x JOIN exports e ON e.id=x.export_id WHERE x.segment_id=s.id AND e.status IN ('queued','running')) "
-        "ORDER BY s.ends_at LIMIT ?",
-        (cutoff, policy["volume_id"], (now - timedelta(minutes=5)).isoformat(), MISSING_ERROR + "%", (now - MISSING_RETRY).isoformat(), now.isoformat(), limit))]
+    return [row[0] for row in db.execute(CANDIDATES_SQL, (cutoff, policy["volume_id"], (now - timedelta(minutes=5)).isoformat(), MISSING_ERROR + "%",
+                                                          (now - MISSING_RETRY).isoformat(), now.isoformat(), limit))]
 
 
 def set_aside(db: sqlite3.Connection, policy: sqlite3.Row, now: datetime, limit: int) -> dict[str, int]:
     """How many of the policy's due segments a pass leaves because they are held or in an export, counted up to ``limit`` of each: what a
     pass reports, now that it no longer picks them."""
     cutoff = (now - timedelta(days=int(policy["after_days"]))).isoformat()
-    due = ("FROM recording_segments s JOIN cameras c ON c.id=s.camera_id LEFT JOIN camera_groups g ON g.id=c.group_id "
+    due = ("FROM recording_segments s INDEXED BY recording_segments_tier_due_idx JOIN cameras c ON c.id=s.camera_id LEFT JOIN camera_groups g ON g.id=c.group_id "
            "WHERE s.tier_id IS NULL AND s.unavailable_at IS NULL AND s.ends_at<? AND COALESCE(g.storage_volume_id,'default')=? AND ")
     held = "EXISTS (SELECT 1 FROM recording_holds h WHERE h.segment_id=s.id AND h.released_at IS NULL AND (h.expires_at IS NULL OR h.expires_at>?))"
     exporting = "EXISTS (SELECT 1 FROM export_sources x JOIN exports e ON e.id=x.export_id WHERE x.segment_id=s.id AND e.status IN ('queued','running'))"
@@ -596,7 +682,19 @@ def missing_files(db: sqlite3.Connection, tier_id: str | None = None) -> int:
 
 def run_once(now: datetime | None = None, limit: int = BATCH, opener: Callable[[Tier], Any] = open_store) -> dict[str, int]:
     """One pass: finish interrupted moves, then move up to ``limit`` of each policy's oldest eligible segments."""
-    now = now or _now()
+    return drain(now, limit, opener)[0]
+
+
+def drain(now: datetime | None = None, limit: int = BATCH, opener: Callable[[Tier], Any] = open_store, until: float | None = None,
+          stop: threading.Event | None = None) -> tuple[dict[str, int], bool]:
+    """Finish interrupted moves, then move each policy's oldest eligible segments, ``limit`` at a time: one batch each, or with ``until``
+    (a ``time.monotonic()`` deadline), batch after batch until nothing is left or the time is up. Returns what happened and whether
+    footage is still waiting (the time ran out with some left), so the next pass starts at once instead of after ``POLL_SECONDS``.
+
+    A pass took 20 segments a policy and slept 30 s: at most 40 a minute, while 200 cameras record 200 (#486). The rate limit is shared by
+    every move of a policy (``rate_for``), so going on at once does not go faster than it allows. ``stop``, once set, ends the pass after
+    the segment being moved, so stopping the worker does not wait for the rest of a long pass."""
+    fixed = now
     outcomes: dict[str, int] = {}
 
     def count(result: str) -> None:
@@ -608,18 +706,33 @@ def run_once(now: datetime | None = None, limit: int = BATCH, opener: Callable[[
         interrupted = [row[0] for row in db.execute("SELECT segment_id FROM tier_moves WHERE state='copying' AND last_error IS NULL ORDER BY segment_id")]
         policies = db.execute("SELECT * FROM tier_policies WHERE enabled=1").fetchall()
     for segment_id in interrupted:
-        count(move_segment(segment_id, now, opener))
+        count(move_segment(segment_id, fixed or _now(), opener))
+    waiting = False
     for policy in policies:
         if not _volume_present(policy["volume_id"]):
             count("waiting_for_storage")  # Its disk is not mounted: there is nothing there to move (#479)
             continue
-        with connect() as db:
-            chosen = candidates(db, policy, now, limit)
-            for reason, number in set_aside(db, policy, now, limit).items():
-                outcomes[reason] = outcomes.get(reason, 0) + number
-        for segment_id in chosen:
-            count(move_segment(segment_id, now, opener))
-    return outcomes
+        first = True
+        while True:
+            when = fixed or _now()
+            with connect() as db:
+                chosen = candidates(db, policy, when, limit)
+                if first:
+                    for reason, number in set_aside(db, policy, when, limit).items():
+                        outcomes[reason] = outcomes.get(reason, 0) + number
+            first = False
+            results = []
+            for segment_id in chosen:
+                if stop is not None and stop.is_set():
+                    return outcomes, True
+                results.append(move_segment(segment_id, when, opener))
+                count(results[-1])
+            if until is None or len(chosen) < limit or "moved" not in results:
+                break  # One batch asked for; or nothing more is due; or nothing in this batch could move (a failing tier), which the next pass retries
+            if time.monotonic() >= until:
+                waiting = True
+                break
+    return outcomes, waiting
 
 
 def _volume_present(volume_id: str) -> bool:
@@ -632,34 +745,121 @@ def _volume_present(volume_id: str) -> bool:
         return False
 
 
-class TieringManager:
-    """Moves footage to the cold tiers, one segment at a time and rate limited, in the background."""
+PASS_SECONDS = 25.0  # How long one pass goes on while footage is waiting, before it measures the backlog and starts the next
 
-    def __init__(self, poll_seconds: float = POLL_SECONDS) -> None:
-        self.poll_seconds = poll_seconds
+
+class TieringManager:
+    """Moves footage to the cold tiers, one segment at a time and rate limited, in the background: pass after pass while footage is waiting,
+    then every ``poll_seconds``. Every few minutes it measures each volume's backlog (``measure_backlog``)."""
+
+    def __init__(self, poll_seconds: float = POLL_SECONDS, pass_seconds: float = PASS_SECONDS) -> None:
+        self.poll_seconds, self.pass_seconds = poll_seconds, pass_seconds
         self.task: Any = None
+        self.stopping = threading.Event()
 
     async def start(self) -> None:
         import asyncio
 
+        self.stopping.clear()
         self.task = asyncio.create_task(self._run(), name="tiering")
 
     async def stop(self) -> None:
         import asyncio
 
+        self.stopping.set()  # A pass in its thread ends after the segment it is moving
         if self.task and not self.task.done():
             self.task.cancel()
             await asyncio.gather(self.task, return_exceptions=True)
         self.task = None
 
+    def pass_once(self) -> bool:
+        """One pass and, when due, a backlog measurement; whether footage is still waiting."""
+        waiting = False
+        try:
+            _, waiting = drain(until=time.monotonic() + self.pass_seconds, stop=self.stopping)
+        finally:
+            measure_backlog()
+        return waiting
+
     async def _run(self) -> None:
         import asyncio
 
         while True:
+            waiting = False
             try:
-                await asyncio.to_thread(run_once)
+                waiting = await asyncio.to_thread(self.pass_once)
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001 - a failed pass is tried again at the next
                 logger.exception("A tiering pass failed")
-            await asyncio.sleep(self.poll_seconds)
+            await asyncio.sleep(0 if waiting else self.poll_seconds)
+
+
+# --- the backlog ------------------------------------------------------------------------------------------------------------------------------
+
+BACKLOG_EVERY = timedelta(minutes=10)  # How often each volume's backlog is measured
+BACKLOG_SAMPLES = 7  # Kept per volume: an hour of measurements, and the one before it
+BACKLOG_GRACE = timedelta(days=1)  # Footage this far past its move age is overdue, not just in the next batch
+
+
+def backlog(db: sqlite3.Connection, policy: sqlite3.Row, now: datetime) -> tuple[int, str | None]:
+    """How many of the policy's segments are due to move and not held (held footage never moves, so it is not a backlog), and when the
+    oldest of them ended."""
+    cutoff = (now - timedelta(days=int(policy["after_days"]))).isoformat()
+    row = db.execute(
+        "SELECT COUNT(*),MIN(s.ends_at) FROM recording_segments s INDEXED BY recording_segments_tier_due_idx JOIN cameras c ON c.id=s.camera_id "
+        "LEFT JOIN camera_groups g ON g.id=c.group_id WHERE s.tier_id IS NULL AND s.unavailable_at IS NULL AND s.ends_at<? AND COALESCE(g.storage_volume_id,'default')=? "
+        "AND NOT EXISTS (SELECT 1 FROM recording_holds h WHERE h.segment_id=s.id AND h.released_at IS NULL AND (h.expires_at IS NULL OR h.expires_at>?))",
+        (cutoff, policy["volume_id"], now.isoformat())).fetchone()
+    return int(row[0]), row[1]
+
+
+def growing(samples: list[list[Any]]) -> bool:
+    """Whether the backlog kept growing: an hour of measurements, none smaller than the one before, the last larger than the first. One
+    that keeps up rises and falls between passes; one that cannot only rises."""
+    if len(samples) < BACKLOG_SAMPLES:
+        return False
+    counts = [count for _, count in samples]
+    return counts[-1] > counts[0] and all(later >= earlier for earlier, later in zip(counts, counts[1:]))
+
+
+def measure_backlog(now: datetime | None = None, force: bool = False) -> dict[str, dict[str, Any]]:
+    """Measure each enabled policy's backlog (at most every ``BACKLOG_EVERY``, unless ``force``), keep the last hour of measurements and
+    raise an incident for a volume whose backlog keeps growing while its oldest waiting footage is overdue; it recovers once the backlog
+    stops growing. A volume whose disk is away, or a policy turned off, is not measured and its incident recovers."""
+    now = now or _now()
+    measured: dict[str, dict[str, Any]] = {}
+    with connect() as db:
+        policies = db.execute("SELECT * FROM tier_policies").fetchall()
+        kept = {row["volume_id"]: row for row in db.execute("SELECT * FROM tier_backlog")}
+    for policy in policies:
+        volume = policy["volume_id"]
+        last = kept.get(volume)
+        if not force and last is not None and _parse(last["measured_at"]) > now - BACKLOG_EVERY + timedelta(seconds=30):
+            continue
+        active = bool(policy["enabled"]) and _volume_present(volume)
+        with connect() as db:
+            if not active:
+                db.execute("DELETE FROM tier_backlog WHERE volume_id=?", (volume,))
+                sync_incident(db, incident_key=f"tiering-backlog:{volume}", camera_id=None, fault_type="tiering", summary="", active=False, details={"volume": volume})
+                continue
+            count, oldest = backlog(db, policy, now)
+            samples = (json.loads(last["samples_json"]) if last is not None else []) + [[now.isoformat(), count]]
+            samples = samples[-BACKLOG_SAMPLES:]
+            overdue = oldest is not None and _parse(oldest) < now - timedelta(days=int(policy["after_days"])) - BACKLOG_GRACE
+            behind = overdue and growing(samples)
+            db.execute("INSERT INTO tier_backlog(volume_id,segments,oldest_ends_at,samples_json,measured_at) VALUES(?,?,?,?,?) ON CONFLICT(volume_id) DO UPDATE SET "
+                       "segments=excluded.segments,oldest_ends_at=excluded.oldest_ends_at,samples_json=excluded.samples_json,measured_at=excluded.measured_at",
+                       (volume, count, oldest, json.dumps(samples), now.isoformat()))
+            sync_incident(db, incident_key=f"tiering-backlog:{volume}", camera_id=None, fault_type="tiering",
+                          summary=(f"Tiering on volume {volume} is falling behind: {count} segments are waiting to move and the backlog has grown for an hour. "
+                                   "Older footage may be deleted to keep disk headroom instead of being moved: raise the policy's rate limit or check the tier") if behind else "",
+                          active=behind, details={"volume": volume, "segments": count, "oldest_ends_at": oldest})
+        measured[volume] = {"segments": count, "oldest_ends_at": oldest, "growing": behind}
+    return measured
+
+
+def backlog_view(db: sqlite3.Connection) -> dict[str, dict[str, Any]]:
+    """The last measurement of each volume's backlog, for the tiering page."""
+    return {row["volume_id"]: {"segments": row["segments"], "oldest_ends_at": row["oldest_ends_at"], "measured_at": row["measured_at"],
+                               "growing": growing(json.loads(row["samples_json"]))} for row in db.execute("SELECT * FROM tier_backlog")}
