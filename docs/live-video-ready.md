@@ -14,7 +14,7 @@ Opening a camera that nobody is watching makes the NVR connect to it and wait fo
 
 For each camera that is enabled and not archived, the stream a viewer opening a grid is given: the substream if the camera has one, else the main stream (the same stream, prepared the same way, with the same privacy mask drawn in; the keeper and the live endpoint share `app/live_variant.py`, so a held stream is exactly the one a viewer joins). A tile that is enlarged on a camera that has a substream plays the main stream, which is held only for cameras without a substream; it still starts on demand.
 
-Not held: a camera whose H.265 would have to be converted to H.264 (converting for every viewer is real work; browsers that play H.265 take the unconverted stream and are held), a camera whose codec a browser cannot play directly, an archived or disabled camera. At most 24 streams are held; the list in Settings says how many are, and each one's state.
+Not held: a camera whose H.265 would have to be converted to H.264, or whose privacy mask the NVR draws in (both are a full re-encode, and close 5 seconds after their last viewer, #488; browsers that play H.265 take the unconverted stream and are held), a camera whose codec a browser cannot play directly, an archived or disabled camera. At most 24 streams are held; the list in Settings says how many are, and each one's state.
 
 ## Cost
 

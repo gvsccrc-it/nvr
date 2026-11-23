@@ -64,6 +64,7 @@ The `nvr-data` volume stores the database and account/session state. `nvr-secret
 | `NVR_BACKUP_PASSPHRASE` | unset | Enables encrypted configuration backups (at least 16 characters) |
 | `NVR_BACKUP_PASSPHRASE_FILE` | unset | Path of a file holding the backup passphrase, used when `NVR_BACKUP_PASSPHRASE` is empty |
 | `NVR_BACKUP_KEEP` | `14` | Number of configuration backups kept |
+| `NVR_LIVE_CONVERSIONS` | `6` | Live streams re-encoded at once, H.265 conversions and cameras with a privacy mask the NVR draws in together ([privacy masks](docs/privacy-masks.md)) |
 | `NVR_EXPORT_QUEUE_PLACES` | `8` | Exports queued or running at once for the whole NVR, one place kept for case packages ([evidence packages](docs/evidence-packages.md)) |
 | `NVR_EXPORTS_PER_PERSON` / `NVR_EXPORTS_PER_ADMINISTRATOR` | `2` / `4` | Exports one person may have queued or running at once |
 | `NVR_EXPORT_JOB_HOURS` | `6` | How long one whole export may run before it is stopped and fails |

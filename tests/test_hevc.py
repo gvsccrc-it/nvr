@@ -379,7 +379,8 @@ class HevcLiveTests(unittest.TestCase):
 
         self.assertAlmostEqual(asyncio.run(seconds_kept()), 600.0, delta=1)                      # Copied as it is
         self.assertAlmostEqual(asyncio.run(seconds_kept(hevc_copy=True)), 600.0, delta=1)        # H.265 passed on
-        self.assertAlmostEqual(asyncio.run(seconds_kept(video_filter="drawbox")), 600.0, delta=1)  # Masked: held ready as before
+        # Masked: a re-encode like a conversion, so it closes soon whatever keep-ready says, as decided on #488 (it was held for ten minutes)
+        self.assertAlmostEqual(asyncio.run(seconds_kept(video_filter="drawbox")), live_hub.LINGER_SECONDS, delta=1)
         self.assertAlmostEqual(asyncio.run(seconds_kept(transcode=True)), live_hub.LINGER_SECONDS, delta=1)  # Converted from H.265: never kept
 
     def test_a_refused_viewer_slot_leaves_no_conversion_counted(self):
@@ -433,7 +434,8 @@ class HevcLiveTests(unittest.TestCase):
         status = self.client.get("/api/system/status").json()
         self.assertIn(status["acceleration"]["selected"], (None, "nvenc", "qsv", "vaapi"))
         self.assertTrue(status["acceleration"]["ffmpeg"])
-        self.assertEqual(status["live"], {"viewers": 0, "audio_listeners": 0, "conversions": 0, "converted_viewers": 0})
+        self.assertEqual(status["live"], {"viewers": 0, "audio_listeners": 0, "conversions": 0, "converted_viewers": 0,
+                                          "masked_conversions": 0, "conversion_limit": live_media.MAX_LIVE_TRANSCODES})  # Masked re-encodes counted too (#488)
         with self.client.websocket_connect("/api/cameras/cam/live/stream") as websocket:
             self.receive(websocket, 1)
             live = self.client.get("/api/system/status").json()["live"]
@@ -446,7 +448,7 @@ class HevcLiveTests(unittest.TestCase):
         with self.client.websocket_connect("/api/cameras/cam/live/stream?hevc=true") as websocket:
             init, segment, fragments = self.receive(websocket, 3)
             self.assertEqual((init["codec"], init["transcoded"], self.codec_of(segment, fragments)), ("h264", False, "h264"))
-            self.assertEqual(live_media.transcode_counts(), (0, 0))  # Masking converted it already; that was never limited by this
+            self.assertEqual(live_media.transcode_counts(), (1, 1))  # Masked streams share the conversions' limit, as decided on #488 (they were never counted)
 
 
 @unittest.skipUnless(HAS_X265, "An H.265 encoder is required")
