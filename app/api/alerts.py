@@ -54,7 +54,7 @@ class HeartbeatConfigRequest(BaseModel):
 @router.get("/api/incidents")
 def get_incidents(
     user: CurrentUser,
-    state: str | None = Query(default=None, pattern="^(active|acknowledged|recovered)$"),
+    state: str | None = Query(default=None, pattern="^(active|acknowledged|recovered|open)$"),  # open: active or acknowledged, in one request (#536)
 ) -> dict[str, object]:
     with connect() as db:
         # Someone limited to some cameras sees the incidents of those cameras, not the system's or other cameras'. The query filters them

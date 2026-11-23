@@ -21,7 +21,9 @@ export function SitesSettings() {
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [replacing, setReplacing] = useState<{ id: string; token: string } | null>(null);
-  const refresh = () => client.invalidateQueries({ queryKey: KEY }).then(() => client.invalidateQueries({ queryKey: ["cameras"] }));
+  // The status area's console status too: while the console is off it is looked at only every 5 minutes (#536), so a change shows at once
+  const refresh = () => client.invalidateQueries({ queryKey: KEY }).then(() => Promise.all([client.invalidateQueries({ queryKey: ["cameras"] }),
+    client.invalidateQueries({ queryKey: ["console", "status"] })]));
   const fail = (problem: unknown, fallback: string) => { setMessage(null); setError(failureText(problem, fallback)); };
 
   const toggle = useMutation({

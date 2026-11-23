@@ -459,7 +459,8 @@ async def split_alarms(kwargs: dict[str, Any]) -> tuple[dict[str, Any], Context]
 
 async def combine_alarms(local: dict[str, Any] | None, context: Context) -> dict[str, Any]:
     kwargs = context.kwargs
-    params = {"state": kwargs["state"], "limit": kwargs["limit"], **{key: value for key, value in context.extra.items() if value}}
+    # A counts-only request (limit 0, #536) asks each site for one alarm, which any version of a site accepts, and leaves it out
+    params = {"state": kwargs["state"], "limit": kwargs["limit"] or 1, **{key: value for key, value in context.extra.items() if value}}
 
     async def ask(link: SiteLink) -> dict[str, Any] | None:
         response = await call(link, "GET", "/api/alarms", params=params)

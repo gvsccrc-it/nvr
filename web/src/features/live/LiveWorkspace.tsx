@@ -9,11 +9,13 @@ import { useLiveWorkspacePersistence } from "./persistence";
 import { useAlarmPopIns } from "./popIns";
 import { useCameraIds, useLiveStore } from "./store";
 import { ViewBar } from "./ViewBar";
+import { useTalkPolling } from "@/features/talk/TalkButton";
 
 export function LiveWorkspace() {
   const cameras = useCameras();
   const me = useMe();
   const cameraIds = useCameraIds();
+  useTalkPolling(cameraIds);
   const sidebarOpen = useLiveStore(store => store.sidebarOpen);
   const restored = useLiveStore(store => store.restored);
   const notice = useLiveStore(store => store.notice);
