@@ -19,6 +19,7 @@ from app import webhooks
 from app.credentials import encrypt
 from app.store import connect, initialize
 from tests.test_access_grants import GrantCase
+from tests.test_support import as_given
 
 
 class Case(unittest.TestCase):
@@ -175,7 +176,7 @@ class ConnectionTests(unittest.IsolatedAsyncioTestCase):
         self.server = await asyncio.start_server(receive, "127.0.0.1", 0)
         self.addAsyncCleanup(self._stop)
         url = f"http://127.0.0.1:{self.server.sockets[0].getsockname()[1]}/in"
-        patcher = mock.patch.object(webhooks, "validate_target_url", lambda value, allow_private: value)  # Loopback, for the test
+        patcher = mock.patch.object(webhooks, "pin_target_url", as_given)  # Loopback, for the test (delivery pins the checked address, #531)
         patcher.start()
         self.addCleanup(patcher.stop)
         self.endpoint = str(uuid.uuid4())

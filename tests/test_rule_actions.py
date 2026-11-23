@@ -10,6 +10,7 @@ import uuid
 from datetime import datetime, timezone
 from unittest.mock import patch
 
+from tests.test_support import as_given
 from app import rule_actions
 from app.alarms import create_alarm
 from app.credentials import encrypt
@@ -30,6 +31,9 @@ class RuleActionTests(SceneTestCase):
         super().setUp()
         # The local stand-ins listen on loopback; real destinations must pass the webhook rules.
         allow_local = patch("app.rule_actions.validate_destination", side_effect=lambda url, allow_private: url)
+        pin_local = patch("app.rule_actions._pinned", side_effect=as_given)  # Delivery checks and pins the address again (#531)
+        pin_local.start()
+        self.addCleanup(pin_local.stop)
         allow_local.start()
         self.addCleanup(allow_local.stop)
         self.receiver = HttpReceiver()

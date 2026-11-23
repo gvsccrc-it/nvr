@@ -26,7 +26,7 @@ import httpx
 from . import access, coverage, rule_actions, search, track_privacy
 from .credentials import decrypt, encrypt
 from .store import connect, has_row
-from .webhooks import validate_target_url
+from .webhooks import pin_target_url, validate_target_url
 from app.clock import now as _now, parse as _parse
 
 logger = logging.getLogger("nvr.digests")
@@ -530,8 +530,8 @@ def summarise_now(db: sqlite3.Connection, text: str) -> tuple[str | None, str | 
         return None, None
     url, model, allow_private = decrypt(row["summary_url_ciphertext"]), row["summary_model"], bool(row["summary_allow_private"])
     try:
-        target = validate_target_url(url, allow_private)
-        response = httpx.post(target, json={"model": model, "temperature": 0, "messages": [
+        pinned = pin_target_url(url, allow_private)  # To the address that was checked (#531)
+        response = httpx.post(**pinned.request(), json={"model": model, "temperature": 0, "messages": [
             {"role": "system", "content": "Summarize this security digest in one short paragraph for a shift supervisor. Use only the facts given; add nothing."},
             {"role": "user", "content": text}]}, timeout=httpx.Timeout(SUMMARY_TIMEOUT_SECONDS, connect=5), follow_redirects=False, trust_env=False)
         response.raise_for_status()

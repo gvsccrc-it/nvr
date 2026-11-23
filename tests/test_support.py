@@ -40,3 +40,13 @@ def principal(user_id: int, username: str, role: str):
     """The signed-in user as the API sees one, for tests that fake authentication."""
     from app.principal import Principal
     return Principal(id=user_id, username=username, role=role)
+
+
+def as_given(url, allow_private=False):
+    """A destination exactly as written, for tests whose stand-in receivers listen on loopback, which real destinations may never be: the
+    stand-in for ``webhooks.pin_target_url`` as the old check's stand-in was ``lambda url, allow_private: url`` (#531)."""
+    from urllib.parse import urlsplit
+
+    from app.webhooks import Pinned
+
+    return Pinned(url=url, host=urlsplit(url).netloc, sni=None)

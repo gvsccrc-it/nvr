@@ -21,6 +21,7 @@ from app.principal import COOKIE_NAME
 from app.rules import RulesManager
 from app.store import connect
 from tests.scene_case import SceneTestCase
+from tests.test_support import as_given
 
 BOTTOM_LEFT = {"x": 0.0, "y": 0.6, "width": 0.3, "height": 0.4}
 # The real endpoint rule, before the tests let the local stand-in through.
@@ -116,6 +117,9 @@ class PushTests(SceneTestCase):
         allow_local = patch("app.push.validate_endpoint", side_effect=lambda endpoint: endpoint)
         allow_local.start()
         self.addCleanup(allow_local.stop)
+        pin_local = patch("app.push.pin_endpoint", side_effect=as_given)  # Sending checks and pins the address again (#531)
+        pin_local.start()
+        self.addCleanup(pin_local.stop)
         rule = self.client.post("/api/rules", json={
             "name": "Gate entry", "enabled": True, "camera_ids": [self.camera_id], "group_ids": [], "classes": ["vehicle"],
             "condition": {"type": "zone_entry", "zone": BOTTOM_LEFT}, "schedule": None, "cooldown_seconds": 0,

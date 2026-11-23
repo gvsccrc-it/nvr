@@ -66,7 +66,8 @@ class S3Client:
         self.endpoint = endpoint.rstrip("/")
         self.bucket, self.region, self.prefix = bucket, region, prefix.strip("/")
         self.access_key, self.secret_key = access_key, secret_key
-        self.http = httpx.Client(timeout=timeout, follow_redirects=False, transport=transport)
+        # Never through a proxy named in the environment, like every other outbound client (#531)
+        self.http = httpx.Client(timeout=timeout, follow_redirects=False, trust_env=False, transport=transport)
         parts = urlsplit(self.endpoint)
         self.host, self.origin, self.base_path = parts.netloc, f"{parts.scheme}://{parts.netloc}", parts.path.rstrip("/")
 

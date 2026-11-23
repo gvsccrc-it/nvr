@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import asyncio
 import hashlib
 import hmac
@@ -126,6 +128,34 @@ def validate_target_url(value: str, allow_private: bool) -> str:
     display_host = f"[{host}]" if ":" in host else host
     netloc = display_host + (f":{port}" if port else "")
     return urlunsplit((parsed.scheme, netloc, parsed.path or "/", parsed.query, ""))
+
+
+@dataclass(frozen=True)
+class Pinned:
+    """A destination to connect to exactly as it was checked (#531). The name was looked up once and its address judged; letting the HTTP
+    client look the name up again to connect would let a name that answers a public address the first time and an internal one the second
+    reach the internal one. So the request goes to the checked address, with the name kept for the Host header and for TLS (SNI and the
+    certificate check)."""
+
+    url: str  # The checked address in place of the name
+    host: str  # The Host header: the name (and port) as written
+    sni: str | None  # The name TLS checks the certificate against; None for a literal address
+
+    def request(self, headers: dict[str, str] | None = None) -> dict[str, Any]:
+        """Keyword arguments for an httpx request to this destination."""
+        return {"url": self.url, "headers": {**(headers or {}), "Host": self.host}, "extensions": {"sni_hostname": self.sni} if self.sni else {}}
+
+
+def pin_target_url(value: str, allow_private: bool) -> Pinned:
+    """``validate_target_url``, keeping the address it judged so the request connects to that one and no other."""
+    parsed, host, port = _split_target(value)
+    addresses, literal_host = _destination_addresses(parsed, host, port)
+    _check_destination_policy(addresses, literal_host, parsed.scheme, allow_private)
+    address = sorted(addresses, key=lambda item: item.version)[0]  # IPv4 first, as most networks route it
+    port_text = f":{port}" if port else ""
+    connect_to = (f"[{address}]" if address.version == 6 else str(address)) + port_text
+    named = (f"[{host}]" if ":" in host else host) + port_text
+    return Pinned(urlunsplit((parsed.scheme, connect_to, parsed.path or "/", parsed.query, "")), named, None if literal_host else host)
 
 
 def signed_headers(secret: str, event_id: str, event_type: str, body: bytes) -> dict[str, str]:
@@ -469,17 +499,18 @@ class WebhookManager:
             await self._finish(delivery_id, attempt, error_code="endpoint_disabled")
             return
         try:
-            target = await asyncio.wait_for(
-                asyncio.to_thread(validate_target_url, decrypt(delivery["target_url_ciphertext"]), bool(delivery["allow_private"])),
+            pinned = await asyncio.wait_for(
+                asyncio.to_thread(pin_target_url, decrypt(delivery["target_url_ciphertext"]), bool(delivery["allow_private"])),
                 timeout=5,
             )
+            target = pinned.url
             body = json.dumps(json.loads(delivery["payload_json"]), sort_keys=True, separators=(",", ":")).encode("utf-8")
             headers = signed_headers(decrypt(delivery["signing_secret_ciphertext"]), str(delivery["event_id"]), str(delivery["event_type"]), body)
             client = self._client(str(delivery["endpoint_id"]), target)
             code: int | None = None
             try:
                 async with asyncio.timeout(ATTEMPT_DEADLINE_SECONDS):
-                    async with client.stream("POST", target, content=body, headers=headers) as response:
+                    async with client.stream("POST", content=body, **pinned.request(headers)) as response:
                         code = int(response.status_code)
                         # Only the status matters. A short answer is read to its end so the connection can be used again; a long or slow
                         # one is cut off and its connection closed, so an answer is never held beyond ANSWER_BYTES or the deadline

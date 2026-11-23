@@ -25,7 +25,7 @@ from . import email_outbox, mqtt, ms_mail
 from .alarms import label_text
 from .credentials import decrypt, encrypt
 from .store import connect, has_row
-from .webhooks import signed_headers, validate_target_url
+from .webhooks import Pinned, pin_target_url, signed_headers, validate_target_url
 from app.clock import now as _now
 
 SECRET_TYPES = {"webhook", "mqtt", "slack", "teams"}
@@ -55,6 +55,16 @@ class DestinationUnresolved(Exception):
 def validate_destination(url: str, allow_private: bool) -> str:
     """The webhook destination rules: public HTTPS, or an authorised literal private IP."""
     return validate_target_url(url, allow_private)
+
+
+def _pinned(url: str, allow_private: bool) -> Pinned:
+    """The destination checked at delivery time, with the address that was checked (#531), telling a DNS failure apart from a refused one."""
+    try:
+        return pin_target_url(url, allow_private)
+    except ValueError as exc:
+        if "could not be resolved" in str(exc):
+            raise DestinationUnresolved() from exc
+        raise
 
 
 def _checked(url: str, allow_private: bool) -> str:
@@ -343,10 +353,10 @@ def _message(payload: dict[str, Any]) -> str:
 
 async def _post(url: str, body: bytes, headers: dict[str, str], allow_private: bool) -> int:
     """The receiver's status, under a deadline for the whole attempt; its answer's body is never read, so it is never held (#527)."""
-    target = await asyncio.wait_for(asyncio.to_thread(_checked, url, allow_private), timeout=5)
+    pinned = await asyncio.wait_for(asyncio.to_thread(_pinned, url, allow_private), timeout=5)
     async with asyncio.timeout(ATTEMPT_DEADLINE_SECONDS):
         async with httpx.AsyncClient(timeout=httpx.Timeout(REQUEST_TIMEOUT_SECONDS, connect=3), follow_redirects=False, trust_env=False) as client:
-            async with client.stream("POST", target, content=body, headers=headers) as response:
+            async with client.stream("POST", content=body, **pinned.request(headers)) as response:  # To the checked address (#531)
                 return int(response.status_code)
 
 

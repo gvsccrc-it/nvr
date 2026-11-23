@@ -11,6 +11,7 @@ import uuid
 from pathlib import Path
 from unittest import mock
 
+from tests.test_support import as_given
 from app import email_outbox, heartbeat, rule_actions
 from app.credentials import encrypt
 from app.store import connect, initialize
@@ -61,6 +62,7 @@ class Case(unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(self.receivers.stop)
         for patch in (mock.patch.object(rule_actions, "_checked", lambda url, allow_private: url),  # The address check is not what is tested
                       mock.patch.object(heartbeat, "validate_target_url", lambda url, allow_private: url),
+                      mock.patch.object(rule_actions, "_pinned", as_given), mock.patch.object(heartbeat, "pin_target_url", as_given),
                       mock.patch.object(rule_actions, "ATTEMPT_DEADLINE_SECONDS", 1.0)):
             patch.start()
             self.addCleanup(patch.stop)
