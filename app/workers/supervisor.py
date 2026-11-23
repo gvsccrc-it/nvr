@@ -328,6 +328,7 @@ def main() -> int:
     if backup.pre_migration_backup not in migrations.pre_migration_hooks:
         migrations.pre_migration_hooks.append(backup.pre_migration_backup)
     db_health.log_at_startup()  # Before anything else touches the file, so a damaged one is named first and not copied by the pre-migration backup unnoticed
+    backup.remove_leftovers()  # Unencrypted copies and partial archives an interrupted backup left; before the pre-migration backup needs the room (#509)
     initialize()
     backup.reconcile_after_restore()
     failover.prepare_startup()  # A primary does not record until it has heard from the standby
