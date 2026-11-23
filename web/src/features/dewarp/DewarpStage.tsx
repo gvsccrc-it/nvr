@@ -4,7 +4,6 @@ import {
   type DewarpState, type Lens, type Region, type VirtualView,
 } from "./geometry";
 import { DewarpRenderer, drawingsFor, type Source } from "./renderer";
-import { paintFrames } from "./frames";
 
 const REGION_LABEL: Record<Region["kind"], string> = { view: "Virtual view", panorama: "Panorama", double_panorama: "Double panorama" };
 
@@ -79,19 +78,24 @@ export function DewarpStage({ getSource, lens, state, onChange, label, onUnsuppo
   }, []);
 
   useEffect(() => {
+    let frame = 0;
+    let stopped = false;
     const paint = () => {
       const { getSource: pictureOf, lens: currentLens, state: currentState, regionList: list } = latest.current;
       const picture = pictureOf();
       if (picture && renderer.current) renderer.current.draw(picture, currentLens, drawingsFor(currentState, list));
+      if (!stopped && playing) frame = requestAnimationFrame(paint);
     };
-    paintNow.current = paint;
-    // Panning, zooming or a new layout re-runs this and paints at once; while playing, a video paints when it has a new frame, at the
-    // camera's rate, not the screen's (#539)
-    if (!playing) {
-      paint();
-      return undefined;
-    }
-    return paintFrames(() => latest.current.getSource(), paint);
+    paintNow.current = () => {
+      const { getSource: pictureOf, lens: currentLens, state: currentState, regionList: list } = latest.current;
+      const picture = pictureOf();
+      if (picture && renderer.current) renderer.current.draw(picture, currentLens, drawingsFor(currentState, list));
+    };
+    paint();
+    return () => {
+      stopped = true;
+      cancelAnimationFrame(frame);
+    };
   }, [playing, lens, state, regionList]);
 
   const mount = lens.mount;
