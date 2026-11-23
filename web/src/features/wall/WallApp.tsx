@@ -155,7 +155,7 @@ function WallScreen({ address, outdated }: { address: WallAddress; outdated: boo
   const rotation = address.views.map(name => byName.get(name)).filter((view): view is SavedView => Boolean(view));
   const viewCount = rotation.length;
 
-  useAlarmPopIns(true, alarm => dispatch({ type: "alarm", alarm }));
+  useAlarmPopIns(true, alarm => dispatch({ type: "alarm", alarm }), true); // The wall is watched though nobody touches it: it polls when hidden too
   useEffect(() => {
     if (state.alarm || viewCount < 2) return;
     const timer = window.setTimeout(() => dispatch({ type: "rotate", viewCount }), address.dwellSeconds * 1000);

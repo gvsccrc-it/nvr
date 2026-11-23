@@ -1,6 +1,7 @@
 /** Alarm requests and queries: what rules saw, and how people handled it. */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/api/client";
+import { pollEvery } from "@/api/polling";
 
 export type AlarmState = "new" | "acknowledged" | "assigned" | "resolved";
 export type AlarmFilter = "open" | AlarmState | "all";
@@ -53,14 +54,25 @@ export function useAlarms(query: AlarmQuery, enabled = true) {
   if (query.camera_id) params.set("camera_id", query.camera_id);
   if (query.rule_id) params.set("rule_id", query.rule_id);
   return useQuery({
-    queryKey: alarmKeys.list(query), enabled, refetchInterval: ALARM_REFRESH_MS,
+    queryKey: alarmKeys.list(query), enabled, refetchInterval: pollEvery(ALARM_REFRESH_MS),
     queryFn: ({ signal }) => api<AlarmList>(`/api/alarms?${params}`, { signal }),
+  });
+}
+
+/**
+ * How many alarms are in each state, for the status chip: a counts-only request (``limit=0``), not the list of up to 100 open alarms it
+ * downloaded every 5 seconds to show three numbers (#536). A new alarm still shows within 5 seconds (the owner's decision on #536).
+ */
+export function useAlarmCounts() {
+  return useQuery({
+    queryKey: [...alarmKeys.all, "counts"] as const, refetchInterval: pollEvery(ALARM_REFRESH_MS),
+    queryFn: ({ signal }) => api<AlarmList>("/api/alarms?state=open&limit=0", { signal }).then(result => result.counts),
   });
 }
 
 export function useAlarm(id: string | null) {
   return useQuery({
-    queryKey: alarmKeys.detail(id ?? ""), enabled: Boolean(id), refetchInterval: ALARM_REFRESH_MS,
+    queryKey: alarmKeys.detail(id ?? ""), enabled: Boolean(id), refetchInterval: pollEvery(ALARM_REFRESH_MS),
     queryFn: ({ signal }) => api<AlarmDetail>(at(id!), { signal }),
   });
 }

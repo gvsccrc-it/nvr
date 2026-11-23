@@ -7,7 +7,7 @@ import { useAcknowledgeChainBreak, useAcknowledgeIncident, useCameras, useConsol
 import type { Camera, Incident } from "@/api/types";
 import { Drawer } from "@/components/Drawer";
 import { AlarmsInbox } from "@/features/alarms/AlarmsInbox";
-import { useAlarms } from "@/features/alarms/api";
+import { useAlarmCounts } from "@/features/alarms/api";
 import { ExportJobs } from "@/features/exports/ExportJobs";
 import { useEndWindow, useMaintenance, type MaintenanceWindow } from "@/features/maintenance/api";
 import { usePlaybackStore } from "@/features/playback/store";
@@ -89,10 +89,10 @@ export function StatusArea() {
   const maintenance = useMaintenance().data;
   const activeWindows = (maintenance?.windows ?? []).filter(window => window.state === "active");
   const maintenanceLabel = maintenance?.site_active ? "Maintenance: whole site" : maintenance?.covered_camera_ids.length ? `Maintenance: ${maintenance.covered_camera_ids.length} camera${maintenance.covered_camera_ids.length === 1 ? "" : "s"}` : activeWindows.length ? `Maintenance: ${activeWindows.length} window${activeWindows.length === 1 ? "" : "s"}` : null;
-  const alarms = useAlarms({ state: "open", camera_id: "", rule_id: "" });
+  const alarms = useAlarmCounts();
   const inbox = useAlarmInbox();
   useLinkFromAddress();
-  const counts = alarms.data?.counts;
+  const counts = alarms.data;
   const openAlarms = counts ? counts.new + counts.acknowledged + counts.assigned : 0;
   const alarmLabel = !counts ? "Alarms" : counts.new ? `${counts.new} new alarm${counts.new === 1 ? "" : "s"}` : openAlarms ? `${openAlarms} open alarm${openAlarms === 1 ? "" : "s"}` : "No open alarms";
   return (

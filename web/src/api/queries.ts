@@ -6,6 +6,7 @@ import { disableNativePush } from "@/native/push";
 import { forgetThisPhone, resumeFromSecureStorage } from "@/native/session";
 import type { Lens } from "@/features/dewarp/geometry";
 import type { Branding, MfaChallenge, Camera, CameraGroup, DisplaySettings, ExportJob, ExportLimits, ExportRequest, Incident, LiveWorkspaceState, Me, PlaybackTimeline, RedactionEdit, RedactionReview, SavedView, ThemePreference } from "./types";
+import { OFF_RECHECK_MS, pollEvery } from "./polling";
 
 export const keys = {
   setup: ["setup"] as const,
@@ -129,7 +130,7 @@ export function useCameras(enabled = true) {
     queryKey: keys.cameras,
     enabled,
     queryFn: ({ signal }) => api<{ cameras: Camera[] }>("/api/cameras", { signal }).then(result => result.cameras),
-    refetchInterval: STATUS_REFRESH_MS,
+    refetchInterval: pollEvery(STATUS_REFRESH_MS),
   });
 }
 
@@ -137,14 +138,9 @@ export function useOpenIncidents(enabled = true) {
   return useQuery({
     queryKey: keys.incidents,
     enabled,
-    queryFn: async ({ signal }) => {
-      const [active, acknowledged] = await Promise.all([
-        api<{ incidents: Incident[] }>("/api/incidents?state=active", { signal }),
-        api<{ incidents: Incident[] }>("/api/incidents?state=acknowledged", { signal }),
-      ]);
-      return [...active.incidents, ...acknowledged.incidents].sort((a, b) => b.last_seen_at.localeCompare(a.last_seen_at));
-    },
-    refetchInterval: STATUS_REFRESH_MS,
+    // Active and acknowledged together, newest first: one request, not two (#536)
+    queryFn: ({ signal }) => api<{ incidents: Incident[] }>("/api/incidents?state=open", { signal }).then(result => result.incidents),
+    refetchInterval: pollEvery(STATUS_REFRESH_MS),
   });
 }
 
@@ -172,7 +168,7 @@ export function useExportJobs(enabled = true) {
     enabled,
     queryFn: ({ signal }) => api<{ exports: ExportJob[] }>("/api/exports", { signal }).then(result => result.exports),
     // Follow progress closely while work is queued or running.
-    refetchInterval: query => (query.state.data?.some(job => job.status === "queued" || job.status === "running") ? 2_000 : STATUS_REFRESH_MS),
+    refetchInterval: query => pollEvery(query.state.data?.some(job => job.status === "queued" || job.status === "running") ? 2_000 : STATUS_REFRESH_MS)(query),
   });
 }
 
@@ -181,7 +177,7 @@ export function useExportLimits() {
   return useQuery({
     queryKey: [...keys.exports, "limits"],
     queryFn: ({ signal }) => api<ExportLimits>("/api/exports/limits", { signal }),
-    refetchInterval: STATUS_REFRESH_MS,
+    refetchInterval: pollEvery(STATUS_REFRESH_MS),
   });
 }
 
@@ -327,7 +323,8 @@ export function useConsoleStatus() {
   return useQuery({
     queryKey: ["console", "status"],
     queryFn: ({ signal }) => api<{ enabled: boolean; sites: ConsoleSite[] }>("/api/console/status", { signal }),
-    refetchInterval: 15_000,
+    // Switched off (most installations): looked at again every 5 minutes, in case it is turned on, not every 15 s (#536)
+    refetchInterval: query => (query.state.data?.enabled === false ? OFF_RECHECK_MS : pollEvery(15_000)(query)),
     staleTime: 10_000,
   });
 }
@@ -342,7 +339,8 @@ export function useFailoverStatus() {
   return useQuery({
     queryKey: ["failover", "status"],
     queryFn: ({ signal }) => api<FailoverStatus>("/api/failover/status", { signal }),
-    refetchInterval: 10_000,
+    // Off (most installations): looked at again every 5 minutes, not every 10 s (#536)
+    refetchInterval: query => (query.state.data?.role === "off" ? OFF_RECHECK_MS : pollEvery(10_000)(query)),
     staleTime: 5_000,
   });
 }

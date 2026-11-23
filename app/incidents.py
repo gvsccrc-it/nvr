@@ -185,7 +185,9 @@ def list_incidents(db: sqlite3.Connection, state: str | None = None, limit: int 
     """The newest incidents, of one state or all. ``cameras`` limits them to those cameras' incidents (incidents naming no camera are the
     system's, and left out): filtered in the query, so a restricted person's page is read through an index like anyone else's (#516)."""
     where, values = [], []
-    if state is not None:
+    if state == "open":  # Active or acknowledged: what the status area shows, in one request (#536)
+        where.append("+state IN ('active','acknowledged')" if cameras is not None else "state IN ('active','acknowledged')")
+    elif state is not None:
         # With cameras, the unary + keeps the state index out: walking every incident in a state (months of recovered ones) to find a few
         # cameras' would cost more than reading those cameras' incidents through their own index
         where.append("+state=?" if cameras is not None else "state=?")

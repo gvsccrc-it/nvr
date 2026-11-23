@@ -3,18 +3,34 @@ import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { api } from "@/api/client";
 import { useMe } from "@/api/queries";
 import { Talker, type TalkOutcome, type TalkPhase } from "./talker";
+import { pollEvery } from "@/api/polling";
+
+const TALK_REFRESH_MS = 5_000;
 
 interface TalkCameras { cameras: Record<string, { talking: { username: string; since: string } | null }> }
 
 const REASON: Record<string, string> = { idle: "Talk stopped: no sound for a while.", limit: "Talk stopped: the time limit was reached.", camera_failed: "The camera stopped answering.", bad_audio: "Talk stopped: bad audio." };
 
-/** The cameras this person may talk through, and who is talking through each; polled only while there are any. */
+const talkQuery = {
+  queryKey: ["talk"] as const,
+  queryFn: ({ signal }: { signal: AbortSignal }) => api<TalkCameras>("/api/talk", { signal }).then(result => result.cameras),
+  staleTime: 30_000,
+};
+
+/** The cameras this person may talk through, and who is talking through each: read by each tile's button, which does not poll it itself. */
 export function useTalkCameras() {
-  return useQuery({
-    queryKey: ["talk"] as const,
-    queryFn: ({ signal }) => api<TalkCameras>("/api/talk", { signal }).then(result => result.cameras),
-    staleTime: 30_000,
-    refetchInterval: query => (query.state.data && Object.keys(query.state.data).length ? 3_000 : false),
+  return useQuery(talkQuery);
+}
+
+/**
+ * Keeps "who is talking" fresh while the Live page shows a tile that can talk: one poll for the page, every 5 seconds (the owner's decision on
+ * #536: the indicator may be that old), none while the page is hidden. Each tile's button used to poll it every 3 seconds, so a page with
+ * several such tiles asked several times over, and whenever any camera at all could talk.
+ */
+export function useTalkPolling(shownCameraIds: readonly string[]) {
+  useQuery({
+    ...talkQuery,
+    refetchInterval: query => (query.state.data && shownCameraIds.some(id => id in query.state.data!) ? pollEvery(TALK_REFRESH_MS)(query) : false),
   });
 }
 

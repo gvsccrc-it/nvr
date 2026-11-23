@@ -81,7 +81,7 @@ def list_alarms(
     state: Literal["open", "new", "acknowledged", "assigned", "resolved", "all"] = "open",
     camera_id: str | None = Query(default=None, max_length=64),
     rule_id: str | None = Query(default=None, max_length=64),
-    limit: int = Query(default=100, ge=1, le=500),
+    limit: int = Query(default=100, ge=0, le=500),  # 0: the counts alone, for the status chip (#536)
 ) -> dict[str, object]:
     # Counts follow the camera and rule filters, across every state.
     scope, scope_values = [], []

@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "@/app/App";
+import { retryDelay } from "@/api/polling";
 import { WallApp } from "@/features/wall/WallApp";
 import { NativeShell } from "@/native/NativeShell";
 import { isNativeApp } from "@/native/platform";
@@ -11,7 +12,8 @@ import "@/styles/app.css";
 
 const client = new QueryClient({
   defaultOptions: {
-    queries: { retry: 1, refetchOnWindowFocus: true },
+    // One retry after a random wait, so tabs do not retry together; a poll that keeps failing slows down (api/polling.ts, #536)
+    queries: { retry: 1, retryDelay: attempt => retryDelay(attempt), refetchOnWindowFocus: true },
   },
 });
 
