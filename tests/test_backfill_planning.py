@@ -31,7 +31,7 @@ class PlanningCase(unittest.TestCase):
         camera_id = str(uuid.uuid4())
         with connect() as db:
             db.execute("INSERT INTO cameras(id,name,stream_url_ciphertext,recording_mode,backfill_enabled,created_at) VALUES(?,?,X'01','continuous',1,?)",
-                       (camera_id, f"Camera {camera_id[:6]}", (NOW - timedelta(days=3)).isoformat()))
+                       (camera_id, f"Camera {camera_id}", (NOW - timedelta(days=3)).isoformat()))  # The whole id: names are unique, and 200 six-character prefixes collided about one run in 800
         return camera_id
 
     def footage(self, camera_id: str, starts: datetime, ends: datetime) -> None:
