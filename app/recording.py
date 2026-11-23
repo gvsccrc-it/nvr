@@ -228,6 +228,41 @@ def _record_motion_source(camera_id: str, value: str, reason: str, fallback_enab
                    (value, "waiting" if healthy and fallback_enabled else ("disabled" if not fallback_enabled else "detecting"), error, error, camera_id))
 
 
+class _MotionSourceWriter:
+    """Stores a camera's ONVIF motion-event state in a thread, and only when it changes (#470).
+
+    The event source reports its state after every attempt, every 1 to 30 seconds per camera, and from a plain callback on the recorder's loop.
+    Writing each report there made the loop (every camera's watch and the worker's sign of life) wait for the database's lock; with 200 motion
+    cameras behind a switch that is down, that was about seven writes a second, each the same as the last. One write runs at a time, always of
+    the newest state, so the stored state is never older than the last one reported."""
+
+    def __init__(self, camera_id: str, fallback_enabled: bool) -> None:
+        self.camera_id, self.fallback_enabled = camera_id, fallback_enabled
+        self.wanted: tuple[str, str] | None = None
+        self.written: tuple[str, str] | None = None
+        self.task: asyncio.Task[None] | None = None
+
+    def want(self, value: str, reason: str) -> None:
+        self.wanted = (value, reason)
+        if self.wanted != self.written and (self.task is None or self.task.done()):
+            self.task = asyncio.create_task(self._write(), name=f"motion-source-{self.camera_id}")
+
+    async def _write(self) -> None:
+        while self.wanted is not None and self.wanted != self.written:
+            wanted = self.wanted
+            try:
+                await asyncio.to_thread(_record_motion_source, self.camera_id, wanted[0], wanted[1], self.fallback_enabled)
+            except sqlite3.Error:
+                logging.getLogger("nvr.recording").warning("The motion events' state of camera %s could not be stored", self.camera_id, exc_info=True)
+                return  # Tried again at the next report, which is not the one stored
+            self.written = wanted
+
+    async def settle(self) -> None:
+        """Wait for the write under way, so that a newer state written after this one is never overwritten by it."""
+        if self.task is not None:
+            await asyncio.gather(self.task, return_exceptions=True)
+
+
 def newest_is_fresh(folder: Path, pattern: str, seconds: float = 10) -> bool:
     """Whether the most recently written file matching ``pattern`` was written within ``seconds``.
 
@@ -879,6 +914,7 @@ class RecordingManager:
         proc: asyncio.subprocess.Process | None = None
         source_state = {"value": "connecting" if row["motion_service_url"] else "unsupported"}
         source_changed = asyncio.Event()
+        source_writer = _MotionSourceWriter(camera_id, fallback_enabled)
         try:
             args = _motion_buffer_args(executable, spool, row)
             proc = await asyncio.create_subprocess_exec(
@@ -897,7 +933,7 @@ class RecordingManager:
             def source_status(value: str) -> None:
                 source_state["value"] = value
                 source_changed.set()
-                _record_motion_source(camera_id, value, problem["text"], fallback_enabled)
+                source_writer.want(value, problem["text"])
 
             def source_detail(text: str) -> None:
                 problem["text"] = text
@@ -929,6 +965,7 @@ class RecordingManager:
                                 (fault, camera_id))
         finally:
             await _stop_motion_parts([progress_task, stderr_task, event_task, fallback_task], assembler, proc)
+            await source_writer.settle()  # Before the next start writes "connecting", which this one's last write must not overwrite
             if self.stopping:
                 self._set_status(camera_id, "stopped")
             shutil.rmtree(spool, ignore_errors=True)

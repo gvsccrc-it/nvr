@@ -579,6 +579,7 @@ class DetectionManager:
         self._db_threads = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ai-db")
         self._inference_slots = asyncio.Semaphore(1)
         self._lateness: dict[str, _Lateness] = {}  # Per analysed camera, for as long as its stream stays open
+        self._keyframes: dict[str, Any] = {}  # Per camera with plate or face reading: its one full-size keyframe decoder (#518)
         self.capacity = ai_capacity.Capacity()
         self.limit_now: int | None = None  # How many cameras may be analysed now (from the controller, or the fixed number)
         self.waiting_text = "Waiting because the configured number of AI analysis slots is in use"
@@ -825,17 +826,30 @@ class DetectionManager:
         provider = str(config["provider"])
         models = _FrameModels(await self._attribute_model(provider), await self._reid_model(provider), await self._clip_model())
         background: set[asyncio.Task[Any]] = set()  # The plate and face reads under way, kept until they finish
-        while not self.stopping:
-            try:
-                seen_frame = await self._analyse_stream(camera_id, config, detector, models, background)
-                if not self.stopping:
-                    raise RuntimeError("Camera stream ended" + (" after analysis frames" if seen_frame else " before an analysis frame was received"))
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                reason = str(exc)[:240] or "Inference stream failed"
-                await self._db(set_camera_state, camera_id, "failed", reason)
-                await asyncio.sleep(5)
+        try:
+            while not self.stopping:
+                try:
+                    seen_frame = await self._analyse_stream(camera_id, config, detector, models, background)
+                    if not self.stopping:
+                        raise RuntimeError("Camera stream ended" + (" after analysis frames" if seen_frame else " before an analysis frame was received"))
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    reason = str(exc)[:240] or "Inference stream failed"
+                    await self._db(set_camera_state, camera_id, "failed", reason)
+                    await asyncio.sleep(5)
+        finally:
+            keyframes = self._keyframes.pop(camera_id, None)  # The camera's full-size decoder ends with its analysis
+            if keyframes is not None:
+                await keyframes.close()
+
+    async def full_frame(self, camera_id: str) -> Any:
+        """A full-size picture of the camera now, for plate and face reading, from the camera's one keyframe decoder (#518)."""
+        from .keyframes import KeyframeSource
+        keyframes = self._keyframes.get(camera_id)
+        if keyframes is None:
+            keyframes = self._keyframes[camera_id] = KeyframeSource(lambda: _camera_source(camera_id, False))
+        return await keyframes.frame()
 
     async def _analyse_stream(self, camera_id: str, config: dict[str, Any], detector: Any, models: _FrameModels,
                               background: set[asyncio.Task[Any]]) -> bool:
@@ -964,7 +978,7 @@ class _PlateWatch:
             elif self.scanner is None or self.reader is not plate_reader:
                 self.reader = plate_reader
                 self.scanner = plates.PlateScanner(
-                    plate_reader, lambda: plates.ffmpeg_snapshot(_camera_source(camera_id, False)),
+                    plate_reader, lambda: manager.full_frame(camera_id),
                     lambda track, plate, reader=plate_reader: plates.keep_plate(camera_id, track, plate, manager.clock(), reader.reader_id), min_confidence=minimum)
             else:
                 self.scanner.min_confidence = minimum
@@ -988,7 +1002,7 @@ class _FaceWatch:
         self.checked = float("-inf")
 
     async def after_frame(self, frame: Any, at: datetime, track_ids: list[str], observations: list[dict[str, Any]], tracker: Any) -> None:
-        from . import face_scan, plates
+        from . import face_scan
         camera_id = self.camera_id
         if time.monotonic() - self.checked >= face_scan.SETTINGS_REFRESH:
             self.checked = time.monotonic()
@@ -999,7 +1013,7 @@ class _FaceWatch:
             elif self.scanner is None or self.reader is not face_reader:
                 self.reader = face_reader
                 self.scanner = face_scan.FaceScanner(
-                    face_reader, lambda: plates.ffmpeg_snapshot(_camera_source(camera_id, False)), face_scan.watch_list,
+                    face_reader, lambda: self.manager.full_frame(camera_id), face_scan.watch_list,
                     lambda track, entry, similarity, face, picture, taken: face_scan.keep_sighting(camera_id, track, entry, similarity, face, picture, taken),
                     threshold=face_threshold)
             else:

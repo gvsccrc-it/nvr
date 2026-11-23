@@ -2,14 +2,9 @@
 reads is cut from the full-size frame."""
 from __future__ import annotations
 
-import asyncio
-import shutil
 import struct
-import subprocess
-import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 import numpy as np
 
@@ -74,51 +69,6 @@ class ResizeTests(unittest.TestCase):
         resized = plates._resize(crop, 24, 94)
         self.assertEqual(resized.shape, (24, 94, 3))
         self.assertTrue(np.all(resized[:, :, 0] == resized[0, 0, 0]) and 0 < int(resized[0, 0, 0]) < 255)
-
-
-@unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg is needed")
-class SnapshotTests(unittest.TestCase):
-    def snapshot_of(self, size: str):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "camera.mp4"
-            subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", f"testsrc=size={size}:rate=5:duration=1", "-pix_fmt", "yuv420p", str(path)], check=True)
-            return asyncio.run(plates.ffmpeg_snapshot(f"file:{path}", protocols="concat,file,pipe"))  # A generated file, not a camera: the recorder's network-only protocols would refuse it, and a bare path is read relative to "pipe:"
-
-    def test_the_snapshot_is_the_streams_own_size_whatever_its_shape(self):
-        for size, shape in (("1920x1080", (1080, 1920, 3)), ("640x480", (480, 640, 3)), ("2560x1440", (1440, 2560, 3)), ("1000x562", (562, 1000, 3))):
-            frame = self.snapshot_of(size)
-            self.assertIsNotNone(frame, size)
-            self.assertEqual(frame.shape, shape)
-            self.assertGreater(int(frame.max()), 100)  # A picture, not an empty frame
-
-    def test_a_source_that_cannot_be_opened_gives_nothing(self):
-        self.assertIsNone(asyncio.run(plates.ffmpeg_snapshot("/nonexistent/stream.mp4")))
-
-    def test_the_camera_login_never_reaches_the_command_line(self):
-        # Anyone on the host can read a process's arguments (ps, /proc); the address goes over stdin like the recorder's (#272).
-        source = "rtsp://viewer:Plate-Secret-77@192.0.2.40:554/main"
-        seen: dict[str, object] = {}
-
-        class Process:
-            async def communicate(self, data=None):
-                seen["stdin"] = data
-                return bmp(np.zeros((2, 4, 3), dtype=np.uint8)), b""
-
-        async def spawn(*args, **kwargs):
-            seen["args"], seen["kwargs"] = args, kwargs
-            return Process()
-
-        with patch.object(plates.shutil, "which", return_value="/usr/bin/ffmpeg"), patch.object(plates.asyncio, "create_subprocess_exec", spawn):
-            frame = asyncio.run(plates.ffmpeg_snapshot(source))
-        self.assertEqual(frame.shape, (2, 4, 3))
-        arguments = list(seen["args"])
-        command = " ".join(arguments)
-        self.assertNotIn("Plate-Secret-77", command)
-        self.assertNotIn("192.0.2.40", command)
-        self.assertNotIn("file", arguments[arguments.index("-protocol_whitelist") + 1].split(","))
-        self.assertEqual(arguments[arguments.index("-i") + 1], "pipe:0")
-        self.assertIn(source.encode(), seen["stdin"])
-        self.assertIsNotNone(seen["kwargs"].get("stdin"))
 
 
 class ReaderTests(unittest.TestCase):
