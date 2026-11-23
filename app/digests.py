@@ -287,9 +287,16 @@ def render_text(name: str, body: dict[str, Any], summary: str | None = None) -> 
 
 
 def narrowed(body: dict[str, Any], restricted: dict[str, Any]) -> bool:
-    """Whether restricting a digest took anything out of it."""
+    """Whether restricting a digest took anything out of it.
+
+    The cameras it was made for are compared by id, not by count: the item lists are cut at ALARM_ITEMS, so a digest whose shown items are all
+    on cameras the reader may see can still have counted others in its totals and its written summary. Every camera the digest was made for
+    is in ``cameras``, whether it had anything to report or not, so a reader who may not see one of them is always told the digest was
+    narrowed (#508)."""
+    if [camera["id"] for camera in body["cameras"]] != [camera["id"] for camera in restricted["cameras"]]:
+        return True
     def sizes(digest: dict[str, Any]) -> list[int]:
-        return [len(digest["cameras"]), len(digest["alarms"]["items"]), len(digest["tracks"]["after_hours_people"]["items"]), len(digest["tracks"]["vehicles_at_gates"]["items"]),
+        return [len(digest["alarms"]["items"]), len(digest["tracks"]["after_hours_people"]["items"]), len(digest["tracks"]["vehicles_at_gates"]["items"]),
                 len(digest["gaps"]["items"]), len(digest["incidents"]["items"])]
     return sizes(body) != sizes(restricted)
 
