@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  # A weekly rebuild of main (#548): when no commit lands, the image still picks up Debian's security fixes. It goes through every check
+  # below, the image scan included, and publishes edge only; a release is still a deliberate tag (#540).
+  schedule:
+    - cron: '17 5 * * 1'
 
 permissions:
   contents: read
@@ -212,6 +216,19 @@ jobs:
             --build-arg NVR_BUILD_COMMIT="${{ github.sha }}" \
             --label org.opencontainers.image.source="${{ github.server_url }}/${{ github.repository }}" \
             --label org.opencontainers.image.revision="${{ github.sha }}" .
+      - name: Install Trivy
+        # The scanner for the image's system packages (#548): a release binary checked against the SHA-256 its project publishes
+        # (trivy_0.76.2_checksums.txt), as the models are. Dependabot does not update this: raise the version and the hash together.
+        run: |
+          curl -fsSL --retry 3 -o /tmp/trivy.tgz https://github.com/aquasecurity/trivy/releases/download/v0.76.2/trivy_0.76.2_Linux-64bit.tar.gz
+          echo 'bc0fc726e017b8927a62b2d3531d7a84ee01769daf5c99ed866dced54089fdbf  /tmp/trivy.tgz' | sha256sum -c -
+          tar -xzf /tmp/trivy.tgz -C /tmp trivy
+      - name: Scan the image's system packages
+        # Fails on a High or Critical finding with a fix available that .github/vulnerability-exceptions.txt does not accept (with a reason
+        # and an expiry date); findings with no fix yet are listed, not failed (the owner's decision on #548). FFmpeg parses what cameras send.
+        run: |
+          /tmp/trivy image --scanners vuln --pkg-types os --severity HIGH,CRITICAL --format json --output /tmp/nvr-image-scan.json --quiet ghcr.io/gvsccrc-it/nvr:edge
+          python .github/scripts/check-vulnerabilities.py --image /tmp/nvr-image-scan.json
       - name: Benchmark and validate bundled CPU detection model
         run: docker run --rm ghcr.io/gvsccrc-it/nvr:edge python -m scripts.benchmark_ai
       - name: Check the licence plate models in the image
@@ -300,14 +317,19 @@ jobs:
         if: always()
         run: docker compose down -v
       - name: Keep the tested image for publishing
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: docker save ghcr.io/gvsccrc-it/nvr:edge | zstd -T0 -3 -o /tmp/nvr-image.tar.zst
+        if: (github.event_name == 'push' || github.event_name == 'schedule') && github.ref == 'refs/heads/main'
+        run: |
+          docker save ghcr.io/gvsccrc-it/nvr:edge | zstd -T0 -3 -o /tmp/nvr-image.tar.zst
+          # The list of what is in the image (CycloneDX), published with it as an attestation (#548)
+          /tmp/trivy image --format cyclonedx --output /tmp/nvr-sbom.cdx.json --quiet ghcr.io/gvsccrc-it/nvr:edge
       - name: Hand the tested image to the publish job
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: (github.event_name == 'push' || github.event_name == 'schedule') && github.ref == 'refs/heads/main'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: tested-image
-          path: /tmp/nvr-image.tar.zst
+          path: |
+            /tmp/nvr-image.tar.zst
+            /tmp/nvr-sbom.cdx.json
           retention-days: 1
           compression-level: 0
 
@@ -329,13 +351,17 @@ jobs:
           test "$UNIT_TESTS" = success && test "$BUILD" = success
   # Published only when the browser journeys passed as well as the unit tests and the build (#540): edge and sha-<commit> are what test
   # machines run and what a release is made from. On a push to main the browser job always runs (see "changes").
+  # Signed keylessly with this workflow's own identity (cosign; no key to keep), with a record of how it was built (provenance) and of
+  # what is in it (SBOM), all attached to the image's digest (#548). Verify with the command in docs/guided-updates.md.
   publish:
     needs: [verify, camera-browser-acceptance]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: (github.event_name == 'push' || github.event_name == 'schedule') && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+      id-token: write  # The workflow's identity, for keyless signing and the attestations
+      attestations: write
     steps:
       # The image published is the one the verify job built and tested, not a second build of the same commit (#385).
       - name: Fetch the tested image
@@ -354,18 +380,55 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Publish the tested image
-        # edge, and sha-<commit> so a release can name exactly this image (release.yml retags it rather than building again).
+        id: publish
+        # edge, and sha-<commit> so a release can name exactly this image (release.yml retags it by digest rather than building again).
         # Runs on main can overlap (see "concurrency"): sha-<commit> is always published, and edge only while this commit is still main's
-        # newest, so a run that finishes after a later merge's never moves edge back to an older build.
+        # newest, so a run that finishes after a later merge's never moves edge back to an older build. The weekly rebuild publishes edge
+        # only: sha-<commit> stays the image tested when the commit was merged, which is what a release is made from.
         env:
           GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
         run: |
           short="$(echo "$GITHUB_SHA" | cut -c1-7)"
-          docker tag ghcr.io/gvsccrc-it/nvr:edge "ghcr.io/gvsccrc-it/nvr:sha-$short"
-          docker push "ghcr.io/gvsccrc-it/nvr:sha-$short"
+          pushed=""
+          if [ "$EVENT" != schedule ]; then
+            docker tag ghcr.io/gvsccrc-it/nvr:edge "ghcr.io/gvsccrc-it/nvr:sha-$short"
+            docker push "ghcr.io/gvsccrc-it/nvr:sha-$short"
+            pushed="sha-$short"
+          fi
           newest="$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)"
           if [ "$newest" = "$GITHUB_SHA" ]; then
             docker push ghcr.io/gvsccrc-it/nvr:edge
+            pushed="${pushed:-edge}"
           else
             echo "main has moved on to $newest: edge is left to that commit's run"
           fi
+          # The digest of what was pushed, read back from the registry: that is what is signed and attested. Nothing pushed, nothing signed.
+          if [ -n "$pushed" ]; then
+            digest="$(docker buildx imagetools inspect "ghcr.io/gvsccrc-it/nvr:$pushed" --format '{{json .Manifest}}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["digest"])')"
+            echo "digest=$digest" >> "$GITHUB_OUTPUT"
+            echo "Published ghcr.io/gvsccrc-it/nvr@$digest"
+          fi
+      - name: Install cosign
+        if: steps.publish.outputs.digest != ''
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+      - name: Sign the image
+        if: steps.publish.outputs.digest != ''
+        env:
+          DIGEST: ${{ steps.publish.outputs.digest }}
+        run: cosign sign --yes "ghcr.io/gvsccrc-it/nvr@$DIGEST"
+      - name: Record how the image was built
+        if: steps.publish.outputs.digest != ''
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/gvsccrc-it/nvr
+          subject-digest: ${{ steps.publish.outputs.digest }}
+          push-to-registry: true
+      - name: Record what is in the image
+        if: steps.publish.outputs.digest != ''
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-name: ghcr.io/gvsccrc-it/nvr
+          subject-digest: ${{ steps.publish.outputs.digest }}
+          sbom-path: /tmp/nvr-sbom.cdx.json
+          push-to-registry: true

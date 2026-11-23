@@ -4,7 +4,10 @@ This module only ever *tells* an administrator what to run on the host. It never
 socket, and there is no route that could ask for one). The release feed is the repository's published releases (GitHub's releases JSON by default, set by
 ``NVR_UPDATE_FEED_URL``; the image they point at is ``NVR_UPDATE_IMAGE``). A release's notes may carry a machine-readable line saying which schema version it needs:
 
-    <!-- nvr-release: {"schema_version": 44} -->
+    <!-- nvr-release: {"schema_version": 44, "digest": "sha256:..."} -->
+
+``digest`` (#548) is the digest of the image the release tagged: the upgrade steps name the image by it (``image: …:1.2.0@sha256:…``),
+so what is pulled is exactly what CI built, tested and signed, whatever the tag points at later, and they show how to verify its signature.
 
 The check is opt-out: ``NVR_UPDATE_CHECK=false`` in the environment, or the switch in Settings, and then no request is made at all.
 """
@@ -37,6 +40,8 @@ CHECK_TIMEOUT = httpx.Timeout(10, connect=5)
 STALE_AFTER = timedelta(hours=24)  # A check older than this is out of date: the page asks again when it is opened
 IMAGE_NAME = re.compile(r"^[a-z0-9][a-z0-9._/:-]{0,200}$")
 logger = logging.getLogger(__name__)
+DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+SIGNER = "https://github.com/gvsccrc-it/nvr/.github/workflows/ci.yml@refs/heads/main"  # The workflow that signs the published images (#548)
 MARKER = re.compile(r"<!--\s*nvr-release:\s*(\{.*?\})\s*-->", re.DOTALL)
 VERSION = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
 
@@ -61,6 +66,7 @@ class Release:
     url: str
     published_at: str
     schema_version: int | None
+    digest: str | None = None
 
     @property
     def number(self) -> str:
@@ -99,17 +105,24 @@ def parse_release(item: object) -> Release | None:
     if version is None:
         return None
     body = item.get("body") if isinstance(item.get("body"), str) else ""
-    schema = None
+    schema = digest = None
     marker = MARKER.search(body)
     if marker:
         try:
-            value = json.loads(marker.group(1)).get("schema_version")
+            fields = json.loads(marker.group(1))
+            value = fields.get("schema_version")
             schema = value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+            digest = _digest(fields.get("digest"))
         except (ValueError, AttributeError):
-            schema = None
+            schema = digest = None
     url = item.get("html_url") if isinstance(item.get("html_url"), str) and item["html_url"].startswith("https://") else ""
     published = item.get("published_at") if isinstance(item.get("published_at"), str) else ""
-    return Release(tag, version, MARKER.sub("", body).strip()[:MAX_NOTES_CHARS], url, published, schema)
+    return Release(tag, version, MARKER.sub("", body).strip()[:MAX_NOTES_CHARS], url, published, schema, digest)
+
+
+def _digest(value: object) -> str | None:
+    """An image digest as the release line gives it, or None: it ends up in commands people paste into a shell, so nothing else passes."""
+    return value if isinstance(value, str) and DIGEST.match(value) else None
 
 
 def newest_release(items: object, current: tuple[int, int, int] | None = None) -> Release | None:
@@ -171,7 +184,8 @@ def _has_migrations(schema_version: int | None) -> bool | None:
 
 def _release_view(release: Release) -> dict[str, object]:
     return {"version": release.number, "tag": release.tag, "notes": release.notes, "url": release.url, "published_at": release.published_at,
-            "image": f"{image_repository()}:{release.number}", "schema_version": release.schema_version}
+            "image": f"{image_repository()}:{release.number}" + (f"@{release.digest}" if release.digest else ""), "digest": release.digest,
+            "schema_version": release.schema_version}
 
 
 def _latest(row: sqlite3.Row) -> dict[str, object] | None:
@@ -184,6 +198,7 @@ def _latest(row: sqlite3.Row) -> dict[str, object] | None:
         schema = found.get("schema_version")
         found["schema_version"] = schema if isinstance(schema, int) and not isinstance(schema, bool) else None
         found["has_migrations"] = _has_migrations(found["schema_version"])  # Against today's schema: it may have changed since the check
+        found["digest"] = _digest(found.get("digest"))
         return found
     except (ValueError, KeyError, TypeError, AttributeError):
         return None
@@ -361,7 +376,7 @@ def plan() -> dict[str, object]:
         "backup": backup.run_view(run) if run is not None else None,
         "backup_destination": str(backup.destination()) if run is not None else None,
         "without_backup": run is None,
-        "upgrade": upgrade_commands(str(target["version"])),
+        "upgrade": upgrade_commands(str(target["version"]), target.get("digest")),
         "rollback": rollback_steps(APP_VERSION, None, target["has_migrations"] is not False, build_commit()),
         "pre_migration_copies": pre_migration_copies(),
         "will_migrate": target["has_migrations"],
@@ -369,12 +384,22 @@ def plan() -> dict[str, object]:
     }
 
 
-def upgrade_commands(version: str) -> list[str]:
+def upgrade_commands(version: str, digest: object = None) -> list[str]:
+    """The host commands for an upgrade. With the release's digest (#548), the image is named by it, so what is pulled is exactly the image
+    CI built and signed, and for the NVR's own images the steps show how to check that signature before running it."""
     repository = image_repository()
-    return [
+    digest = _digest(digest)
+    image = f"{repository}:{version}" + (f"@{digest}" if digest else "")
+    steps = [
         "# Run these in the folder that holds the NVR's compose.yaml, on the host.",
         "docker compose images nvr                       # note the image you are replacing: write its tag and image ID down",
-        f"# In compose.yaml set:   image: {repository}:{version}",
+        f"# In compose.yaml set:   image: {image}",
+    ]
+    if digest and repository == DEFAULT_IMAGE:
+        steps += ["# Optional, before pulling: check the image is the one this project's build signed (needs cosign, https://docs.sigstore.dev):",
+                  f"cosign verify {shlex.quote(f'{repository}@{digest}')} --certificate-identity {shlex.quote(SIGNER)} "
+                  "--certificate-oidc-issuer https://token.actions.githubusercontent.com"]
+    return steps + [
         "docker compose pull nvr",
         "docker compose up -d nvr",
         "docker compose logs --tail 50 nvr               # the migrations applied are logged here and then listed in Settings, Updates",

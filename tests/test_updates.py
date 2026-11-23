@@ -38,6 +38,36 @@ class ParseTests(unittest.TestCase):
         bad = dict(release("v1.0.0"), body='<!-- nvr-release: {"schema_version": "x"} -->')
         self.assertIsNone(updates.parse_release(bad).schema_version)
 
+    def test_the_release_line_gives_the_image_digest_and_the_steps_name_the_image_by_it(self):
+        digest = "sha256:" + "ab" * 32
+        body = f'Fixes.\n<!-- nvr-release: {{"schema_version": 50, "digest": "{digest}"}} -->'
+        found = updates.parse_release(dict(release("v1.0.0"), body=body))
+        self.assertEqual((found.digest, found.schema_version, found.notes), (digest, 50, "Fixes."))
+        self.assertEqual(updates._release_view(found)["image"], f"ghcr.io/gvsccrc-it/nvr:1.0.0@{digest}")
+        steps = updates.upgrade_commands("1.0.0", digest)
+        self.assertIn(f"# In compose.yaml set:   image: ghcr.io/gvsccrc-it/nvr:1.0.0@{digest}", steps)
+        verify = next(step for step in steps if step.startswith("cosign verify "))
+        self.assertIn(f"ghcr.io/gvsccrc-it/nvr@{digest}", verify)
+        self.assertIn("--certificate-identity https://github.com/gvsccrc-it/nvr/.github/workflows/ci.yml@refs/heads/main", verify)
+        self.assertIn("--certificate-oidc-issuer https://token.actions.githubusercontent.com", verify)
+
+    def test_a_release_without_a_digest_or_with_a_malformed_one_is_named_by_its_tag_alone(self):
+        for body in ("No marker", '<!-- nvr-release: {"schema_version": 50} -->', '<!-- nvr-release: {"schema_version": 50, "digest": "sha256:abc; rm -rf /"} -->'):
+            with self.subTest(body=body):
+                found = updates.parse_release(dict(release("v1.0.0"), body=body))
+                self.assertIsNone(found.digest)
+                self.assertEqual(updates._release_view(found)["image"], "ghcr.io/gvsccrc-it/nvr:1.0.0")
+        steps = updates.upgrade_commands("1.0.0", "sha256:abc; rm -rf /")
+        self.assertIn("# In compose.yaml set:   image: ghcr.io/gvsccrc-it/nvr:1.0.0", steps)
+        self.assertFalse([step for step in steps if "cosign" in step or "rm -rf" in step])
+
+    def test_another_image_named_by_the_setting_gets_the_digest_but_not_this_projects_signature_check(self):
+        digest = "sha256:" + "cd" * 32
+        with patch.dict(os.environ, {"NVR_UPDATE_IMAGE": "registry.example.test/mirror/nvr"}):
+            steps = updates.upgrade_commands("1.0.0", digest)
+        self.assertIn(f"# In compose.yaml set:   image: registry.example.test/mirror/nvr:1.0.0@{digest}", steps)
+        self.assertFalse([step for step in steps if "cosign" in step])
+
     def test_only_https_or_this_machine_is_a_feed(self):
         self.assertTrue(updates._feed_allowed("https://api.github.com/repos/x/y/releases"))
         self.assertTrue(updates._feed_allowed("http://127.0.0.1:9/releases"))

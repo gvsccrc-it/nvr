@@ -27,6 +27,22 @@ The check asks one address: the repository's published releases (`https://api.gi
 
 **Which image the steps name.** Every build of `main` is published under the tag `sha-<commit>` (the first seven characters of its commit), whether or not it is also a release. The image knows the commit it was built from, each start remembers it, and the rollback steps name the previous image by that tag: `image: ghcr.io/gvsccrc-it/nvr:sha-1a2b3c4`. That tag exists for the image that was running, which a version tag does not unless that version was released. When the NVR does not know the earlier build (it ran an image made before builds were recorded, or one built by hand), the steps say so and tell you to use the image you noted; they offer the version tag only as "if it was that release".
 
+## Checking an image before you run it
+
+Every image CI publishes (`edge`, `sha-<commit>` and each release, which is the same image under another tag) is **signed** by the build itself, with no key anyone keeps (keyless signing with the workflow's GitHub identity). It also carries a record of **how it was built** (provenance) and a **list of what is in it** (SBOM), all attached to its digest (#548). To check an image before you run it, with [cosign](https://docs.sigstore.dev/cosign/system_config/installation/):
+
+```sh
+cosign verify ghcr.io/gvsccrc-it/nvr:X.Y.Z \
+  --certificate-identity https://github.com/gvsccrc-it/nvr/.github/workflows/ci.yml@refs/heads/main \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+It succeeds only for an image this repository's CI built on `main`. Anything else fails: an image built elsewhere and pushed under the same name, or a tag moved to another image. Or, with the GitHub CLI, check the build record: `gh attestation verify oci://ghcr.io/gvsccrc-it/nvr:X.Y.Z --owner gvsccrc-it`.
+
+**Releases are named by digest.** A release's line in its notes carries the image's digest, and the upgrade steps the Updates page shows name the image by it (`image: ghcr.io/gvsccrc-it/nvr:X.Y.Z@sha256:…`), with the `cosign verify` command for that digest. Docker then pulls exactly the image CI built, tested and signed, whatever the tag points at later. `release.yml` checks the signature before it tags a release. Images published before #548 are not signed.
+
+**What CI checks in the image.** The build scans the image's system packages (Debian, FFmpeg above all, which parses what cameras send). It fails on any High or Critical finding with a fix available. Findings with no fix yet are listed in the build's log. An exception goes in `.github/vulnerability-exceptions.txt`, with a reason and an expiry date at most 30 days ahead, so it is looked at again. `main` is rebuilt weekly, with the base image's packages upgraded, so `edge` carries Debian's security fixes even when no commit lands. That rebuild publishes `edge` only; `sha-<commit>` stays the image that was tested when the commit was merged.
+
 ## Released versions and `edge`
 
 - **A production server runs a released version.** The shipped `compose.yaml` names one (`image: ghcr.io/gvsccrc-it/nvr:X.Y.Z`) and has no `pull_policy: always`, so restarting the stack never upgrades it.
