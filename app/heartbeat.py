@@ -15,7 +15,7 @@ import httpx
 
 from .credentials import decrypt, encrypt
 from .store import connect, has_row
-from .webhooks import validate_target_url, url_origin
+from .webhooks import pin_target_url, validate_target_url, url_origin
 
 MIN_INTERVAL_SECONDS = 30
 MAX_INTERVAL_SECONDS = 900
@@ -160,8 +160,8 @@ class HeartbeatManager:
 
     async def _send(self, config: dict[str, Any]) -> None:
         try:
-            target = await asyncio.wait_for(
-                asyncio.to_thread(validate_target_url, decrypt(config["target_url_ciphertext"]), bool(config["allow_private"])),
+            pinned = await asyncio.wait_for(
+                asyncio.to_thread(pin_target_url, decrypt(config["target_url_ciphertext"]), bool(config["allow_private"])),
                 timeout=5,
             )
             secret = decrypt(config["signing_secret_ciphertext"]).encode("utf-8")
@@ -183,7 +183,7 @@ class HeartbeatManager:
             # A deadline for the whole attempt, and only the status read: one receiver answering a byte at a time stopped heartbeats for good (#527)
             async with asyncio.timeout(REQUEST_TIMEOUT_SECONDS + 5):
                 async with httpx.AsyncClient(timeout=httpx.Timeout(REQUEST_TIMEOUT_SECONDS, connect=3), follow_redirects=False, trust_env=False) as client:
-                    async with client.stream("POST", target, content=body, headers=headers) as response:
+                    async with client.stream("POST", content=body, **pinned.request(headers)) as response:  # To the checked address (#531)
                         status_code = int(response.status_code)
             await asyncio.to_thread(record_heartbeat_result, success=200 <= status_code < 300, http_status=status_code, error=None if 200 <= status_code < 300 else f"receiver_http_{status_code}")
         except asyncio.CancelledError:

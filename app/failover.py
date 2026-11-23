@@ -732,7 +732,7 @@ class FailoverManager:
         body = json.dumps(payload, separators=(",", ":")).encode() if payload is not None else b""
         headers = {**sign(secret, method, path, body), "Content-Type": "application/json"}
         url = check_peer_url(settings["peer_url"], settings["allow_private"]) + path
-        async with httpx.AsyncClient(timeout=TIMEOUT, follow_redirects=False) as client:
+        async with httpx.AsyncClient(timeout=TIMEOUT, follow_redirects=False, trust_env=False) as client:
             response = await client.request(method, url, content=body or None, headers=headers, **options)
         response.extensions["failover_request_signature"] = headers["X-Failover-Signature"]  # What a signed answer must be an answer to
         return response
@@ -859,7 +859,7 @@ class FailoverManager:
         partial = target.with_name(f".{target.name}.partial")
         digest = hashlib.sha256()
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=4.0), follow_redirects=False) as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=4.0), follow_redirects=False, trust_env=False) as client:
                 async with client.stream("GET", url, headers=headers) as response:
                     if response.status_code == 404:
                         raise MissingFootage
@@ -902,7 +902,7 @@ class FailoverManager:
             url = check_peer_url(settings["peer_url"], settings["allow_private"]) + path
             with tempfile.TemporaryDirectory(prefix=f"{WORK_PREFIX}fetch-", dir=database_path().parent) as directory:  # Beside the database, not in the system's temporary folder
                 archive = Path(directory) / "primary.nvrbackup"
-                async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=4.0), follow_redirects=False) as client:
+                async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=4.0), follow_redirects=False, trust_env=False) as client:
                     async with client.stream("GET", url, headers=headers) as response:
                         if response.status_code != 200:
                             detail = (await response.aread()).decode("utf-8", "replace")[:200]

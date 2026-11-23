@@ -153,7 +153,7 @@ def make_room_for_device(db: sqlite3.Connection, user_id: int, endpoint: str) ->
         audit_record(db, user_id, "push_unsubscribed", "push_subscription", stale["id"], device=stale["device_label"], reason="device_limit")
 
 
-def _post_for_status(client: httpx.Client, endpoint: str, body: bytes, headers: dict[str, str]) -> int:
+def _post_for_status(client: httpx.Client, endpoint: Any, body: bytes, headers: dict[str, str]) -> int:
     """Send one notification and return the service's status. The answer's body is never read, so its size is no concern, and the whole
     attempt has a deadline: a service that answered a byte every few seconds never tripped the per-read time-out and held up everyone's
     notifications, and one that answered with a body that expands enormously grew this process by its expanded size (#523)."""
@@ -161,7 +161,9 @@ def _post_for_status(client: httpx.Client, endpoint: str, body: bytes, headers: 
 
     def post() -> None:
         try:
-            with client.stream("POST", endpoint, content=body, headers=headers) as response:
+            # To the address that was checked (#531); a plain URL (tests) is sent as it is
+            target = endpoint.request(headers) if hasattr(endpoint, "request") else {"url": endpoint, "headers": headers}
+            with client.stream("POST", content=body, **target) as response:
                 outcome["status"] = int(response.status_code)
         except BaseException as exc:  # noqa: BLE001 - handed to the caller's thread
             outcome["error"] = exc
@@ -176,16 +178,31 @@ def _post_for_status(client: httpx.Client, endpoint: str, body: bytes, headers: 
     return outcome["status"]
 
 
-def validate_endpoint(endpoint: str) -> str:
-    """Push services are public HTTPS endpoints; anything else is refused, when stored and when used."""
-    from .webhooks import validate_target_url
-
+def _check_service(endpoint: str) -> None:
     if not endpoint.startswith("https://"):
         raise ValueError("Push subscriptions must use an HTTPS push service")
     if not push_service_host(urlsplit(endpoint).hostname or ""):
         raise ValueError("Push subscriptions must use a browser's own push service (Google, Mozilla, Apple or Microsoft)")
+
+
+def validate_endpoint(endpoint: str) -> str:
+    """Push services are public HTTPS endpoints; anything else is refused, when stored and when used."""
+    from .webhooks import validate_target_url
+
+    _check_service(endpoint)
     try:
         return validate_target_url(endpoint, allow_private=False)
+    except ValueError as exc:
+        raise ValueError(str(exc).replace("Webhook", "Push service").replace("webhook", "push service")) from exc
+
+
+def pin_endpoint(endpoint: str) -> Any:
+    """``validate_endpoint`` at send time, keeping the address that was checked so the notification goes to that one (#531)."""
+    from .webhooks import pin_target_url
+
+    _check_service(endpoint)
+    try:
+        return pin_target_url(endpoint, allow_private=False)
     except ValueError as exc:
         raise ValueError(str(exc).replace("Webhook", "Push service").replace("webhook", "push service")) from exc
 
@@ -440,9 +457,9 @@ def deliver_due(client: httpx.Client | None = None, limit: int = 50) -> list[str
                     status_code, error = native_push.send(native_client, delivery["kind"], delivery["endpoint"].split(":", 1)[1], json.loads(delivery["payload_json"]))
                     outcomes.append(_finish(delivery, status_code, error))
                     continue
-                validate_endpoint(delivery["endpoint"])
+                pinned = pin_endpoint(delivery["endpoint"])
                 body = encrypt_payload(delivery["payload_json"].encode("utf-8"), delivery["p256dh"], delivery["auth"])
-                status_code = _post_for_status(client, delivery["endpoint"], body, {
+                status_code = _post_for_status(client, pinned, body, {
                     "Authorization": vapid_header(delivery["endpoint"], private, public), "Content-Encoding": "aes128gcm",
                     "Content-Type": "application/octet-stream", "TTL": str(TTL_SECONDS), "Urgency": "high",
                 })
