@@ -10,12 +10,14 @@ only through a short grant given for a stated reason, which is audited.
 from __future__ import annotations
 
 import asyncio
+import collections
 import hashlib
 import json
 import shutil
 import sqlite3
 import time
 import uuid
+import weakref
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable
@@ -283,10 +285,51 @@ async def _ffmpeg(args: list[str], stdin: bytes | None = None, timeout: float = 
     return output
 
 
+MASK_RENDERS = 4  # Mask drawings (one FFmpeg each) running at once in a process; the others wait their turn (#522)
+MASKED_KEPT_BYTES = 32 << 20  # Masked pictures kept in memory, newest used last out
+_mask_gates: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore]" = weakref.WeakKeyDictionary()
+_masked: "collections.OrderedDict[str, bytes]" = collections.OrderedDict()
+_masked_bytes = 0
+
+
+def _masked_key(jpeg: bytes, zones: list[dict[str, float]]) -> str:
+    """The picture and the exact masks drawn on it: another mask, or another picture, is another key, so a kept picture is never served
+    once the camera's masks change."""
+    return hashlib.sha256(jpeg + b"\0" + json.dumps(zones, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _keep_masked(key: str, picture: bytes) -> None:
+    global _masked_bytes
+    if len(picture) > MASKED_KEPT_BYTES // 8 or key in _masked:
+        return
+    _masked[key] = picture
+    _masked_bytes += len(picture)
+    while _masked_bytes > MASKED_KEPT_BYTES:
+        _, dropped = _masked.popitem(last=False)
+        _masked_bytes -= len(dropped)
+
+
 async def mask_jpeg(jpeg: bytes, zones: list[dict[str, float]]) -> bytes:
+    """The picture with these masks drawn on it. A search page shows up to 200 thumbnails and asks again when it redraws: each used to start
+    an FFmpeg, with no limit on how many at once (#522). A drawn picture is kept in memory by what was drawn, and at most MASK_RENDERS run
+    at once. Raises when the mask cannot be drawn: never the unmasked picture."""
     if not zones:
         return jpeg
-    return await _ffmpeg(["-f", "image2pipe", "-i", "pipe:0", "-vf", drawbox_filter(zones), "-frames:v", "1", "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"], jpeg, 20)
+    key = _masked_key(jpeg, zones)
+    if (kept := _masked.get(key)) is not None:
+        _masked.move_to_end(key)
+        return kept
+    loop = asyncio.get_running_loop()
+    gate = _mask_gates.get(loop)
+    if gate is None:
+        gate = _mask_gates[loop] = asyncio.Semaphore(MASK_RENDERS)
+    async with gate:
+        if (kept := _masked.get(key)) is not None:  # Drawn by a request that was ahead of this one
+            return kept
+        picture = await _ffmpeg(["-f", "image2pipe", "-i", "pipe:0", "-vf", drawbox_filter(zones), "-frames:v", "1", "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"],
+                                jpeg, 20)
+    _keep_masked(key, picture)
+    return picture
 
 
 def mask_jpeg_sync(jpeg: bytes, zones: list[dict[str, float]]) -> bytes | None:

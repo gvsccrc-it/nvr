@@ -200,20 +200,43 @@ def _store_attributes(db: sqlite3.Connection, track_id: str, profile: TrackProfi
     profile.stored = summary
 
 
+PURGE_BATCH = 1000  # Rows removed per write transaction by the retention pass, so it never holds the write lock for long (#522)
+
+# What a camera's retention pass removes: rows older than its retention that no remaining footage covers. Plate reads follow their footage
+# as detections do.
+_EXPIRED = {
+    "plate_reads": "camera_id=? AND read_at<? AND NOT EXISTS (SELECT 1 FROM recording_segments s WHERE s.camera_id=plate_reads.camera_id "
+                   "AND s.starts_at<=plate_reads.read_at AND s.ends_at>plate_reads.read_at)",
+    "ai_detections": "camera_id=? AND detected_at<? AND NOT EXISTS (SELECT 1 FROM recording_segments s WHERE s.camera_id=ai_detections.camera_id "
+                     "AND s.starts_at<=ai_detections.detected_at AND s.ends_at>ai_detections.detected_at)",
+}
+
+
 def purge_expired_detections(db: sqlite3.Connection, camera_id: str, before: datetime) -> int:
-    """Delete detections older than retention that no remaining footage covers."""
+    """Delete detections (and plate reads) older than retention that no remaining footage covers. Returns detections removed.
+
+    What is due is read first, and the write lock is taken only when there is something to remove, a batch of PURGE_BATCH at a time: the
+    pass runs every five minutes for every camera with tracks, and two deletes each that removed nothing still took the database's one
+    write lock (#280, #522). ``db`` must be in autocommit mode, as ``store.connect`` gives."""
     limit = before.astimezone(timezone.utc).isoformat()
-    # Plate reads follow their footage as detections do.
-    db.execute(
-        "DELETE FROM plate_reads WHERE camera_id=? AND read_at<? AND NOT EXISTS ("
-        "SELECT 1 FROM recording_segments s WHERE s.camera_id=plate_reads.camera_id "
-        "AND s.starts_at<=plate_reads.read_at AND s.ends_at>plate_reads.read_at)", (camera_id, limit))
-    return db.execute(
-        "DELETE FROM ai_detections WHERE camera_id=? AND detected_at<? AND NOT EXISTS ("
-        "SELECT 1 FROM recording_segments s WHERE s.camera_id=ai_detections.camera_id "
-        "AND s.starts_at<=ai_detections.detected_at AND s.ends_at>ai_detections.detected_at)",
-        (camera_id, limit),
-    ).rowcount
+    removed = {}
+    for table, condition in _EXPIRED.items():
+        removed[table] = 0
+        while True:
+            ids = [row[0] for row in db.execute(f"SELECT id FROM {table} WHERE {condition} LIMIT ?", (camera_id, limit, PURGE_BATCH))]
+            if not ids:
+                break
+            db.execute("BEGIN IMMEDIATE")
+            try:  # The condition again under the lock: footage written meanwhile keeps its detections
+                removed[table] += db.execute(f"DELETE FROM {table} WHERE id IN (SELECT value FROM json_each(?)) AND {condition}",
+                                             (json.dumps(ids), camera_id, limit)).rowcount
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            db.execute("COMMIT")
+            if len(ids) < PURGE_BATCH:
+                break
+    return removed["ai_detections"]
 
 
 POSE_VISIBLE = 0.3  # The least visibility at which a body point is kept (the same as fall detection's)
