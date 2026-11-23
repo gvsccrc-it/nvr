@@ -30,6 +30,7 @@ import hmac
 import json
 import logging
 import os
+import secrets
 import shutil
 import sqlite3
 import tarfile
@@ -61,6 +62,7 @@ TICK_SECONDS = 2.0
 POLL_WHILE_HELD_SECONDS = 3.0
 MIN_SECRET_LENGTH = 16
 MAX_SEGMENT_SECONDS = 4 * 3600
+MAX_FOOTAGE_BYTES = 128 * 1024**3  # Larger than any segment: four hours at a high bitrate
 RECORDING_STATES = ("recording", "buffering", "connecting", "reconnecting", "starting", "unavailable", "failed")
 # What is copied from the primary's configuration: tables replaced whole, and the cameras' configuration columns (the rest of a camera row is this NVR's own state).
 REPLACED_TABLES = ("camera_group_memberships", "recording_policy_overrides", "retention_policy_overrides", "privacy_masks")
@@ -147,23 +149,85 @@ def _message(timestamp: str, method: str, path: str, body: bytes) -> bytes:
     return f"{timestamp}\n{method.upper()}\n{path}\n{hashlib.sha256(body).hexdigest()}".encode("utf-8")
 
 
-def sign(secret: str, method: str, path: str, body: bytes = b"", timestamp: int | None = None) -> dict[str, str]:
+NONCE_HEADER, SIGNATURE_2_HEADER = "X-Failover-Nonce", "X-Failover-Signature-2"
+
+
+def _hmac(secret: str, message: bytes) -> str:
+    return hmac.new(secret.encode("utf-8"), message, hashlib.sha256).hexdigest()
+
+
+def sign(secret: str, method: str, path: str, body: bytes = b"", timestamp: int | None = None, nonce: str | None = None) -> dict[str, str]:
+    """The headers of a signed request. ``X-Failover-Signature`` is the signature every version reads; ``X-Failover-Signature-2`` also covers a
+    one-time value (``X-Failover-Nonce``), so that a captured request cannot be sent again (#502). Both are sent, so that an NVR that has not
+    been upgraded yet still hears this one."""
     stamp = str(int(time.time()) if timestamp is None else timestamp)
-    digest = hmac.new(secret.encode("utf-8"), _message(stamp, method, path, body), hashlib.sha256).hexdigest()
-    return {"X-Failover-Timestamp": stamp, "X-Failover-Signature": f"sha256={digest}"}
+    nonce = nonce or secrets.token_hex(16)
+    message = _message(stamp, method, path, body)
+    with_nonce = _hmac(secret, _with_nonce(message, nonce))
+    return {"X-Failover-Timestamp": stamp, "X-Failover-Signature": f"sha256={_hmac(secret, message)}", NONCE_HEADER: nonce, SIGNATURE_2_HEADER: f"sha256={with_nonce}"}
+
+
+def _with_nonce(message: bytes, nonce: str) -> bytes:
+    return message + b"\n" + nonce.encode("ascii")
+
+
+def _problem(expected: str, signature: str | None, timestamp: str | None, now: float | None) -> str | None:
+    """None when ``signature`` is ``expected`` and fresh; otherwise "signature" or, for a signature that is right but out of time, "clock:<seconds>"."""
+    if not signature or not signature.startswith("sha256=") or not hmac.compare_digest(signature, expected):
+        return "signature"
+    difference = (time.time() if now is None else now) - int(timestamp or 0)
+    return f"clock:{round(difference)}" if abs(difference) > SIGNATURE_WINDOW_SECONDS else None
+
+
+def request_problem(secret: str | None, method: str, path: str, body: bytes, headers: Any, now: float | None = None) -> str | None:
+    """Why a request is not to be obeyed, or None: "signature", "clock:<seconds>" (signed right, but the two clocks differ), "replay" (its
+    one-time value was seen before) or "outdated" (signed right, by an NVR that does not send the one-time value yet)."""
+    timestamp, nonce = headers.get("x-failover-timestamp"), headers.get(NONCE_HEADER.lower()) or ""
+    if not secret or not timestamp:
+        return "signature"
+    try:
+        int(timestamp)
+    except ValueError:
+        return "signature"
+    message = _message(timestamp, method, path, body)
+    if not nonce:
+        problem = _problem(f"sha256={_hmac(secret, message)}", headers.get("x-failover-signature"), timestamp, now)
+        return problem or "outdated"
+    if not 16 <= len(nonce) <= 64 or not nonce.isalnum():
+        return "signature"
+    problem = _problem("sha256=" + _hmac(secret, _with_nonce(message, nonce)), headers.get(SIGNATURE_2_HEADER.lower()), timestamp, now)
+    if problem:
+        return problem
+    return None if _first_use(nonce, now) else "replay"
+
+
+_seen_nonces: dict[str, float] = {}
+_nonce_lock = threading.Lock()
+
+
+def _first_use(nonce: str, now: float | None = None) -> bool:
+    """Whether this one-time value has not been seen within the signature window, and note it. A value older than the window is refused by
+    its timestamp anyway, so nothing need be kept longer."""
+    now = time.time() if now is None else now
+    with _nonce_lock:
+        if len(_seen_nonces) > 10_000:
+            for key in [key for key, until in _seen_nonces.items() if until < now]:
+                del _seen_nonces[key]
+        if _seen_nonces.get(nonce, 0) >= now:
+            return False
+        _seen_nonces[nonce] = now + 2 * SIGNATURE_WINDOW_SECONDS
+        return True
 
 
 def verify(secret: str | None, method: str, path: str, body: bytes, timestamp: str | None, signature: str | None, now: float | None = None) -> bool:
-    if not secret or not timestamp or not signature or not signature.startswith("sha256="):
+    """The signature every version sends (without its one-time value)."""
+    if not secret or not timestamp:
         return False
     try:
-        stamped = int(timestamp)
+        int(timestamp)
     except ValueError:
         return False
-    if abs((time.time() if now is None else now) - stamped) > SIGNATURE_WINDOW_SECONDS:
-        return False
-    expected = hmac.new(secret.encode("utf-8"), _message(timestamp, method, path, body), hashlib.sha256).hexdigest()
-    return hmac.compare_digest(signature[7:], expected)
+    return _problem(f"sha256={_hmac(secret, _message(timestamp, method, path, body))}", signature, timestamp, now) is None
 
 
 def sign_answer(secret: str, path: str, body: bytes, request_signature: str, timestamp: int | None = None) -> dict[str, str]:
@@ -175,25 +239,61 @@ def sign_answer(secret: str, path: str, body: bytes, request_signature: str, tim
     return {"X-Failover-Timestamp": stamp, "X-Failover-Signature": f"sha256={digest}"}
 
 
-def verify_answer(secret: str | None, path: str, body: bytes, request_signature: str, timestamp: str | None, signature: str | None, now: float | None = None) -> bool:
-    if not secret or not timestamp or not signature or not signature.startswith("sha256="):
-        return False
+def answer_problem(secret: str | None, path: str, body: bytes, request_signature: str, timestamp: str | None, signature: str | None, now: float | None = None) -> str | None:
+    """Why an answer is not to be believed, or None: "signature" or "clock:<seconds>"."""
+    if not secret or not timestamp:
+        return "signature"
     try:
         stamped = int(timestamp)
     except ValueError:
-        return False
-    if abs((time.time() if now is None else now) - stamped) > SIGNATURE_WINDOW_SECONDS:
-        return False
-    expected = sign_answer(secret, path, body, request_signature, stamped)["X-Failover-Signature"]
-    return hmac.compare_digest(signature, expected)
+        return "signature"
+    return _problem(sign_answer(secret, path, body, request_signature, stamped)["X-Failover-Signature"], signature, timestamp, now)
 
 
-def authenticate(method: str, path: str, body: bytes, timestamp: str | None, signature: str | None) -> None:
-    """Refuse a request that is not signed with this NVR's failover secret (the same answer however it is wrong)."""
+def verify_answer(secret: str | None, path: str, body: bytes, request_signature: str, timestamp: str | None, signature: str | None, now: float | None = None) -> bool:
+    return answer_problem(secret, path, body, request_signature, timestamp, signature, now) is None
+
+
+def footage_summary(digest: str, size: int) -> bytes:
+    """What the standby signs for a footage file: its SHA-256 and size, the body itself being checked against them as it arrives."""
+    return f"{digest}\n{int(size)}".encode("ascii")
+
+
+def clock_message(problem: str, whose: str) -> str:
+    """What to tell the administrator about a signature that is right but out of time: the clocks, not the secrets (#502)."""
+    seconds = abs(int(problem.split(":", 1)[1]))
+    return (f"{whose} is signed with the right secret, but the two NVRs' clocks differ by about {seconds} seconds (at most {SIGNATURE_WINDOW_SECONDS} "
+            "are allowed): set both to the same time source (NTP)")
+
+
+def authenticate(method: str, path: str, body: bytes, headers: Any) -> None:
+    """Refuse a request that is not signed with this NVR's failover secret, or that was sent before (the same answer however it is wrong,
+    except that a request signed right but out of time says the clocks differ, and one from an NVR not yet upgraded says so)."""
     with connect() as db:
         secret = shared_secret(db)
-    if not verify(secret, method, path, body, timestamp, signature):
-        raise PeerError(401, "The request is not signed with this NVR's failover secret")
+    problem = request_problem(secret, method, path, body, headers)
+    if problem is None:
+        return
+    if problem.startswith("clock:"):
+        message = clock_message(problem, "The other NVR's request")
+        with connect() as db:
+            _set_state(db, last_error=message)
+        raise PeerError(401, message)
+    if problem == "outdated":
+        note_outdated_peer()
+        raise PeerError(426, "The other NVR signs its requests the old way: upgrade both NVRs to the same version")
+    if problem == "replay":
+        raise PeerError(401, "The request was sent before")
+    raise PeerError(401, "The request is not signed with this NVR's failover secret")
+
+
+def note_outdated_peer() -> None:
+    """A request signed right by a primary that has not been upgraded yet. It is refused, but it shows the primary is alive: a standby that
+    has not taken over does not take over because of the upgrade, while the primary is recording."""
+    with connect() as db:
+        if read_settings(db)["role"] == "standby" and not read_state(db)["takeover_active"]:
+            _set_state(db, last_renewed_at=_stamp(), last_contact_at=_stamp(),
+                       last_error="The primary has not been upgraded: its requests are refused until both NVRs run the same version")
 
 
 def check_peer_url(url: str, allow_private: bool) -> str:
@@ -410,6 +510,10 @@ def check_takeover(now: datetime | None = None) -> int | None:
 
 class SyncError(RuntimeError):
     pass
+
+
+class NoRoom(OSError):
+    """Bringing back a segment would take the recordings volume below its headroom."""
 
 
 class MissingFootage(Exception):
@@ -659,7 +763,8 @@ def status_view(db: sqlite3.Connection) -> dict[str, Any]:
         else:
             headline = "Standby: watching the primary"
     else:
-        headline = {"ok": "Primary: the standby is watching", "unreachable": "Primary: the standby cannot be reached (recording continues)", "refused": "Primary: the standby refused the signature (the secrets differ)",
+        headline = {"ok": "Primary: the standby is watching", "unreachable": "Primary: the standby cannot be reached (recording continues)", "refused": "Primary: the standby refused the request (see the last error)",
+                    "no_room": "Primary: not enough free space to bring back the standby's footage",
                     "starting": "Primary: starting, waiting to hear from the standby", "standby_stopping": "Primary: waiting for the standby to stop recording", "handback": "Primary: bringing back the standby's footage",
                     "unverified": "Primary: the standby's answer was not signed and was ignored (recording continues)",
                     "not_handing_back": "Primary: the standby did not hand back in time; this primary is recording again",
@@ -744,18 +849,17 @@ class FailoverManager:
         except (httpx.HTTPError, ValueError) as exc:
             await asyncio.to_thread(self._record_peer, "unreachable", f"The standby could not be reached: {type(exc).__name__}")
             return
-        if response.status_code in (401, 403):
-            await asyncio.to_thread(self._record_peer, "refused", "The standby refused the signature: the failover secrets differ")
+        if response.status_code in (401, 403, 426):
+            await asyncio.to_thread(self._record_peer, "refused", self._refusal_reason(response))
             return
         if response.status_code != 200:
             await asyncio.to_thread(self._record_peer, "error", f"The standby answered {response.status_code}")
             return
         # Only an answer the standby signed, for this request, counts. Anything else is no answer: the primary neither yields nor
         # takes its lease as renewed on the word of whoever could reach it (#343).
-        if not verify_answer(secret, "/api/inbound/failover/lease", response.content, str(response.extensions.get("failover_request_signature", "")),
-                             response.headers.get("x-failover-timestamp"), response.headers.get("x-failover-signature")):
-            await asyncio.to_thread(self._record_peer, "unverified", "The standby's answer was not signed with the failover secret and was ignored; "
-                                                                    "both NVRs must run a version that signs answers, with the same secret")
+        problem = self._answer_problem(secret, "/api/inbound/failover/lease", response)
+        if problem:
+            await asyncio.to_thread(self._record_peer, "unverified", self._unverified_message(problem))
             return
         try:
             answer = response.json()
@@ -763,6 +867,30 @@ class FailoverManager:
             await asyncio.to_thread(self._record_peer, "error", "The standby's answer was not understood")
             return
         await asyncio.to_thread(self._apply_answer, settings, sent, answer)
+
+    @staticmethod
+    def _answer_problem(secret: str, path: str, response: httpx.Response, body: bytes | None = None) -> str | None:
+        """Why the standby's answer to this request is not to be believed, or None. ``body`` is what was signed when it is not the response's
+        content (a footage file's digest and size)."""
+        return answer_problem(secret, path, response.content if body is None else body, str(response.extensions.get("failover_request_signature", "")),
+                              response.headers.get("x-failover-timestamp"), response.headers.get("x-failover-signature"))
+
+    @staticmethod
+    def _unverified_message(problem: str) -> str:
+        if problem.startswith("clock:"):
+            return clock_message(problem, "The standby's answer")
+        return "The standby's answer was not signed with the failover secret and was ignored; both NVRs must run the same version, with the same secret"
+
+    @staticmethod
+    def _refusal_reason(response: httpx.Response) -> str:
+        """What the standby said when it refused a request: a clock difference or an NVR not yet upgraded is named; anything else is the secrets."""
+        try:
+            detail = str(response.json().get("detail", ""))
+        except (ValueError, AttributeError):
+            detail = ""
+        if "clocks differ" in detail or "upgrade both" in detail:
+            return f"The standby refused the request: {detail[:300]}"
+        return "The standby refused the signature: the failover secrets differ"
 
     @staticmethod
     def _record_peer(peer_state: str, error: str | None) -> None:
@@ -794,9 +922,15 @@ class FailoverManager:
         """Bring back the footage the standby recorded: each segment once, checked against the digest the standby gives, then tell it so it can recover."""
         from .storage import camera_recordings_dir
 
+        path = f"/api/inbound/failover/footage?epoch={epoch}"
         try:
-            listing = await self._call(settings, secret, "GET", f"/api/inbound/failover/footage?epoch={epoch}")
+            listing = await self._call(settings, secret, "GET", path)
             if listing.status_code != 200:
+                return
+            # Only a list the standby signed, for this request, is used: one added to or cut on the way is no list, and is asked for again (#502).
+            problem = self._answer_problem(secret, path, listing)
+            if problem:
+                await asyncio.to_thread(self._record_peer, "unverified", self._unverified_message(problem))
                 return
             remote = listing.json().get("segments", [])
         except (httpx.HTTPError, ValueError):
@@ -820,7 +954,10 @@ class FailoverManager:
                 continue
             target = directory / f"failover-e{epoch}-{item['id']}-{started:%Y%m%dT%H%M%SZ}.mp4"
             try:
-                digest = await self._download(settings, secret, epoch, int(item["id"]), target)
+                digest = await self._download(settings, secret, epoch, int(item["id"]), target, item["size_bytes"])
+            except NoRoom as exc:
+                await asyncio.to_thread(self._record_peer, "no_room", str(exc))
+                return  # Tried again at the next pass, when retention may have made room
             except MissingFootage:
                 logger.warning("The standby no longer has footage %s of takeover %s: skipped", item["id"], epoch)
                 await asyncio.to_thread(self._skip, epoch, item)
@@ -838,7 +975,8 @@ class FailoverManager:
             confirmed = await self._call(settings, secret, "POST", "/api/inbound/failover/handback-complete", {"epoch": epoch, "imported": totals[0], "bytes": totals[1]})
         except (httpx.HTTPError, ValueError):
             return
-        if confirmed.status_code == 200:
+        # The handback is done only when the standby says so in a signed answer: an unsigned "done" would leave the standby waiting (#502).
+        if confirmed.status_code == 200 and not self._answer_problem(secret, "/api/inbound/failover/handback-complete", confirmed):
             await asyncio.to_thread(finish_handback, epoch, int(totals[0]), int(totals[1]))
 
     @staticmethod
@@ -851,26 +989,50 @@ class FailoverManager:
         with connect() as db:
             return db.execute("SELECT 1 FROM cameras WHERE id=?", (camera_id,)).fetchone() is not None
 
-    async def _download(self, settings: dict[str, Any], secret: str, epoch: int, segment_id: int, target: Path) -> str:
+    async def _download(self, settings: dict[str, Any], secret: str, epoch: int, segment_id: int, target: Path, listed_size: int) -> str:
+        """One segment, believed only as the standby signed it: its digest and size, signed as the answer to this request, the size the one it
+        listed, and the bytes checked against both as they arrive (#502). Nothing is written that would take the recordings volume below its
+        headroom, and "no such footage" counts only when signed."""
+        from .exports import free_floor
+
         path = f"/api/inbound/failover/footage/{segment_id}?epoch={epoch}"
         headers = sign(secret, "GET", path)
         url = check_peer_url(settings["peer_url"], settings["allow_private"]) + path
         target.parent.mkdir(parents=True, exist_ok=True)
+        if not 0 <= listed_size <= MAX_FOOTAGE_BYTES:
+            raise ValueError("The standby listed a segment larger than any recording")
+        if await asyncio.to_thread(lambda: shutil.disk_usage(target.parent).free - listed_size < free_floor(target.parent)):
+            raise NoRoom("There is not enough free space on the recordings volume to bring back the standby's footage without the recorder deleting footage")
         partial = target.with_name(f".{target.name}.partial")
-        digest = hashlib.sha256()
+        digest, received = hashlib.sha256(), 0
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=4.0), follow_redirects=False, trust_env=False) as client:
                 async with client.stream("GET", url, headers=headers) as response:
+                    response.extensions["failover_request_signature"] = headers["X-Failover-Signature"]
                     if response.status_code == 404:
-                        raise MissingFootage
+                        await response.aread()
+                        if self._answer_problem(secret, path, response) is None:
+                            raise MissingFootage
+                        raise ValueError("An unsigned 'no such footage' was ignored")
                     if response.status_code != 200:
                         raise httpx.HTTPError(f"The standby answered {response.status_code}")
                     expected = response.headers.get("X-Footage-Sha256", "")
+                    try:
+                        size = int(response.headers.get("X-Footage-Size", ""))
+                    except ValueError:
+                        raise ValueError("The standby did not say how large the footage is") from None
+                    if self._answer_problem(secret, path, response, footage_summary(expected, size)):
+                        raise ValueError("The footage's digest and size were not signed by the standby")
+                    if size != listed_size:
+                        raise ValueError("The footage is not the size the standby listed")
                     with partial.open("wb") as handle:
                         async for chunk in response.aiter_bytes(1024 * 1024):
+                            received += len(chunk)
+                            if received > size:
+                                raise ValueError("The standby sent more than the footage's signed size")
                             digest.update(chunk)
                             await asyncio.to_thread(handle.write, chunk)
-            if not expected or digest.hexdigest() != expected:
+            if received != size or not expected or digest.hexdigest() != expected:
                 raise ValueError("The footage did not arrive intact")
             os.replace(partial, target)
         finally:

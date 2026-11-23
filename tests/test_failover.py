@@ -580,12 +580,18 @@ class ImportTests(FailoverCase):
 
         class Peer(failover.FailoverManager):
             async def _call(self, settings, secret, method, path, payload=None, **options):
+                """Answers as the standby gives them: signed, for this request (#502)."""
+                request = "sha256=" + "d" * 64
                 if path.startswith("/api/inbound/failover/footage?"):
-                    return httpx.Response(200, json={"segments": listing})
-                completed.append(payload)
-                return httpx.Response(200, json={"done": True})
+                    content = json.dumps({"segments": listing}).encode()
+                else:
+                    completed.append(payload)
+                    content = json.dumps({"done": True}).encode()
+                response = httpx.Response(200, content=content, headers=failover.sign_answer(SECRET, path, content, request))
+                response.extensions["failover_request_signature"] = request
+                return response
 
-            async def _download(self, settings, secret, epoch, segment_id, target):
+            async def _download(self, settings, secret, epoch, segment_id, target, listed_size):
                 if segment_id == 11:
                     raise failover.MissingFootage  # Removed by the standby's retention
                 target.parent.mkdir(parents=True, exist_ok=True)

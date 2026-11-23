@@ -8,7 +8,7 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app import failover
@@ -142,7 +142,7 @@ async def _signed(request: Request) -> bytes:
             raise failover.PeerError(413, "The request is too large")
     body = bytes(body)
     try:
-        await run_in_threadpool(failover.authenticate, request.method, _target(request), body, request.headers.get("x-failover-timestamp"), request.headers.get("x-failover-signature"))
+        await run_in_threadpool(failover.authenticate, request.method, _target(request), body, request.headers)
     except failover.PeerError:
         if _blocked(host):
             raise failover.PeerError(429, "Too many refused requests") from None
@@ -151,8 +151,19 @@ async def _signed(request: Request) -> bytes:
     return body
 
 
-def _refusal(exc: failover.PeerError) -> JSONResponse:
-    return JSONResponse({"detail": exc.detail}, status_code=exc.status)
+def _refusal(exc: failover.PeerError, request: Request | None = None, secret: str | None = None) -> Response:
+    """A refusal. Given the authenticated request and the secret, it is signed as an answer to that request, so the primary can believe it
+    (a "no such footage" makes the primary skip that footage, #502); a refusal of a request that was not authenticated is never signed."""
+    body = json.dumps({"detail": exc.detail}, separators=(",", ":")).encode()
+    headers = failover.sign_answer(secret, _target(request), body, request.headers.get("x-failover-signature", "")) if request is not None and secret else {}
+    return Response(body, status_code=exc.status, media_type="application/json", headers=headers)
+
+
+async def _answer(request: Request, payload: Any) -> Response:
+    """A JSON answer to an authenticated request, signed as the answer to it (#343, #502)."""
+    body = json.dumps(payload, separators=(",", ":")).encode()
+    secret = await run_in_threadpool(_shared_secret)
+    return Response(body, media_type="application/json", headers=failover.sign_answer(secret or "", _target(request), body, request.headers.get("x-failover-signature", "")))
 
 
 def _epoch(request: Request) -> int:
@@ -172,47 +183,58 @@ async def lease(request: Request) -> Response:
     """The primary renews its lease. The standby's answer says whether it is granted and whether footage waits to be brought back."""
     try:
         await _signed(request)
-        answer = json.dumps(await run_in_threadpool(failover.standby_lease, {}), separators=(",", ":")).encode()
         # Signed, and bound to the request it answers: the primary yields only to an answer it can prove came from its standby.
-        secret = await run_in_threadpool(_shared_secret)
-        signed = failover.sign_answer(secret or "", "/api/inbound/failover/lease", answer, request.headers.get("x-failover-signature", ""))
-        return Response(answer, media_type="application/json", headers=signed)
+        return await _answer(request, await run_in_threadpool(failover.standby_lease, {}))
     except failover.PeerError as exc:
         return _refusal(exc)
 
 
+async def _authenticated(request: Request) -> tuple[bytes, str | None]:
+    """The body of a request that passed ``_signed``, and the secret to sign the answer (and any refusal) with."""
+    body = await _signed(request)
+    return body, await run_in_threadpool(_shared_secret)
+
+
 @router.post("/api/inbound/failover/handback-complete")
-async def handback_complete(request: Request) -> JSONResponse:
+async def handback_complete(request: Request) -> Response:
+    secret = None
     try:
-        body = await _signed(request)
+        body, secret = await _authenticated(request)
         try:
             payload = json.loads(body or b"{}")
             epoch, imported, size = int(payload["epoch"]), int(payload.get("imported", 0)), int(payload.get("bytes", 0))
         except (ValueError, KeyError, TypeError):
             raise failover.PeerError(422, "The request is not understood") from None
         await run_in_threadpool(failover.standby_handback_complete, epoch, imported, size)
-        return JSONResponse({"done": True})
+        return await _answer(request, {"done": True})  # The primary marks the handback done only on this signed answer (#502)
     except failover.PeerError as exc:
-        return _refusal(exc)
+        return _refusal(exc, request, secret)
 
 
 @router.get("/api/inbound/failover/footage")
-async def footage(request: Request) -> JSONResponse:
+async def footage(request: Request) -> Response:
+    secret = None
     try:
-        await _signed(request)
-        return JSONResponse({"segments": await run_in_threadpool(failover.standby_footage, _epoch(request))})
+        _, secret = await _authenticated(request)
+        return await _answer(request, {"segments": await run_in_threadpool(failover.standby_footage, _epoch(request))})
     except failover.PeerError as exc:
-        return _refusal(exc)
+        return _refusal(exc, request, secret)
 
 
 @router.get("/api/inbound/failover/footage/{segment_id}")
 async def footage_file(segment_id: int, request: Request):
+    secret = None
     try:
-        await _signed(request)
+        _, secret = await _authenticated(request)
         path, digest = await run_in_threadpool(failover.standby_footage_file, _epoch(request), segment_id)
+        size = (await run_in_threadpool(path.stat)).st_size
     except failover.PeerError as exc:
-        return _refusal(exc)
-    return FileResponse(path, media_type="video/mp4", headers={"X-Footage-Sha256": digest, "Cache-Control": "no-store"})
+        return _refusal(exc, request, secret)
+    except OSError:
+        return _refusal(failover.PeerError(404, "The footage is not available"), request, secret)
+    # The file's digest and size are signed as the answer to this request; the primary checks the bytes it receives against them (#502).
+    signed = failover.sign_answer(secret or "", _target(request), failover.footage_summary(digest, size), request.headers.get("x-failover-signature", ""))
+    return FileResponse(path, media_type="video/mp4", headers={"X-Footage-Sha256": digest, "X-Footage-Size": str(size), "Cache-Control": "no-store", **signed})
 
 
 @router.get("/api/inbound/failover/backup")
