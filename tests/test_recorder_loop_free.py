@@ -168,6 +168,79 @@ class RecorderLoopFreeTests(unittest.TestCase):
             checked = db.execute("SELECT COUNT(*) FROM coverage_intervals WHERE camera_id=?", (self.camera_id,)).fetchone()[0]
         self.assertEqual(checked, 1)  # The coverage was still checked and written
 
+    def motion_source(self):
+        from app.store import connect
+        with connect() as db:
+            return db.execute("SELECT motion_source_status,last_error FROM cameras WHERE id=?", (self.camera_id,)).fetchone()
+
+    def test_a_motion_source_reporting_unavailable_does_not_stop_the_loop(self):
+        # The ONVIF event source reports after every failed attempt, every 1 to 30 s per camera, from a plain callback on the loop (#470).
+        from app.recording import _MotionSourceWriter
+
+        async def reports():
+            writer = _MotionSourceWriter(self.camera_id, False)
+            for _ in range(20):  # 200 cameras behind a switch that is down report about seven times a second
+                writer.want("unavailable", "The camera's event service could not be reached")
+                await asyncio.sleep(0.02)
+            await writer.settle()
+
+        longest = loop_stall.longest_stall_while_locked(reports)
+        self.assertLess(longest, HOLD_SECONDS / 2, "the recorder's event loop stopped while a motion source's state waited for the write lock")
+        stored = self.motion_source()
+        self.assertEqual((stored["motion_source_status"], stored["last_error"]),
+                         ("unavailable", "Motion events: The camera's event service could not be reached"))  # As the camera's page showed it before
+
+    def test_a_motion_source_repeating_its_state_writes_it_once(self):
+        from app import recording
+
+        written = []
+        real = recording._record_motion_source
+
+        def record(*args):
+            written.append(args[1:3])
+            real(*args)
+
+        async def reports():
+            writer = recording._MotionSourceWriter(self.camera_id, True)
+            for value, reason in [("unavailable", "Unreachable")] * 30 + [("healthy", "")] * 10 + [("unavailable", "Unreachable")] * 5:
+                writer.want(value, reason)
+                await asyncio.sleep(0)
+                await writer.settle()  # Each report after the last write has finished: a repeat is not written however it is timed
+            return writer
+
+        with patch.object(recording, "_record_motion_source", record):
+            asyncio.run(reports())
+        self.assertEqual(written, [("unavailable", "Unreachable"), ("healthy", ""), ("unavailable", "Unreachable")])
+        self.assertEqual(self.motion_source()["motion_source_status"], "unavailable")
+
+    def test_reports_that_come_faster_than_the_writes_store_the_newest(self):
+        async def reports():
+            from app.recording import _MotionSourceWriter
+            writer = _MotionSourceWriter(self.camera_id, False)
+            for value in ("connecting", "unavailable", "authentication_error", "unavailable", "healthy"):
+                writer.want(value, "")
+            await writer.settle()
+
+        loop_stall.longest_stall_while_locked(reports)  # The first write waits for the lock while the rest arrive
+        stored = self.motion_source()
+        self.assertEqual((stored["motion_source_status"], stored["last_error"]), ("healthy", None))
+
+    def test_dropped_frames_are_counted_without_stopping_the_loop(self):
+        from app import camera_health
+        from app.store import connect
+
+        async def report():
+            stream = asyncio.StreamReader()
+            stream.feed_data(b"drop_frames=2\nprogress=continue\ndrop_frames=5\nprogress=continue\n")
+            stream.feed_eof()
+            await camera_health.watch_progress(stream, self.camera_id)
+
+        longest = loop_stall.longest_stall_while_locked(report)
+        self.assertLess(longest, HOLD_SECONDS / 2, "the recorder's event loop stopped while dropped frames waited for the write lock")
+        with connect() as db:
+            counted = db.execute("SELECT value FROM metric_counters WHERE camera_id=? AND name=?", (self.camera_id, camera_health.FRAMES_DROPPED)).fetchone()
+        self.assertEqual(counted["value"], 5)  # Counted once the lock was free
+
 
 if __name__ == "__main__":
     unittest.main()

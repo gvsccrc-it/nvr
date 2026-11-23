@@ -59,7 +59,11 @@ class ProgressCounter:
         self.camera_id, self.seen = camera_id, 0
 
     def feed(self, line: str) -> int:
-        """One line of the report; the frames dropped since the last one (0 for most lines)."""
+        """One line of the report, counted at once; the frames dropped since the last one (0 for most lines). Blocking: see ``watch_progress``."""
+        return self.count(self.parse(line))
+
+    def parse(self, line: str) -> int:
+        """The frames one line of the report says were dropped since the last one (0 for most lines). Touches nothing."""
         key, _, value = line.strip().partition("=")
         if key != "drop_frames":
             return 0
@@ -68,13 +72,18 @@ class ProgressCounter:
         except ValueError:
             return 0
         added, self.seen = max(0, total - self.seen), max(self.seen, total)
-        if added:
-            try:
-                with connect() as db:
-                    metrics.bump(db, FRAMES_DROPPED, self.camera_id, added)
-            except sqlite3.Error:
-                logger.warning("Dropped frames could not be counted", exc_info=True)
-                return 0
+        return added
+
+    def count(self, added: int) -> int:
+        """Add ``added`` dropped frames to the camera's counter; what was counted (0 when the database refused it). A database write."""
+        if not added:
+            return 0
+        try:
+            with connect() as db:
+                metrics.bump(db, FRAMES_DROPPED, self.camera_id, added)
+        except sqlite3.Error:
+            logger.warning("Dropped frames could not be counted", exc_info=True)
+            return 0
         return added
 
 
@@ -85,7 +94,11 @@ async def watch_progress(stream: asyncio.StreamReader | None, camera_id: str) ->
     counter = ProgressCounter(camera_id)
     try:
         while line := await stream.readline():
-            counter.feed(line.decode("utf-8", errors="replace"))  # Parsing is trivial and the write happens only when frames were dropped
+            added = counter.parse(line.decode("utf-8", errors="replace"))
+            if added:
+                # Counted in a thread: the write waits for the database's lock, and the recorder's loop (every camera's watch and its sign of
+                # life to the supervisor) must not wait with it (#470).
+                await asyncio.to_thread(counter.count, added)
     except asyncio.CancelledError:
         raise
     except Exception:  # noqa: BLE001
