@@ -59,6 +59,57 @@ class CoverageTests(MaintenanceCase):
         self.assertEqual(self.admin.get("/api/maintenance").json()["windows"], [])
 
 
+class CoveredListTests(MaintenanceCase):
+    def every_camera(self) -> list[str]:
+        with connect() as db:
+            return [row["id"] for row in db.execute("SELECT id FROM cameras")]
+
+    def per_camera(self) -> set[str]:
+        with connect() as db:
+            return {camera for camera in self.every_camera() if maintenance.covering(db, camera) is not None}
+
+    def test_the_cameras_covered_are_worked_out_at_once_and_match_each_cameras_answer(self):
+        with connect() as db:
+            self.assertEqual(maintenance.covered_cameras(db), set())
+        self.assertEqual(self.open(self.admin, camera_ids=[self.d1]).status_code, 201)
+        self.assertEqual(self.open(self.admin, scope="groups", group_ids=[self.yard], name="Yard").status_code, 201)
+        with connect() as db:
+            self.assertEqual(maintenance.covered_cameras(db), self.per_camera())
+            self.assertEqual(maintenance.covered_cameras(db), {self.d1, self.y1})
+            self.assertEqual(maintenance.covered_cameras(db, NOW() + timedelta(hours=2)), set())  # After they ended
+        self.assertEqual(sorted(self.admin.get("/api/maintenance").json()["covered_camera_ids"]), sorted([self.d1, self.y1]))
+        self.assertEqual(self.limited.get("/api/maintenance").json()["covered_camera_ids"], [self.d1])  # Only what this person may see
+        self.assertEqual(self.open(self.admin, scope="site", name="Network switch").status_code, 201)
+        with connect() as db:
+            self.assertEqual(maintenance.covered_cameras(db), set(self.every_camera()))
+
+    def test_the_list_costs_the_same_however_many_cameras_there_are(self):
+        # It asked covering() of every camera: one query for the windows, and one more for each camera's group, on every refresh (#508).
+        self.assertEqual(self.open(self.admin, scope="groups", group_ids=[self.yard], name="Yard").status_code, 201)
+        import sqlite3
+        from unittest import mock
+
+        def statements() -> int:
+            seen: list[str] = []
+            real = sqlite3.connect
+
+            def watching(*args, **kwargs):
+                connection = real(*args, **kwargs)
+                connection.set_trace_callback(lambda statement: seen.append(statement) if "maintenance_windows" in statement or "group_id" in statement else None)
+                return connection
+
+            with mock.patch("sqlite3.connect", watching):
+                self.assertEqual(self.admin.get("/api/maintenance").status_code, 200)
+            return len(seen)
+
+        few = statements()
+        with connect() as db:
+            for index in range(40):
+                db.execute("INSERT INTO cameras(id,name,stream_url_ciphertext,group_id,recording_mode,recording_enabled) VALUES(?,?,X'01',?,'continuous',1)",
+                           (str(uuid.uuid4()), f"Extra {index}", self.yard))
+        self.assertEqual(statements(), few)
+
+
 class AlarmTests(MaintenanceCase):
     def test_during_a_window_an_alarm_is_kept_and_marked_but_nothing_goes_out(self):
         window = self.open(self.admin, camera_ids=[self.d1]).json()
