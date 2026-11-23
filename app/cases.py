@@ -696,8 +696,8 @@ def verify_package_file(package: Any, case_id: str, package_id: str, installatio
 
     ``complete`` says the case's clips are all there (a package of someone with less access can be valid and not complete)."""
     from . import package_checks
-    from .exports import member_digest, read_integrity_manifest, verify_evidence_file
-    budget = package_checks.Budget()  # The package and every clip in it together (#503)
+    from .exports import MAX_VERIFY_PACKAGE_BYTES, member_digest, read_integrity_manifest, verify_evidence_file
+    budget = package_checks.Budget(MAX_VERIFY_PACKAGE_BYTES)  # The package and every clip in it together (#503)
     try:
         package_checks.check_directory(package)
         with zipfile.ZipFile(package) as archive:

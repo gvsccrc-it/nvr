@@ -123,7 +123,7 @@ class CraftedPackageTests(unittest.TestCase):
             evidence_package(path, 3 * MIB, export_id=f"clip-{number}")
             clips.append(path.read_bytes())
         upload = case_package(clips)
-        with mock.patch.object(package_checks, "MAX_INFLATED_BYTES", len(upload) + 4 * MIB):  # Room for the package and one clip, not two
+        with mock.patch.object(exports, "MAX_VERIFY_PACKAGE_BYTES", len(upload) + 4 * MIB):  # Room for the package and one clip, not two
             result = cases.verify_package_bytes(upload, "case-1", "package-1")
         self.assertEqual([clip["valid"] for clip in result["clips"]], [True, False])
         self.assertIn("exceeds the verification size limit", result["clips"][1]["error"])

@@ -13,7 +13,7 @@ Here:
 - the archive's directory is sized from its end record before it is read: at most ``MAX_MEMBERS`` members;
 - a JSON member is refused from its declared size, before it is inflated, past ``MAX_JSON_BYTES``; it is read with that bound whatever it
   declares, and nesting too deep for the parser is "invalid", not a server error;
-- a case package and its clips together inflate at most ``MAX_INFLATED_BYTES`` (``Budget``);
+- a case package and its clips together inflate at most the verification size limit (``Budget``);
 - ``MAX_UPLOADS`` checks run at once in the web process; another is refused with 429;
 - uploads and the copies of a case package's clips are written to ``VERIFY_DIRECTORY`` on the recordings volume, which the exports'
   budget does not count, never below the volume's headroom (refused part-way, the file removed), and what is left there is removed at start.
@@ -33,7 +33,6 @@ logger = logging.getLogger(__name__)
 
 MAX_MEMBERS = 1000  # A case keeps at most 500 items; an export has a file a camera and a few more
 MAX_JSON_BYTES = 32 * 1024**2  # integrity.json, metadata.json, chain.json, case.json: a day of 16 cameras' chain is about 7 MB
-MAX_INFLATED_BYTES = 2 * 1024**3  # Everything a check inflates, a case package's clips included
 MAX_UPLOADS = 2
 DIRECTORY_ENTRY_BYTES = 46 + 1024  # A directory entry's fixed part, and room for its name and extra fields (ours are a few dozen bytes)
 VERIFY_DIRECTORY = ".verify"  # On the recordings volume, beside the exports, not in their folder
@@ -46,10 +45,11 @@ class PackageTooLarge(ValueError):
 
 
 class Budget:
-    """What one check may still inflate: a case package's own members and every clip inside it draw on the same budget."""
+    """What one check may still inflate: a case package's own members and every clip inside it draw on the same budget, the verification
+    size limit (``exports.MAX_VERIFY_PACKAGE_BYTES``, 2 GiB), not one each."""
 
-    def __init__(self, limit: int | None = None) -> None:
-        self.left = MAX_INFLATED_BYTES if limit is None else limit
+    def __init__(self, limit: int) -> None:
+        self.left = limit
 
     def take(self, declared: int) -> None:
         if declared > self.left:
