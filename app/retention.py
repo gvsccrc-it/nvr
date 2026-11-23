@@ -380,7 +380,8 @@ def cleanup_expired_recordings(now: datetime | None = None) -> dict[str, int]:
     # Deleting footage deletes its detections; detections no footage covers expire on the same schedule.
     from .tracks import purge_expired_detections
     with connect() as db:
-        cameras=[row[0] for row in db.execute("SELECT DISTINCT camera_id FROM ai_tracks")]
+        # Each camera asked of the tracks' index, not every track walked to find the distinct cameras (#522)
+        cameras=[row[0] for row in db.execute("SELECT id FROM cameras c WHERE EXISTS (SELECT 1 FROM ai_tracks t WHERE t.camera_id=c.id)")]
     for camera_id in cameras:
         try:
             with connect() as db:
