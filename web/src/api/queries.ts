@@ -1,4 +1,4 @@
-import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useMutation, useQuery, useQueryClient, type QueryClient, type QueryKey } from "@tanstack/react-query";
 import { api, ApiError } from "./client";
 import { forgetThisDevice } from "@/features/alarms/pushDevice";
 import { isNativeApp } from "@/native/platform";
@@ -100,6 +100,15 @@ export function useCreateAdministrator() {
   });
 }
 
+/** Drop everything the interface fetched for a session, keeping only what a sign-in screen needs and marking the session gone: on signing
+ *  out and when a session expires alike. An expiry used to clear only the session, so the next person to sign in on the same tab was drawn
+ *  the previous person's cached cameras, alarms and exports first (#538). */
+export function dropSessionData(client: QueryClient, session: QueryKey = keys.me, keep: readonly unknown[] = [keys.setup[0], keys.branding[0], keys.oidc[0]]) {
+  const kept = new Set<unknown>([...keep, session[0]]);
+  client.removeQueries({ predicate: query => !kept.has(query.queryKey[0]) });
+  client.setQueryData(session, null);
+}
+
 export function useSignOut() {
   const client = useQueryClient();
   return useMutation({
@@ -109,12 +118,7 @@ export function useSignOut() {
       if (isNativeApp()) await Promise.all([disableNativePush().catch(() => undefined), forgetThisPhone().catch(() => undefined)]);
       return api<void>("/api/auth/logout", { method: "POST" });
     },
-    onSettled: () => {
-      // Drop everything that belonged to the session; keep what the sign-in screen needs.
-      const keep = new Set<unknown>([keys.setup[0], keys.branding[0], keys.oidc[0], keys.me[0]]);
-      client.removeQueries({ predicate: query => !keep.has(query.queryKey[0]) });
-      client.setQueryData(keys.me, null);
-    },
+    onSettled: () => dropSessionData(client),
   });
 }
 
