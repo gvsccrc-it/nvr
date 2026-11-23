@@ -20,7 +20,7 @@ import uuid
 import weakref
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Awaitable, Callable, Iterable
 
 from . import acceleration, copies_budget
 from .access import may_view_camera
@@ -399,7 +399,11 @@ def _sweep(root: Path) -> None:
             pass
 
 
-async def masked_recording(source: Path, zones: list[dict[str, float]]) -> Path:
+class RenderAbandoned(Exception):
+    """The request for a rendering went away while it waited for its turn: it is not started (#490)."""
+
+
+async def masked_recording(source: Path, zones: list[dict[str, float]], wanted: Callable[[], Awaitable[bool]] | None = None) -> Path:
     """A masked copy of a recording, rendered once per recording and mask and kept for a day (with no zones: the same recording converted to H.264,
     for a browser that cannot play its H.265). Renders are few at a time, so scrubbing through footage cannot exhaust the processor, and use the
     graphics chip when there is one, falling back to software if it fails."""
@@ -418,6 +422,8 @@ async def masked_recording(source: Path, zones: list[dict[str, float]]) -> Path:
             if _render_slots is None:
                 _render_slots = asyncio.Semaphore(MAX_CONCURRENT_RENDERS)
             async with _render_slots:
+                if wanted is not None and not await wanted():
+                    raise RenderAbandoned()  # Whoever asked has gone: nobody else's turn is spent on it
                 await asyncio.to_thread(_sweep, root)
                 # Copies share one disk budget with exports and case packages: older copies make way for this one (#362).
                 await asyncio.to_thread(copies_budget.make_room, source.stat().st_size, refuse=False)

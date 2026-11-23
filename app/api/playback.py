@@ -3,19 +3,19 @@ from __future__ import annotations
 
 import asyncio
 import shutil
-import subprocess
 import json
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Annotated, Literal
+from typing import Annotated, AsyncIterator, Literal
 
-from fastapi import APIRouter, HTTPException, Query, Response
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 from pydantic import BaseModel, Field, model_validator
 
 from app import console
-from app import ai_coverage, clip_labels, external_events, privacy, track_privacy, viewing_audit
+from app import ai_coverage, clip_labels, external_events, media_gates, privacy, track_privacy, viewing_audit
 from app.clock import canon
 from app.coverage import timeline as coverage_timeline
 from app.principal import CurrentUser, requires_scope
@@ -118,12 +118,16 @@ def _segment_and_zones(columns: str, segment_id: int, camera_id: str, user, unma
 async def play_segment(
     camera_id: str,
     segment_id: int,
+    request: Request,
     user: CurrentUser,
     unmasked: Annotated[bool, Query()] = False,
     compat: Annotated[Literal["h264"] | None, Query()] = None,
 ) -> FileResponse:
-    """The recording. ``compat=h264`` asks for it converted to H.264, for a browser that cannot play the camera's H.265."""
+    """The recording. ``compat=h264`` asks for it converted to H.264, for a browser that cannot play the camera's H.265; footage that is
+    H.264 already is served as it is (#490)."""
     row, zones = await asyncio.to_thread(_segment_and_zones, "relative_path,starts_at", segment_id, camera_id, user, unmasked)
+    if compat and not zones and await asyncio.to_thread(_records_h264, camera_id):
+        compat = None
     from app.storage import recording_file_path
     try:
         path = await run_in_threadpool(recording_file_path, row["relative_path"])  # Footage on a cold tier may have to be fetched: not on the event loop
@@ -135,8 +139,17 @@ async def play_segment(
         raise HTTPException(status_code=410, detail="Recorded interval is unavailable") from None
     if zones or compat:
         # Recordings on disk are not masked: deliver a masked rendering, never the file itself. (Or, for ``compat``, the same picture as H.264.)
+        # Each person may have a few being prepared or waiting, and one whose requester has gone is not started (#490).
+        async def wanted() -> bool:
+            return not await request.is_disconnected()
+
         try:
-            masked = await privacy.masked_recording(path, zones)
+            async with media_gates.CONVERSIONS.admit(int(user["id"])):
+                masked = await privacy.masked_recording(path, zones, wanted)
+        except media_gates.Busy as exc:
+            raise HTTPException(status_code=429, detail=str(exc), headers={"Retry-After": str(media_gates.RETRY_AFTER_SECONDS)}) from exc
+        except privacy.RenderAbandoned as exc:
+            raise HTTPException(status_code=503, detail="The request was abandoned before the recording was prepared") from exc
         except (OSError, RuntimeError, asyncio.TimeoutError) as exc:
             raise HTTPException(status_code=503, detail="The masked recording could not be prepared") from exc
         finally:
@@ -177,13 +190,14 @@ async def snapshot_segment(
     offset = max(0.0, (at - start).total_seconds())
     process = None
     try:
-        process = await asyncio.create_subprocess_exec(
-            shutil.which("ffmpeg"), "-nostdin", "-hide_banner", "-loglevel", "error", "-ss", f"{offset:.3f}",
-            "-i", str(path), "-frames:v", "1", "-vf", privacy.with_mask("scale=1280:-2:force_original_aspect_ratio=decrease", zones),
-            "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1",
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
-        )
-        image, _ = await run_to_end(process, timeout=15)
+        async with _process_place(user):  # A few at a time, in all and for each person (#490)
+            process = await asyncio.create_subprocess_exec(
+                shutil.which("ffmpeg"), "-nostdin", "-hide_banner", "-loglevel", "error", "-ss", f"{offset:.3f}",
+                "-i", str(path), "-frames:v", "1", "-vf", privacy.with_mask("scale=1280:-2:force_original_aspect_ratio=decrease", zones),
+                "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            )
+            image, _ = await run_to_end(process, timeout=15)
         if process.returncode != 0 or not image.startswith(b"\xff\xd8"):
             raise HTTPException(status_code=422, detail="A snapshot could not be extracted from this interval")
         source_time = at.isoformat()
@@ -205,18 +219,23 @@ async def snapshot_segment(
 
 @router.get("/api/cameras/{camera_id}/segments/{segment_id}/frame-neighbor")
 @requires_scope("media")
-def playback_frame_neighbor(
+async def playback_frame_neighbor(
     camera_id: str,
     segment_id: int,
     at: datetime,
     direction: Literal["previous", "next"],
-    _: CurrentUser,
+    user: CurrentUser,
 ) -> dict[str, str]:
-    """Return an adjacent decoded video frame timestamp from a protected recording."""
+    """Return an adjacent decoded video frame timestamp from a protected recording. Asynchronous, so its ffprobe holds no server thread,
+    and run a few at a time with snapshots (#490)."""
     if at.tzinfo is None:
         raise HTTPException(status_code=422, detail="Frame time must include a timezone")
-    with connect() as db:
-        row = db.execute("SELECT relative_path,starts_at,ends_at FROM recording_segments WHERE id=? AND camera_id=?", (segment_id, camera_id)).fetchone()
+
+    def read():
+        with connect() as db:
+            return db.execute("SELECT relative_path,starts_at,ends_at FROM recording_segments WHERE id=? AND camera_id=?", (segment_id, camera_id)).fetchone()
+
+    row = await asyncio.to_thread(read)
     if row is None:
         raise HTTPException(status_code=404, detail="Recorded interval is unavailable")
     start = datetime.fromisoformat(row["starts_at"].replace("Z", "+00:00")).astimezone(timezone.utc)
@@ -228,7 +247,7 @@ def playback_frame_neighbor(
         raise HTTPException(status_code=503, detail="Frame stepping is unavailable")
     from app.storage import recording_file_path
     try:
-        path = recording_file_path(row["relative_path"])
+        path = await run_in_threadpool(recording_file_path, row["relative_path"])
     except (OSError, ValueError):
         raise HTTPException(status_code=410, detail="Recorded interval is unavailable") from None
     if not path.is_file():
@@ -239,17 +258,18 @@ def playback_frame_neighbor(
         window_start = max(0.0, offset - 2.0) if direction == "previous" else offset
         read_duration = offset - window_start + 2.0 if direction == "previous" else 2.0
         try:
-            result = subprocess.run(
-                [shutil.which("ffprobe"), "-v", "error", "-read_intervals", f"{window_start:.3f}%+{read_duration:.3f}",
-                 "-select_streams", "v:0", "-show_frames", "-show_entries", "frame=best_effort_timestamp_time", "-of", "json", str(path)],
-                capture_output=True, text=True, timeout=12, check=False,
-            )
-        except subprocess.TimeoutExpired as exc:
+            async with _process_place(user):
+                process = await asyncio.create_subprocess_exec(
+                    shutil.which("ffprobe"), "-v", "error", "-read_intervals", f"{window_start:.3f}%+{read_duration:.3f}",
+                    "-select_streams", "v:0", "-show_frames", "-show_entries", "frame=best_effort_timestamp_time", "-of", "json", str(path),
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+                output, _ = await run_to_end(process, timeout=12)
+        except asyncio.TimeoutError as exc:
             raise HTTPException(status_code=503, detail="Frame timestamp extraction timed out") from exc
-        if result.returncode:
+        if process.returncode:
             raise HTTPException(status_code=422, detail="Frame timestamps could not be read")
         try:
-            frames = json.loads(result.stdout).get("frames", [])
+            frames = json.loads(output or b"{}").get("frames", [])
             frame_times = sorted({start.timestamp() + float(frame["best_effort_timestamp_time"]) for frame in frames
                                   if frame.get("best_effort_timestamp_time") is not None})
         except (ValueError, TypeError, json.JSONDecodeError) as exc:
@@ -263,3 +283,20 @@ def playback_frame_neighbor(
         return {"at": datetime.fromtimestamp(selected, timezone.utc).isoformat()}
     finally:
         release_playback(path)
+
+
+@asynccontextmanager
+async def _process_place(user) -> AsyncIterator[None]:
+    """A place among the snapshots and frame steps running now (``media_gates.PROCESSES``), or 429 with Retry-After."""
+    try:
+        async with media_gates.PROCESSES.admit(int(user["id"])):
+            yield
+    except media_gates.Busy as exc:
+        raise HTTPException(status_code=429, detail=str(exc), headers={"Retry-After": str(media_gates.RETRY_AFTER_SECONDS)}) from exc
+
+
+def _records_h264(camera_id: str) -> bool:
+    """Whether the camera records H.264, which every browser plays: ``compat=h264`` then needs no conversion."""
+    with connect() as db:
+        row = db.execute("SELECT video_codec FROM cameras WHERE id=?", (camera_id,)).fetchone()
+    return bool(row) and str(row["video_codec"] or "").lower() in {"h264", "avc", "avc1"}
