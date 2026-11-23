@@ -14,7 +14,7 @@ snapshot stream just because a camera sends H.265; that only happens if both pas
 
 ## Recorded video
 
-Playback of an H.265 recording asks the server for an H.264 copy (`?compat=h264`) when the browser cannot play H.265.
+Playback of an H.265 recording asks the server for an H.264 copy (`?compat=h264`) when the browser cannot play H.265. A camera that records H.264 already is served its recording as it is, whoever asks for `compat=h264` (#490).
 The copy is cached next to the privacy-masked renders and removed with them.
 
 ## Hardware acceleration
