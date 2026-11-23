@@ -92,7 +92,7 @@ def _live(out: _Output) -> None:
     viewers, listeners = live_counts()
     for name, help_text, value in (
         ("nvr_live_viewers", "Live video streams being delivered.", viewers),
-        ("nvr_live_viewer_slots", "Live video streams the NVR allows at once.", MAX_LIVE_VIEWERS),
+        ("nvr_live_viewer_slots", "Live tiles one person, API token or video wall may have open at once.", MAX_LIVE_VIEWERS),
         ("nvr_live_audio_listeners", "Live audio listeners.", listeners),
         ("nvr_live_audio_listener_slots", "Live audio listeners allowed at once.", MAX_LIVE_AUDIO_LISTENERS),
     ):

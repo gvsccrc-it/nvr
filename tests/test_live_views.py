@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 from unittest.mock import patch
 
 from app.credentials import encrypt
-from app.api.live_media import _acquire_live_view, _release_live_audio, _release_live_view, live_camera, live_camera_audio
+from app.api.live_media import _acquire_live_view, _release_live_audio, _release_live_view, identity_of, live_camera, live_camera_audio
 from app.main import app
 from app.principal import current_user
 from app.store import connect, initialize
@@ -166,9 +166,11 @@ class LiveViewTests(unittest.TestCase):
                     (camera_id, f"Audio camera {index + 3}", encrypt(f"rtsp://camera.local/audio-{index + 3}")),
                 )
 
+        # The person's own share of live view (#487: each person has 16; others' places no longer count against it)
+        identity = identity_of(self.active_user)
         reservations = [f"occupied-{index}" for index in range(15)]
         for camera_id in reservations:
-            self.assertTrue(_acquire_live_view(camera_id))
+            self.assertTrue(_acquire_live_view(camera_id, identity))
         video_acquired = False
         audio_acquired = 0
         try:
@@ -188,11 +190,11 @@ class LiveViewTests(unittest.TestCase):
                 self.assertEqual(bounded.exception.status_code, 503)
         finally:
             if video_acquired:
-                _release_live_view(self.camera)
+                _release_live_view(self.camera, identity, mjpeg=True)
             for _ in range(audio_acquired):
                 _release_live_audio()
             for camera_id in reservations:
-                _release_live_view(camera_id)
+                _release_live_view(camera_id, identity)
 
 if __name__ == "__main__":
     unittest.main()

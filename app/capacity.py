@@ -7,10 +7,11 @@ plan starts from its own cameras, and otherwise from the stated defaults below, 
 - **Duty**: the share of the day a camera records: 1 for continuous recording, ``motion_share`` for motion recording (or the share measured here), 0 for disabled.
 - **Disk** = bitrate / 8 x 86 400 s x duty x retention days x cameras, then x ``overhead`` (container and filesystem), and x ``headroom`` for the recommended size.
 - **Write speed**: average = sum of bitrate x duty; peak = sum of bitrate of the cameras that record (all recording at once).
-- **Network in**: every camera stays connected whether or not it is recording, so the sum of bitrates. **Network out**: viewers x tiles each (no more than there are cameras) x average
-  bitrate x ``live_share`` (Live grids use the low-quality stream).
+- **Network in**: every camera stays connected whether or not it is recording, so the sum of bitrates. **Network out**: viewers x tiles each (no more than there are cameras,
+  nor than the 16 tiles one person may have open, ``NVR_LIVE_TILES_PER_PERSON``) x average bitrate x ``live_share`` (Live grids use the low-quality stream). Viewers of one
+  camera share one camera connection: the server opens at most 32 distinct camera streams for viewers (``NVR_LIVE_STREAMS``, #487).
 - **Processing**: recording and live viewing copy the stream (cores per Mbps); H.265 shown to a browser that cannot play it is converted (cores per converted stream, scaled by
-  its size); AI analysis costs a decoded frame and an inference per analysed frame, on the processor or, where there is one, an accelerator.
+  its size; the server itself runs at most ``NVR_LIVE_CONVERSIONS``, 6, at once, so this is an upper bound); AI analysis costs a decoded frame and an inference per analysed frame, on the processor or, where there is one, an accelerator.
 """
 from __future__ import annotations
 
@@ -18,6 +19,8 @@ import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
+
+from .viewing import MAX_LIVE_VIEWERS
 
 DISCLAIMER = ("This is an estimate, not a certification of capacity. Real footage varies with the scene, the camera's settings and the hardware; measure with a few cameras "
               "before buying for many, and keep headroom.")
@@ -157,7 +160,8 @@ def _plan_line(row: Row, values: dict[str, float], used: set[str], totals: _Tota
 def _processor_load(totals: _Totals, cameras: int, viewers: int, tiles_per_viewer: int, values: dict[str, float]) -> dict[str, float]:
     """What viewing, recording, H.265 conversion and AI analysis ask of the processor, and the network going out to viewers."""
     average_kbps = totals.ingest_kbps / cameras if cameras else 0.0
-    live_streams = viewers * min(tiles_per_viewer, cameras)
+    # Each viewer has at most MAX_LIVE_VIEWERS tiles (#487), and each gets its own copy of the video: what goes out grows with viewers x tiles.
+    live_streams = viewers * min(tiles_per_viewer, cameras, MAX_LIVE_VIEWERS)
     egress_kbps = live_streams * average_kbps * values["live_share"]
     hevc_fraction = totals.hevc_cameras / cameras if cameras else 0.0
     converted = live_streams * hevc_fraction * values["hevc_transcode_share"]

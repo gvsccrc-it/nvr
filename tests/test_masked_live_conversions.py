@@ -100,7 +100,7 @@ class LimitTests(unittest.TestCase):
                 await live_media._acquire_transcode(key, hub)
                 join(hub, number)  # Watched
             variant = types.SimpleNamespace(transcode=False, video_filter=MASK)
-            with mock.patch.object(live_media, "_acquire_live_view", return_value=True), mock.patch.object(live_media, "_release_live_view"):
+            with mock.patch.object(live_media, "_admit_live_view", return_value=None), mock.patch.object(live_media, "_release_live_view"):
                 return await live_media._take_places("camera-new", variant, ("camera-new", "sub", "video", "masked", "x"), hub)
 
         refusal = asyncio.run(scenario())

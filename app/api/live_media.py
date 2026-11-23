@@ -13,7 +13,7 @@ from typing import Annotated, Any, Literal
 from fastapi import APIRouter, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 
-from app.viewing import MAX_LIVE_AUDIO_LISTENERS, MAX_LIVE_TRANSCODES, MAX_LIVE_VIEWERS
+from app.viewing import MAX_LIVE_AUDIO_LISTENERS, MAX_LIVE_STREAMS, MAX_LIVE_TRANSCODES, MAX_LIVE_VIEWERS, MAX_LIVE_VIEWERS_WALL, MAX_MJPEG, MAX_MJPEG_EACH
 from app import live_variant
 from app.live_hub import LiveHub, Viewer
 from app.processes import end_process
@@ -84,15 +84,75 @@ def _release_transcode(key: tuple[str, ...]) -> None:
                 del _transcodes[key]
 
 
-def _acquire_live_view(camera_id: str) -> bool:
-    global _live_view_count
+# Live-view places held, by identity and by stream (#487). A place is (identity, stream key or None for MJPEG).
+_places_by_identity: dict[tuple[str, str], int] = {}
+_viewers_by_stream: dict[tuple[str, ...], int] = {}
+_mjpeg_by_identity: dict[tuple[str, str], int] = {}
+_mjpeg_count = 0
+
+
+def identity_of(user: Any) -> tuple[str, str]:
+    """Whose share of live view a viewer uses: a video wall, an API token and a person signed in are each their own (#487)."""
+    if getattr(user, "wall", False):
+        return ("wall", str(user.token_id))
+    if getattr(user, "token_id", None):
+        return ("token", str(user.token_id))
+    return ("person", str(user["id"]))
+
+
+def _share_of(identity: tuple[str, str]) -> int:
+    return MAX_LIVE_VIEWERS_WALL if identity[0] == "wall" else MAX_LIVE_VIEWERS
+
+
+def _refusal_of(identity: tuple[str, str], stream_key: tuple[str, ...], mjpeg: bool) -> str | None:
+    """Why this identity may not have one more live tile now, or None. Called under the lock."""
+    share = _share_of(identity)
+    if _places_by_identity.get(identity, 0) >= share:
+        who = {"wall": "this video wall has", "token": "this API token has"}.get(identity[0], "you have")
+        return f"Live view limit reached: {who} {share} live tiles open already; close one and retry"
+    if mjpeg:  # A compatibility (MJPEG) tile: an encode of its own
+        if _mjpeg_by_identity.get(identity, 0) >= MAX_MJPEG_EACH:
+            return f"Compatibility video limit reached: {MAX_MJPEG_EACH} compatibility-mode tiles are open for you already; close one and retry"
+        if _mjpeg_count >= MAX_MJPEG:
+            return f"Compatibility video limit reached: the server is encoding {MAX_MJPEG} compatibility-mode tiles, the most it allows; try again shortly"
+    elif stream_key not in _viewers_by_stream and len(_viewers_by_stream) >= MAX_LIVE_STREAMS:
+        # A stream someone is already watching costs nothing new; a new one needs room among the server's streams
+        return f"Server live view limit reached: {MAX_LIVE_STREAMS} camera streams are open, the most this server allows; try again shortly"
+    return None
+
+
+def _acquire_live_view(camera_id: str, identity: tuple[str, str] = ("person", "?"), stream_key: tuple[str, ...] | None = None, mjpeg: bool = False) -> bool:
+    """Whether a live-view place was taken (``_admit_live_view`` says why not)."""
+    return _admit_live_view(camera_id, identity, stream_key, mjpeg) is None
+
+
+def _admit_live_view(camera_id: str, identity: tuple[str, str] = ("person", "?"), stream_key: tuple[str, ...] | None = None, mjpeg: bool = False) -> str | None:
+    """A live-view place, or why there is none (#487). ``stream_key`` is the shared stream a WebSocket viewer joins (the camera itself when
+    not given); ``mjpeg`` a compatibility tile, which shares nothing."""
+    global _live_view_count, _mjpeg_count
+    key = stream_key or (camera_id,)
     with _live_view_lock:
-        if _live_view_count >= MAX_LIVE_VIEWERS:
-            return False
+        refusal = _refusal_of(identity, key, mjpeg)
+        if refusal is not None:
+            return refusal
         _live_view_count += 1
+        _places_by_identity[identity] = _places_by_identity.get(identity, 0) + 1
+        if mjpeg:
+            _mjpeg_by_identity[identity] = _mjpeg_by_identity.get(identity, 0) + 1
+            _mjpeg_count += 1
+        else:
+            _viewers_by_stream[key] = _viewers_by_stream.get(key, 0) + 1
         status_data = _live_camera_status.setdefault(camera_id, {"viewers": 0, "last_frame_at": None})
         status_data["viewers"] = int(status_data["viewers"]) + 1
-        return True
+        return None
+
+
+def _take_one(table: dict, key: Any) -> None:
+    left = table.get(key, 0) - 1
+    if left > 0:
+        table[key] = left
+    else:
+        table.pop(key, None)
 
 
 def mark_camera_fresh(camera_id: str) -> None:
@@ -104,10 +164,16 @@ def mark_camera_fresh(camera_id: str) -> None:
             status_data["last_frame_at"] = datetime.now(timezone.utc).isoformat()
 
 
-def _release_live_view(camera_id: str) -> None:
-    global _live_view_count
+def _release_live_view(camera_id: str, identity: tuple[str, str] = ("person", "?"), stream_key: tuple[str, ...] | None = None, mjpeg: bool = False) -> None:
+    global _live_view_count, _mjpeg_count
     with _live_view_lock:
         _live_view_count = max(0, _live_view_count - 1)
+        _take_one(_places_by_identity, identity)
+        if mjpeg:
+            _mjpeg_count = max(0, _mjpeg_count - 1)
+            _take_one(_mjpeg_by_identity, identity)
+        else:
+            _take_one(_viewers_by_stream, stream_key or (camera_id,))
         status_data = _live_camera_status.get(camera_id)
         if status_data:
             status_data["viewers"] = max(0, int(status_data["viewers"]) - 1)
@@ -311,13 +377,15 @@ def live_camera(
     guard = privacy.StreamGuard(user, camera_id, unmasked)
     if not shutil.which("ffmpeg"):
         raise HTTPException(status_code=503, detail="Live video transcoding is unavailable")
-    if not _acquire_live_view(camera_id):
-        raise HTTPException(status_code=503, detail="All live-view slots are in use; close another view and retry")
+    identity = identity_of(user)
+    refusal = _admit_live_view(camera_id, identity, mjpeg=True)  # A compatibility tile: its own encode, limited per person and in all (#487)
+    if refusal is not None:
+        raise HTTPException(status_code=503, detail=refusal)
     source = decrypt(camera["live_substream_url_ciphertext"] or camera["stream_url_ciphertext"]) if quality == "low" else decrypt(camera["stream_url_ciphertext"])
     try:
         safe_stream_url(source)
     except ValueError as exc:
-        _release_live_view(camera_id)
+        _release_live_view(camera_id, identity, mjpeg=True)
         raise HTTPException(status_code=503, detail="Camera stream configuration is invalid") from exc
 
     async def stream():
@@ -348,7 +416,7 @@ def live_camera(
                 upcoming.cancel()  # Inside the frame reader, which ends FFmpeg as it unwinds
                 await asyncio.gather(upcoming, return_exceptions=True)
             await frames.aclose()
-            _release_live_view(camera_id)
+            _release_live_view(camera_id, identity, mjpeg=True)
             watching.close()
 
     return StreamingResponse(stream(), media_type="multipart/x-mixed-replace; boundary=frame", headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
@@ -435,15 +503,16 @@ def _source_for(camera: Any, variant: Any, fallback: str) -> "str | _Refusal":
     return source
 
 
-async def _take_places(camera_id: str, variant: Any, conversion_key: tuple[str, ...], hub: LiveHub) -> _Refusal | None:
+async def _take_places(camera_id: str, variant: Any, conversion_key: tuple[str, ...], hub: LiveHub, identity: tuple[str, str] = ("person", "?")) -> _Refusal | None:
     """A live-view place for this viewer and, for a converted stream, a conversion place; None when both are taken. Nothing is kept when
-    either is refused."""
-    if not _acquire_live_view(camera_id):
-        return _Refusal(CLOSE_BUSY, {"type": "busy", "detail": "All live-view slots are in use; close another view and retry"})
+    either is refused. The refusal says which limit and whose (#487)."""
+    refusal = _admit_live_view(camera_id, identity, conversion_key)
+    if refusal is not None:
+        return _Refusal(CLOSE_BUSY, {"type": "busy", "detail": refusal})
     # A masked stream is re-encoded as an H.265 conversion is, and shares its limit (#488). At the limit the viewer is refused: a masked camera
     # is never shown unmasked to get round it.
     if _converts(variant) and not await _acquire_transcode(conversion_key, hub):
-        _release_live_view(camera_id)
+        _release_live_view(camera_id, identity, conversion_key)
         return _Refusal(CLOSE_BUSY, {"type": "busy", "detail": "All video conversion slots are in use; close another converted or masked view and retry"})
     return None
 
@@ -462,6 +531,8 @@ class _LiveViewer:
     include_audio: bool
     receiver: asyncio.Task
     getter: asyncio.Task | None = None
+    identity: tuple[str, str] = ("person", "?")  # Whose live-view share this place is (#487)
+    stream_key: tuple[str, ...] | None = None
 
     def offer_audio(self, has_audio: bool) -> None:
         """Audio is offered only when the stream really carries a track."""
@@ -488,7 +559,7 @@ class _LiveViewer:
             _release_live_audio()
         if self.transcode_key is not None:
             _release_transcode(self.transcode_key)
-        _release_live_view(self.camera_id)
+        _release_live_view(self.camera_id, self.identity, self.stream_key)
 
 
 async def _start_viewing(session: _LiveViewer, variant: Any, fallback: str) -> bool:
@@ -625,7 +696,8 @@ async def live_stream(
         return
     hub: LiveHub = websocket.app.state.live_hub
     conversion_key = live_variant.key_of(camera_id, variant, source)  # A conversion is counted by the stream that does it
-    refused = await _take_places(camera_id, variant, conversion_key, hub)
+    identity = identity_of(principal)
+    refused = await _take_places(camera_id, variant, conversion_key, hub, identity)
     if refused is not None:
         await _refuse(websocket, refused.code, refused.message)
         return
@@ -641,7 +713,7 @@ async def live_stream(
     wait: dict[str, object] = {"camera_id": camera_id, "at": datetime.now(timezone.utc).isoformat(), "profile": variant.profile, "mode": variant.mode,
                                "joined_running": joined_running}
     session = _LiveViewer(websocket, camera_id, hub, stream, viewer, conversion_key if _converts(variant) else None, listening, variant.include_audio,
-                          asyncio.create_task(websocket.receive()))
+                          asyncio.create_task(websocket.receive()), identity=identity, stream_key=conversion_key)
     watching = viewing_audit.LiveSession(principal.id, camera_id, quality)
     try:
         if not await _start_viewing(session, variant, fallback):
