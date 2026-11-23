@@ -18,7 +18,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 COPY requirements.txt .
+# The base image's own packages are upgraded too, so a rebuild (weekly, #548) carries Debian's security fixes, not only those of the packages installed here
 RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
     && apt-get install -y --no-install-recommends ffmpeg curl ca-certificates smartmontools \
     && rm -rf /var/lib/apt/lists/* \
     && pip install --no-cache-dir --require-hashes -r requirements.txt \

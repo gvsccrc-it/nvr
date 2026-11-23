@@ -73,6 +73,50 @@ class ConcurrencyTests(unittest.TestCase):
         self.assertRegex(script, r'if \[ "\$newest" = "\$GITHUB_SHA" \]; then\n\s+docker push ghcr.io/gvsccrc-it/nvr:edge')
 
 
+class SignedImageTests(unittest.TestCase):
+    """#548: what is published is signed, recorded and scanned; releases are tagged by digest; a weekly rebuild picks up system fixes."""
+
+    def test_the_build_scans_the_images_system_packages_with_a_checked_scanner(self):
+        steps = {step.get("name"): step.get("run", "") for step in workflow()["jobs"]["build"]["steps"]}
+        install = steps["Install Trivy"]
+        self.assertRegex(install, r"releases/download/v[\d.]+/trivy_[\d.]+_Linux-64bit\.tar\.gz")
+        self.assertRegex(install, r"echo '[0-9a-f]{64}  /tmp/trivy\.tgz' \| sha256sum -c -")
+        scan = steps["Scan the image's system packages"]
+        self.assertIn("--pkg-types os --severity HIGH,CRITICAL --format json", scan)
+        self.assertIn("check-vulnerabilities.py --image /tmp/nvr-image-scan.json", scan)
+        names = list(steps)
+        self.assertLess(names.index("Build container image"), names.index("Scan the image's system packages"))
+
+    def test_main_is_rebuilt_weekly_and_published_like_a_merge(self):
+        flow = workflow()
+        triggers = flow.get("on") or flow.get(True)  # YAML 1.1 reads a bare "on" as true
+        self.assertEqual(len(triggers["schedule"]), 1)
+        self.assertIn("apt-get upgrade -y", DOCKERFILE)  # Otherwise a rebuild would not carry the base image's own fixes
+        publish = flow["jobs"]["publish"]
+        self.assertIn("github.event_name == 'schedule'", publish["if"])
+        script = next(step["run"] for step in publish["steps"] if step.get("name") == "Publish the tested image")
+        self.assertIn('if [ "$EVENT" != schedule ]; then', script)  # sha-<commit> stays the image tested at merge
+
+    def test_what_is_published_is_signed_and_attested_by_its_digest(self):
+        publish = workflow()["jobs"]["publish"]
+        self.assertEqual((publish["permissions"]["id-token"], publish["permissions"]["attestations"]), ("write", "write"))
+        steps = {step.get("name"): step for step in publish["steps"]}
+        self.assertIn('cosign sign --yes "ghcr.io/gvsccrc-it/nvr@$DIGEST"', steps["Sign the image"]["run"])
+        for name in ("Record how the image was built", "Record what is in the image"):
+            self.assertEqual(steps[name]["with"]["subject-digest"], "${{ steps.publish.outputs.digest }}")
+            self.assertTrue(steps[name]["with"]["push-to-registry"])
+        for step in publish["steps"]:
+            if "uses" in step:
+                self.assertRegex(step["uses"], r"@[0-9a-f]{40}$", step["uses"])
+
+    def test_a_release_verifies_the_signature_and_tags_the_digest_it_names(self):
+        release = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+        self.assertIn('cosign verify "ghcr.io/gvsccrc-it/nvr@$digest"', release)
+        self.assertIn('imagetools create --tag "ghcr.io/gvsccrc-it/nvr:$version" "ghcr.io/gvsccrc-it/nvr@$digest"', release)
+        self.assertIn('"digest": "%s"', release)
+        self.assertLess(release.index("cosign verify"), release.index("imagetools create"))
+
+
 class DockerignoreTests(unittest.TestCase):
     def test_compiled_python_is_left_out_at_every_depth(self):
         patterns = [line.strip() for line in (ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines() if line.strip() and not line.startswith("#")]

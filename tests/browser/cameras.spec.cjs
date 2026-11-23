@@ -387,6 +387,12 @@ test("200-camera filtering and selection record browser measurements without row
   const errors = { page: 0, console: 0, failed_requests: 0, http_errors: 0 };
   const details = [];
   await signInNext(page); // the signed-out probe of /api/auth/me is expected to fail
+  // Requests the Live page started before the journey leaves it for Cameras: leaving cancels any still in flight (its camera groups, its views, a
+  // refresh on an interval), and that is Live being closed, not a failure of the Cameras workspace. Only those, and only when cancelled, are not
+  // counted; every request Cameras makes, and any other error for one of Live's, still counts.
+  const startedOnLive = new Set();
+  let onLive = true;
+  page.on("request", request => { if (onLive) startedOnLive.add(request); });
   page.on("pageerror", error => { errors.page += 1; details.push(`page: ${error.message}`); });
   page.on("console", message => { if (message.type() === "error") { errors.console += 1; details.push(`console: ${message.text()}`); } });
   page.on("requestfailed", request => {
@@ -395,14 +401,14 @@ test("200-camera filtering and selection record browser measurements without row
     // The sign-in page's own sign-in-options probe can still be in flight when signing in replaces the page, and the browser then cancels it. That is
     // not a failure of the Cameras workspace; any other failed request, and any other error for this one, still counts.
     if (pathname === "/api/auth/oidc/status" && reason === "net::ERR_ABORTED") return;
-    // Likewise Live's camera-groups read can still be in flight when the journey leaves Live for Cameras, and the page leaving cancels it.
-    if (pathname === "/api/camera-groups" && reason === "net::ERR_ABORTED") return;
+    if (reason === "net::ERR_ABORTED" && startedOnLive.has(request)) return;
     errors.failed_requests += 1;
     details.push(`request failed ${pathname}: ${reason}`);
   });
   page.on("response", response => { if (response.status() >= 400) { errors.http_errors += 1; details.push(`HTTP ${response.status()} ${new URL(response.url()).pathname}`); } });
   // Live's own reads (camera groups, views, ...) can still be in flight here, and leaving Live cancels them: let them finish so that is not counted as a failure of Cameras.
   await page.waitForLoadState("networkidle");
+  onLive = false;
   await openCameras(page);
   await expect(inventory(page).locator("tbody tr")).toHaveCount(200);
   await expect(page.getByText("Select a camera to view settings.")).toBeVisible();

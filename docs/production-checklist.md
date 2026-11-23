@@ -32,6 +32,7 @@ Addresses below are examples from the documentation ranges (`192.0.2.0/24`, `198
 ## 3. The image
 
 - [ ] **Run a released version, never `edge`.** `compose.yaml` names one (`image: ghcr.io/gvsccrc-it/nvr:X.Y.Z`). `edge` is the latest merge to `main`, for a test machine only (#540). To pin harder, use the digest: `image: ghcr.io/gvsccrc-it/nvr:X.Y.Z@sha256:…`.
+- [ ] **Check the image's signature before running it** (`cosign verify`, the command in [guided-updates.md](guided-updates.md), "Checking an image before you run it"). The Updates page's steps name a release by its digest and show the command.
 - [ ] **Write down the image in use before every upgrade**: `docker compose images nvr`. It is the way back. Keep it with the upgrade notes, off the machine.
 
 ## 4. Backups

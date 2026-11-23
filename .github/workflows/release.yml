@@ -38,23 +38,35 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Install cosign
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+
       - name: Publish the tested image under the version
-        # The release is the image CI built and tested for this commit of main (published there as sha-<commit>), given the version tag:
-        # never a new build (#385).
+        id: image
+        # The release is the image CI built, tested and signed for this commit of main (published there as sha-<commit>), given the version
+        # tag: never a new build (#385). The tag is resolved to its digest once, the signature CI made is checked on that digest, and the
+        # version tag is given to the digest, not to a tag that could have moved meanwhile (#548).
         run: |
           short="$(echo "$GITHUB_SHA" | cut -c1-7)"
           version="${GITHUB_REF_NAME#v}"
-          if ! docker buildx imagetools inspect "ghcr.io/gvsccrc-it/nvr:sha-$short" >/dev/null; then
+          if ! manifest="$(docker buildx imagetools inspect "ghcr.io/gvsccrc-it/nvr:sha-$short" --format '{{json .Manifest}}')"; then
             echo "No tested image ghcr.io/gvsccrc-it/nvr:sha-$short yet: wait for CI on main to finish for this commit, then re-run this workflow."
             exit 1
           fi
-          docker buildx imagetools create --tag "ghcr.io/gvsccrc-it/nvr:$version" "ghcr.io/gvsccrc-it/nvr:sha-$short"
+          digest="$(echo "$manifest" | python3 -c 'import json,sys; print(json.load(sys.stdin)["digest"])')"
+          cosign verify "ghcr.io/gvsccrc-it/nvr@$digest" \
+            --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/ci.yml@refs/heads/main" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com >/dev/null
+          docker buildx imagetools create --tag "ghcr.io/gvsccrc-it/nvr:$version" "ghcr.io/gvsccrc-it/nvr@$digest"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
+          DIGEST: ${{ steps.image.outputs.digest }}
         run: |
           schema="$(PYTHONPATH=. python3 -c 'from app.migrations import latest_version; print(latest_version())')"
           gh api "repos/$GITHUB_REPOSITORY/releases/generate-notes" -f tag_name="$GITHUB_REF_NAME" --jq .body > notes.md
-          printf '\n<!-- nvr-release: {"schema_version": %s} -->\n' "$schema" >> notes.md
+          # The digest goes in the line the NVR reads, so the upgrade steps it shows name the image by it (#548)
+          printf '\n<!-- nvr-release: {"schema_version": %s, "digest": "%s"} -->\n' "$schema" "$DIGEST" >> notes.md
           gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file notes.md
