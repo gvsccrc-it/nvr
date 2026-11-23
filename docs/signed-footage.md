@@ -35,7 +35,16 @@ In **Cameras**, open a camera's **Health & History** tab, choose a range under *
 GET /api/cameras/{camera_id}/footage/verify?start=2026-10-20T00:00:00Z&end=2026-10-21T00:00:00Z
 ```
 
-Ranges are limited to 7 days, and one verification runs at a time (`429` while another runs), because every file in the range is read again. Each segment in the range gets one of these statuses:
+Every file in the range is read again, and footage that has moved to a cold tier is downloaded first, so verifying is limited (#508):
+
+- It needs the `export` scope; a `read`-only token cannot verify.
+- An administrator may check up to 7 days at a time, archived footage included. Anyone else may check up to 24 hours, of footage on the NVR's own disks: archived footage is reported as `not_checked_archived`, which is not a problem and not a proof either.
+- Two verifications run at once, one for each person. The rest wait in line. A person who already has one running or waiting is answered `429`.
+- `POST /api/cameras/{camera_id}/footage/verify/stream` with `{"start", "end"}` answers one JSON object a line: `{"queued": n}` while it waits (1 is next), `{"progress": {"checked", "total"}}` while it runs, then `{"result": ...}`, the same answer as the `GET`. The camera's page uses it and shows where it stands, with **Cancel**.
+- A verification stops between two files when its requester cancels it or goes away (the `GET` too).
+- Each one is in the security log (`footage_verified`: the camera, the range, whether archived footage was read, and the outcome: valid, not valid, cancelled or failed).
+
+Each segment in the range gets one of these statuses:
 
 | Status | Meaning |
 | --- | --- |
@@ -45,6 +54,7 @@ Ranges are limited to 7 days, and one verification runs at a time (`429` while a
 | `pending` | Not hashed yet. A segment whose file cannot be read is retried every 10 minutes; once it closed more than 10 minutes ago and its file is gone, it is `missing`. |
 | `signature_missing` | Matches its hash, but the chain has not been signed in the 10 minutes since: signing is failing or the signatures were removed. |
 | `unavailable` | Marked unavailable by the NVR, for example after a restore without its recordings. |
+| `not_checked_archived` | On a cold tier, and the person verifying is not an administrator: not read, so neither a problem nor proven. |
 | `out_of_order` | Its time range in the index differs from the chain: the footage was moved in time. |
 | `missing` | The chain has it but the file or its index entry is gone, without a recorded deletion. |
 | `altered` | The file no longer matches its hash. |

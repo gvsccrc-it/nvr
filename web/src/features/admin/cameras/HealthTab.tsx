@@ -1,7 +1,8 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router";
-import { api } from "@/api/client";
+import { api, apiLines } from "@/api/client";
+import { useMe } from "@/api/queries";
 import type { Camera } from "@/api/types";
 import { usePlaybackStore } from "@/features/playback/store";
 import { formatRelative } from "@/lib/time";
@@ -34,9 +35,10 @@ const STATUS_LABEL: Record<string, string> = {
   unavailable: "Marked unavailable",
   missing: "Missing: removed without a recorded deletion",
   altered: "Altered: the file no longer matches its hash",
+  not_checked_archived: "Not checked (archived): only an administrator can check footage moved to a cold tier",
 };
 
-const RANGES = [{ label: "Last hour", hours: 1 }, { label: "Last 24 hours", hours: 24 }, { label: "Last 7 days", hours: 24 * 7 }];
+const RANGES = [{ label: "Last hour", hours: 1 }, { label: "Last 24 hours", hours: 24 }, { label: "Last 7 days", hours: 24 * 7, administrators: true }];
 
 const when = (iso: string | null | undefined) => (iso ? `${formatRelative(iso)} (${new Date(iso).toLocaleString()})` : "Never");
 
@@ -99,16 +101,41 @@ export function HealthTab({ camera }: { camera: Camera }) {
   );
 }
 
-/** Checks the camera's footage against its signed hash chain and names any segment that does not match. */
+/** Checks the camera's footage against its signed hash chain and names any segment that does not match. It waits its turn (two run at once,
+ * one for each person), says where it stands as it goes, and stops on the server when it is cancelled or the page is left (#508). */
 function FootageVerification({ camera }: { camera: Camera }) {
+  const me = useMe();
+  const administrator = me.data?.role === "administrator";
+  const ranges = RANGES.filter(range => administrator || !range.administrators);
   const [hours, setHours] = useState(24);
+  const [step, setStep] = useState<{ queued?: number; checked?: number; total?: number } | null>(null);
+  const running = useRef<AbortController | null>(null);
+  useEffect(() => () => running.current?.abort(), []);
   const verify = useMutation({
-    mutationFn: () => {
+    mutationFn: async () => {
+      const controller = new AbortController();
+      running.current = controller;
       const end = new Date();
-      const params = new URLSearchParams({ start: new Date(end.getTime() - hours * 3_600_000).toISOString(), end: end.toISOString() });
-      return api<Verification>(`/api/cameras/${encodeURIComponent(camera.id)}/footage/verify?${params}`);
+      const got: { result: Verification | null } = { result: null };
+      setStep(null);
+      try {
+        await apiLines(`/api/cameras/${encodeURIComponent(camera.id)}/footage/verify/stream`,
+          { start: new Date(end.getTime() - hours * 3_600_000).toISOString(), end: end.toISOString() },
+          line => {
+            const event = line as { queued?: number; progress?: { checked: number; total: number }; result?: Verification };
+            if (event.result) got.result = event.result;
+            else if (event.progress) setStep({ checked: event.progress.checked, total: event.progress.total });
+            else if (event.queued !== undefined) setStep({ queued: event.queued });
+          }, controller.signal);
+      } finally {
+        running.current = null;
+        setStep(null);
+      }
+      if (!got.result) throw new Error("the check ended before it gave a result");
+      return got.result;
     },
   });
+  const cancel = () => { running.current?.abort(); verify.reset(); };
   const result = verify.data;
   const counts = new Map<string, number>();
   for (const segment of result?.segments ?? []) counts.set(segment.status, (counts.get(segment.status) ?? 0) + 1);
@@ -120,12 +147,19 @@ function FootageVerification({ camera }: { camera: Camera }) {
       <div className="field-actions">
         <label className="field"><span>Range</span>
           <select value={hours} onChange={event => { setHours(Number(event.target.value)); verify.reset(); }}>
-            {RANGES.map(range => <option key={range.hours} value={range.hours}>{range.label}</option>)}
+            {ranges.map(range => <option key={range.hours} value={range.hours}>{range.label}</option>)}
           </select>
         </label>
         <button type="button" className="button" disabled={verify.isPending} onClick={() => verify.mutate()}>{verify.isPending ? "Verifying…" : "Verify footage"}</button>
+        {verify.isPending ? <button type="button" className="button" onClick={cancel}>Cancel</button> : null}
       </div>
-      {verify.error ? <p className="notice" data-tone="bad" role="alert">Footage could not be verified: {verify.error.message}.</p> : null}
+      {!administrator ? <p className="muted field-hint">Up to 24 hours at a time, of footage on this NVR's own disks; an administrator can check a week, archived footage included.</p> : null}
+      {verify.isPending && step ? (
+        <p className="muted" role="status" aria-label="Verification progress">
+          {step.queued ? `Waiting for a turn: ${step.queued === 1 ? "next" : `${step.queued - 1} ahead`}` : `Checked ${step.checked ?? 0} of ${step.total ?? 0} segments`}
+        </p>
+      ) : null}
+      {verify.error && !(verify.error instanceof DOMException) ? <p className="notice" data-tone="bad" role="alert">Footage could not be verified: {verify.error.message}.</p> : null}
       {result ? (
         <div role="status">
           <p className="notice" data-tone={result.valid ? "good" : "bad"}>

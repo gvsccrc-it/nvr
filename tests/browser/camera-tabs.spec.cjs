@@ -231,3 +231,12 @@ test("Health & History verifies footage against its signed chain and names an al
   await expect(region.getByRole("status")).toContainText("1 segment failed verification");
   await expect(region.getByRole("list", { name: "Segments that failed verification" }).getByRole("listitem")).toHaveText([/^Altered: the file no longer matches its hash · segment \d+/]);
 });
+
+test("an operator may verify up to 24 hours of footage at a time (#508)", async ({ page }) => {
+  seedFixtures(1, { footage: true });
+  await signInNext(page, "camera-operator");
+  await openTab(page, "Camera 001", "Health & History");
+  const region = editor(page).getByRole("region", { name: "Footage verification" });
+  await expect(region.getByLabel("Range").locator("option")).toHaveText(["Last hour", "Last 24 hours"]);
+  await expect(region.getByText(/Up to 24 hours at a time/)).toBeVisible();
+});
