@@ -1,6 +1,8 @@
 """Application factory: one place that assembles middleware, routers and lifecycle."""
 from __future__ import annotations
 
+from app.compression import JsonCompression
+
 from app import child_env
 
 import asyncio
@@ -221,6 +223,7 @@ def create_app(*, start_workers: bool = True) -> FastAPI:
     )
     app.add_middleware(request_guards.SameOriginMiddleware)  # Inside the trusted-proxy step: it compares with the host that step reports
     app.add_middleware(network.TrustedProxyMiddleware)  # Everything below sees the scheme and host a trusted proxy reports
+    app.add_middleware(JsonCompression)  # JSON answers to GETs, compressed for a browser that accepts it (#537): sees every answer the app makes
     app.add_middleware(request_guards.RequestSizeLimitMiddleware)  # Outermost: an oversized body is refused before anything reads it
     for router in api.ROUTERS:
         app.include_router(router)

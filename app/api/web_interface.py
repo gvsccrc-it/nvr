@@ -8,6 +8,7 @@ unknown /api paths still answer with JSON 404s. The former /next preview paths r
 from __future__ import annotations
 
 import hashlib
+import mimetypes
 import re
 from pathlib import Path
 
@@ -68,12 +69,34 @@ def service_worker() -> Response:
                     headers={**SECURITY_HEADERS, "Cache-Control": "no-cache"})
 
 
+# The copies the build made of each file (web/vite.config.ts, #537), best first: Brotli, then gzip
+_ENCODINGS = (("br", ".br"), ("gzip", ".gz"))
+
+
+def _accepted(header: str) -> set[str]:
+    """The content codings an Accept-Encoding header takes (a quality of 0 refuses one)."""
+    taken = set()
+    for item in header.split(","):
+        coding, _, parameters = item.strip().partition(";")
+        if parameters.replace(" ", "").lower() not in {"q=0", "q=0.0", "q=0.00", "q=0.000"}:
+            taken.add(coding.strip().lower())
+    return taken
+
+
 @router.get("/assets/{path:path}", include_in_schema=False)
-def asset(path: str) -> FileResponse:
+def asset(path: str, request: Request) -> FileResponse:
     candidate = (DIST_DIRECTORY / "assets" / path).resolve()
     if (DIST_DIRECTORY / "assets").resolve() not in candidate.parents or not candidate.is_file():
         raise HTTPException(status_code=404, detail="Asset not found")
-    return FileResponse(candidate, headers={**SECURITY_HEADERS, "Cache-Control": "public, max-age=31536000, immutable"})
+    headers = {**SECURITY_HEADERS, "Cache-Control": "public, max-age=31536000, immutable", "Vary": "Accept-Encoding"}
+    # The copy compressed at build time, for a browser that takes it (#537): no work here, and a fraction of the bytes
+    taken = _accepted(request.headers.get("accept-encoding", ""))
+    for coding, suffix in _ENCODINGS:
+        compressed = candidate.with_name(candidate.name + suffix)
+        if (coding in taken or "*" in taken) and compressed.is_file():
+            media_type = mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
+            return FileResponse(compressed, media_type=media_type, headers={**headers, "Content-Encoding": coding})
+    return FileResponse(candidate, headers=headers)
 
 
 @router.get("/", include_in_schema=False)
