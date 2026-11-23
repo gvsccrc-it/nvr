@@ -30,7 +30,8 @@ from .plate_models import ModelFile, file_ok
 logger = logging.getLogger("nvr.faces")
 
 MODELS_DIR = Path(os.environ.get("NVR_FACE_MODELS_DIR", "/opt/nvr/models/faces"))
-_ZOO = "https://media.githubusercontent.com/media/opencv/opencv_zoo/main/models"
+# A commit of OpenCV Zoo, not its main branch (#549): a file replaced upstream must not break every build while its pinned hash still names the old one
+_ZOO = "https://media.githubusercontent.com/media/opencv/opencv_zoo/48b10fa505aeb51fbd127fc60a5c660040e823b7/models"
 DETECTOR_ID = "face_detection_yunet_2023mar"
 RECOGNISER_ID = "face_recognition_sface_2021dec"
 DETECTOR = ModelFile("face_detection_yunet_2023mar.onnx", f"{_ZOO}/face_detection_yunet/face_detection_yunet_2023mar.onnx",

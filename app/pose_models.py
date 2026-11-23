@@ -38,7 +38,7 @@ class ModelFile:
 
 
 # The download (a zip of two models) and the one model used from it.
-BUNDLE = ModelFile("pose_landmarker_lite.task", "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task",
+BUNDLE = ModelFile("pose_landmarker_lite.task", "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
                    "59929e1d1ee95287735ddd833b19cf4ac46d29bc7afddbbf6753c459690d574a", 5777746)
 LANDMARKS = ModelFile("pose_landmarks_detector.tflite", BUNDLE.url, "ad6cfd3c903eb31a4ee788b809e45ecf9fa69923b69b9f3f2d9ae616ff433e58", 2818390)
 SHIPPED = (BUNDLE,)
