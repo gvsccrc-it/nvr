@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import tempfile
+import threading
 import unittest
 import uuid
 from pathlib import Path
@@ -74,7 +75,11 @@ class RetentionApiTests(unittest.TestCase):
         real=sqlite3.connect
         def watching(*args,**kwargs):
             connection=real(*args,**kwargs)
-            connection.set_trace_callback(lambda statement: seen.append(statement) if "recording_segments" in statement else None)
+            # Only the request's own connections: the client starts the app's background workers, and one of them checking a table's
+            # structure (the self-test's patrol) while the list is built was counted as the list reading the index (CI, PR #596). The
+            # list is a plain route, so its work runs on the server's worker thread for requests.
+            if threading.current_thread().name.startswith("AnyIO worker"):
+                connection.set_trace_callback(lambda statement: seen.append(statement) if "recording_segments" in statement else None)
             return connection
         with patch("sqlite3.connect",watching):
             self.assertEqual(self.client.get("/api/cameras").status_code,200)
