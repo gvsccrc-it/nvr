@@ -14,6 +14,7 @@
 import { withUnmasked } from "@/features/privacy/store";
 import { mseHevc } from "@/lib/codecs";
 import { pictureSplitter } from "./pictureStream";
+import { reconnectDelay } from "./reconnect";
 
 export type Phase = "connecting" | "live" | "stale" | "reconnecting" | "offline" | "error" | "paused";
 
@@ -47,7 +48,6 @@ interface Options {
 
 const STALE_AFTER_MS = 4_000;
 const OFFLINE_AFTER_MS = 15_000;
-const BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000];
 const NO_RETRY_CODES = new Set([4401, 4403, 4404, 4410]);
 const NO_RETRY_STATUSES = new Set([401, 403, 404, 410]);
 /** A connection that has given nothing for this long is dropped and asked for again: before its first data (a converted stream takes a
@@ -391,7 +391,7 @@ export class LivePlayer {
     this.closePictures();
     this.teardownMedia();
     this.disconnectedAt ??= Date.now();
-    const delay = BACKOFF_MS[Math.min(this.attempt, BACKOFF_MS.length - 1)]!;
+    const delay = reconnectDelay(this.attempt); // Spread out, so tiles do not all reconnect at the same instant after a restart (#539)
     this.attempt += 1;
     if (this.snapshot.phase !== "offline") this.update({ phase: "reconnecting" });
     if (this.retryTimer !== null) window.clearTimeout(this.retryTimer);
