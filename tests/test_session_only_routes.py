@@ -20,6 +20,7 @@ SESSION_ONLY = {
     ("PUT", "/api/admin/security-log/settings"),
     ("PUT", "/api/admin/access-grants"),
     ("DELETE", "/api/admin/access-grants/{grant_id}"),
+    ("POST", "/api/footage/chain-breaks/{break_id}/acknowledge"),  # The record of a break in signed footage, acknowledged by a person (#507)
 }
 # Refused to tokens by a check of their own (app/api/automation.py)
 TOKEN_MANAGEMENT = {("GET", "/api/admin/api-tokens"), ("POST", "/api/admin/api-tokens"), ("DELETE", "/api/admin/api-tokens/{token_id}")}
