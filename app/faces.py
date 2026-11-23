@@ -18,9 +18,9 @@ from typing import Any
 
 import numpy as np
 
-from . import face_models, jpeg, plates, privacy, track_privacy
+from . import credentials, face_models, jpeg, plates, privacy, track_privacy
 from .processes import run_to_end
-from .store import connect
+from .store import connect, shrink_log
 from app.clock import now as _now, parse as _parse
 from .audit import record as audit_record
 
@@ -76,7 +76,7 @@ def _entry_view(row: sqlite3.Row, count: int, now: datetime) -> dict[str, Any]:
     expires = row["expires_at"]
     return {"id": row["id"], "name": row["name"], "reason": row["reason"], "expires_at": expires,
             "expired": bool(expires and _parse(expires) <= now), "enabled": bool(row["enabled"]), "embeddings": count,
-            "has_picture": row["picture"] is not None, "created_by": row["created_by_name"], "created_at": row["created_at"], "updated_at": row["updated_at"]}
+            "has_picture": row["picture_ciphertext"] is not None, "created_by": row["created_by_name"], "created_at": row["created_at"], "updated_at": row["updated_at"]}
 
 
 def list_entries(db: sqlite3.Connection, now: datetime | None = None) -> list[dict[str, Any]]:
@@ -100,18 +100,19 @@ def watched(db: sqlite3.Connection, now: datetime | None = None) -> list[tuple[s
     now_text = (now or _now()).isoformat()
     result = []
     for row in db.execute("SELECT id FROM face_watch_entries WHERE enabled=1 AND (expires_at IS NULL OR expires_at>?) ORDER BY created_at,id", (now_text,)):
-        embeddings = [np.frombuffer(item["embedding"], dtype=np.float32).astype(np.float64)
-                      for item in db.execute("SELECT embedding FROM face_embeddings WHERE entry_id=? ORDER BY id", (row["id"],))]
+        # Decrypted here, for the AI worker's matching, and nowhere else (#520)
+        embeddings = [np.frombuffer(credentials.decrypt_bytes(item["embedding_ciphertext"]), dtype=np.float32).astype(np.float64)
+                      for item in db.execute("SELECT embedding_ciphertext FROM face_embeddings WHERE entry_id=? ORDER BY id", (row["id"],))]
         if embeddings:
             result.append((row["id"], embeddings))
     return result
 
 
 def entry_picture(db: sqlite3.Connection, entry_id: str) -> bytes:
-    row = db.execute("SELECT picture FROM face_watch_entries WHERE id=?", (entry_id,)).fetchone()
-    if row is None or row["picture"] is None:
+    row = db.execute("SELECT picture_ciphertext FROM face_watch_entries WHERE id=?", (entry_id,)).fetchone()
+    if row is None or row["picture_ciphertext"] is None:
         raise FaceError(404, "That entry has no picture")
-    return bytes(row["picture"])
+    return credentials.decrypt_bytes(row["picture_ciphertext"])
 
 
 # --- finding a face in recorded video ----------------------------------------------------------------------------------------------------
@@ -230,15 +231,29 @@ def picture_of(frame: np.ndarray, face: face_models.Face) -> bytes | None:
 
 def add_embedding(db: sqlite3.Connection, entry_id: str, face: face_models.Face, camera_id: str, at: datetime) -> None:
     x1, y1, x2, y2 = face.box
-    db.execute("INSERT INTO face_embeddings(entry_id,embedding,camera_id,source_at,box_json) VALUES(?,?,?,?,?)",
-               (entry_id, np.asarray(face.embedding, dtype=np.float32).tobytes(), camera_id, at.astimezone(timezone.utc).isoformat(),
+    db.execute("INSERT INTO face_embeddings(entry_id,embedding_ciphertext,camera_id,source_at,box_json) VALUES(?,?,?,?,?)",
+               (entry_id, credentials.encrypt_bytes(np.asarray(face.embedding, dtype=np.float32).tobytes()), camera_id, at.astimezone(timezone.utc).isoformat(),
                 json.dumps({"x": x1, "y": y1, "width": x2 - x1, "height": y2 - y1}, separators=(",", ":"))))
 
 
 def create_entry(db: sqlite3.Connection, name: str, reason: str, expires_at: str | None, picture: bytes | None, user_id: int | None) -> str:
     entry_id = str(uuid.uuid4())
-    db.execute("INSERT INTO face_watch_entries(id,name,reason,expires_at,picture,created_by) VALUES(?,?,?,?,?,?)", (entry_id, name, reason, expires_at, picture, user_id))
+    db.execute("INSERT INTO face_watch_entries(id,name,reason,expires_at,picture_ciphertext,created_by) VALUES(?,?,?,?,?,?)",
+               (entry_id, name, reason, expires_at, None if picture is None else credentials.encrypt_bytes(picture), user_id))
     return entry_id
+
+
+def erase_entry(entry_id: str, user_id: int, entry: dict[str, Any]) -> None:
+    """Delete an entry with its embeddings and sightings so that their bytes do not linger in the file (#520).
+
+    The deletion runs on a connection with ``secure_delete`` on, which overwrites what it frees with zeros, and the write-ahead log is then
+    emptied into the database, so the old pages are not left in it either. It is not on for the whole database: the retention deletes would
+    pay for it on every pass. If something is reading the database at that moment the log is emptied at the next checkpoint instead."""
+    with connect() as db:
+        db.execute("PRAGMA secure_delete = ON")
+        db.execute("DELETE FROM face_watch_entries WHERE id=?", (entry_id,))  # Its embeddings and sightings go with it (ON DELETE CASCADE)
+        audit(db, user_id, "face_watch_removed", entry_id, {"name": entry["name"], "reason": entry["reason"]})
+    shrink_log()
 
 
 def audit(db: sqlite3.Connection, user_id: int, action: str, resource_id: str, details: dict[str, Any]) -> None:

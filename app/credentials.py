@@ -175,6 +175,19 @@ def encrypt(value: str) -> bytes:
     return _fernet().encrypt(value.encode("utf-8"))
 
 
+def encrypt_bytes(value: bytes) -> bytes:
+    """Data kept encrypted at rest with the credential key, such as face-watch embeddings and pictures (#520). Stored in a ``..._ciphertext``
+    column, so a key that has gone is noticed rather than replaced (``_stored_secrets_exist``)."""
+    return _fernet().encrypt(bytes(value))
+
+
+def decrypt_bytes(value: bytes) -> bytes:
+    try:
+        return _fernet().decrypt(bytes(value))
+    except InvalidToken as exc:
+        raise RuntimeError("Unable to decrypt data stored with the credential key") from exc
+
+
 def decrypt(value: bytes) -> str:
     try:
         return _fernet().decrypt(value).decode("utf-8")

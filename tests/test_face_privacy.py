@@ -11,7 +11,7 @@ from unittest.mock import patch
 import numpy as np
 from fastapi.testclient import TestClient
 
-from app import faces
+from app import credentials, faces
 from app.store import connect
 from tests.test_access_grants import GrantCase
 from tests.test_faces import AT, StandInReader, face, unit
@@ -141,9 +141,9 @@ class StoredPictureTests(FacePrivacyCase):
         with connect() as db:
             db.execute("INSERT INTO ai_tracks(id,camera_id,label,first_seen_at,last_seen_at,detection_count,max_confidence,model_id,model_version,provider) VALUES(?,?,?,?,?,0,0,'m','1','CPU')",
                        (track, self.d1, "person", AT, AT))
-            db.execute("INSERT INTO face_sightings(id,entry_id,camera_id,track_id,seen_at,similarity,box_json,picture) VALUES(?,?,?,?,?,?,?,?)",
+            db.execute("INSERT INTO face_sightings(id,entry_id,camera_id,track_id,seen_at,similarity,box_json,picture_ciphertext) VALUES(?,?,?,?,?,?,?,?)",
                        (sighting, entry, self.d1, track, (datetime.fromisoformat(AT) + timedelta(seconds=len(sighting))).isoformat(), 0.9,
-                        raw_box if raw_box is not None else json.dumps(box), b"\xff\xd8jpeg"))
+                        raw_box if raw_box is not None else json.dumps(box), credentials.encrypt_bytes(b"\xff\xd8jpeg")))
         return sighting
 
     def test_sightings_and_their_pictures_obey_a_mask_drawn_later(self):

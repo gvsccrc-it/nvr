@@ -18,7 +18,7 @@ from typing import Any, Awaitable, Callable, Sequence
 
 import numpy as np
 
-from . import face_models, faces, plates
+from . import credentials, face_models, faces, plates
 from .store import connect
 
 logger = logging.getLogger("nvr.faces")
@@ -117,6 +117,7 @@ def keep_sighting(camera_id: str, track_id: str, entry_id: str, similarity: floa
         if plates.overlaps_privacy_zone(box, privacy.server_zones(db, camera_id, at)):
             return False
     small = faces.picture_of(picture, face)
+    sealed = None if small is None else credentials.encrypt_bytes(small)  # Kept encrypted (#520); before the write lock
     with connect() as db:
         db.execute("BEGIN IMMEDIATE")
         try:
@@ -125,8 +126,8 @@ def keep_sighting(camera_id: str, track_id: str, entry_id: str, similarity: floa
             if not live or db.execute("SELECT 1 FROM ai_tracks WHERE id=?", (track_id,)).fetchone() is None:
                 db.execute("ROLLBACK")
                 return False
-            db.execute("INSERT INTO face_sightings(id,entry_id,camera_id,track_id,seen_at,similarity,box_json,picture) VALUES(?,?,?,?,?,?,?,?)",
-                       (str(uuid.uuid4()), entry_id, camera_id, track_id, at.isoformat(), round(float(similarity), 4), json.dumps(box, separators=(",", ":")), small))
+            db.execute("INSERT INTO face_sightings(id,entry_id,camera_id,track_id,seen_at,similarity,box_json,picture_ciphertext) VALUES(?,?,?,?,?,?,?,?)",
+                       (str(uuid.uuid4()), entry_id, camera_id, track_id, at.isoformat(), round(float(similarity), 4), json.dumps(box, separators=(",", ":")), sealed))
             rules.fire_face(db, camera_id, track_id, entry_id, at, box)
         except BaseException:
             db.execute("ROLLBACK")

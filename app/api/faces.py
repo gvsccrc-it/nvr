@@ -10,7 +10,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, Field, model_validator
 
-from app import face_models, faces, track_privacy
+from app import credentials, face_models, faces, track_privacy
 from app import rules as rules_engine
 from app.clock import stamp
 from app.principal import Administrator
@@ -216,8 +216,7 @@ def remove(entry_id: str, user: Administrator) -> Response:
             entry = faces.get_entry(db, entry_id)
         except faces.FaceError as error:
             _raise(error)
-        db.execute("DELETE FROM face_watch_entries WHERE id=?", (entry_id,))  # Its embeddings go with it (ON DELETE CASCADE)
-        faces.audit(db, int(user["id"]), "face_watch_removed", entry_id, {"name": entry["name"], "reason": entry["reason"]})
+    faces.erase_entry(entry_id, int(user["id"]), entry)  # Its embeddings and sightings are overwritten in the file, not only unlinked (#520)
     return Response(status_code=204)
 
 
@@ -280,7 +279,7 @@ def sightings(user: Administrator, limit: int = 50) -> dict[str, Any]:
         # A sighting whose face a mask now covers is not listed (#301); this is in the query so the limit never counts what was hidden.
         visible, visible_values = track_privacy.box_json_visible_sql(track_privacy.zones_by_camera(db, [row[0] for row in db.execute("SELECT id FROM cameras")]), "s")
         rows = db.execute(
-            "SELECT s.id,s.entry_id,e.name AS entry_name,s.camera_id,c.name AS camera_name,s.track_id,s.seen_at,s.similarity,(s.picture IS NOT NULL) AS has_picture "
+            "SELECT s.id,s.entry_id,e.name AS entry_name,s.camera_id,c.name AS camera_name,s.track_id,s.seen_at,s.similarity,(s.picture_ciphertext IS NOT NULL) AS has_picture "
             f"FROM face_sightings s JOIN face_watch_entries e ON e.id=s.entry_id JOIN cameras c ON c.id=s.camera_id WHERE {visible} ORDER BY s.seen_at DESC,s.id DESC LIMIT ?",
             (*visible_values, limit)).fetchall()
         faces.audit(db, int(user["id"]), "face_sightings_viewed", "all", {"shown": len(rows)})
@@ -290,8 +289,8 @@ def sightings(user: Administrator, limit: int = 50) -> dict[str, Any]:
 @router.get("/api/faces/sightings/{sighting_id}/picture")
 def sighting_picture(sighting_id: str, user: Administrator) -> Response:
     with connect() as db:
-        row = db.execute("SELECT picture,entry_id,camera_id,box_json FROM face_sightings WHERE id=?", (sighting_id,)).fetchone()
-        if row is None or row["picture"] is None:
+        row = db.execute("SELECT picture_ciphertext,entry_id,camera_id,box_json FROM face_sightings WHERE id=?", (sighting_id,)).fetchone()
+        if row is None or row["picture_ciphertext"] is None:
             raise HTTPException(status_code=404, detail="No picture for that sighting")
         masks = track_privacy.zones_by_camera(db, [row["camera_id"]]).get(row["camera_id"], [])
         if masks:  # A mask drawn since over where the face was: the picture is not shown, and a box that cannot be compared is not trusted (#301)
@@ -308,4 +307,4 @@ def sighting_picture(sighting_id: str, user: Administrator) -> Response:
                             (int(user["id"]), row["entry_id"], sighting_id, stamp(datetime.now(timezone.utc) - PICTURE_AUDIT_INTERVAL))).fetchone()
         if recent is None:
             faces.audit(db, int(user["id"]), "face_sighting_picture_viewed", row["entry_id"], {"sighting_id": sighting_id})
-    return Response(bytes(row["picture"]), media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+    return Response(credentials.decrypt_bytes(row["picture_ciphertext"]), media_type="image/jpeg", headers={"Cache-Control": "no-store"})
