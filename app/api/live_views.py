@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from app.access import Access
 from app.api.lens import DewarpState, clean_dewarp, decode_dewarp
-from app.viewing import MAX_LIVE_VIEWERS
+from app.viewing import MAX_LIVE_TILES
 from app.principal import Administrator, CurrentUser
 from app.store import connect
 from app.request_validation import normalize_live_grid_selection
@@ -20,11 +20,11 @@ router = APIRouter()
 
 
 class ViewerLayoutRequest(BaseModel):
-    camera_ids: list[str] = Field(default_factory=list, max_length=MAX_LIVE_VIEWERS)
+    camera_ids: list[str] = Field(default_factory=list, max_length=MAX_LIVE_TILES)
     grid_size: int = Field(default=4)
-    tile_camera_ids: list[str | None] | None = Field(default=None, max_length=MAX_LIVE_VIEWERS)
+    tile_camera_ids: list[str | None] | None = Field(default=None, max_length=MAX_LIVE_TILES)
     layout_mode: Literal["auto", "manual"] = "auto"
-    dewarp: dict[str, DewarpState] = Field(default_factory=dict, max_length=MAX_LIVE_VIEWERS)
+    dewarp: dict[str, DewarpState] = Field(default_factory=dict, max_length=MAX_LIVE_TILES)
 
     @model_validator(mode="after")
     def validate_layout(self) -> "ViewerLayoutRequest":
@@ -38,12 +38,12 @@ class ViewerLayoutRequest(BaseModel):
 
 
 class LiveWorkspaceRequest(BaseModel):
-    camera_ids: list[str] = Field(default_factory=list, max_length=MAX_LIVE_VIEWERS)
+    camera_ids: list[str] = Field(default_factory=list, max_length=MAX_LIVE_TILES)
     grid_size: int = Field(default=4)
-    tile_camera_ids: list[str | None] = Field(default_factory=list, max_length=MAX_LIVE_VIEWERS)
+    tile_camera_ids: list[str | None] = Field(default_factory=list, max_length=MAX_LIVE_TILES)
     sidebar_collapsed: bool = False
     layout_mode: Literal["auto", "manual"] = "auto"
-    dewarp: dict[str, DewarpState] = Field(default_factory=dict, max_length=MAX_LIVE_VIEWERS)
+    dewarp: dict[str, DewarpState] = Field(default_factory=dict, max_length=MAX_LIVE_TILES)
 
     @model_validator(mode="after")
     def validate_workspace(self) -> "LiveWorkspaceRequest":

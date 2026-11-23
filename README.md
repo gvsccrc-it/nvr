@@ -64,6 +64,9 @@ The `nvr-data` volume stores the database and account/session state. `nvr-secret
 | `NVR_BACKUP_PASSPHRASE` | unset | Enables encrypted configuration backups (at least 16 characters) |
 | `NVR_BACKUP_PASSPHRASE_FILE` | unset | Path of a file holding the backup passphrase, used when `NVR_BACKUP_PASSPHRASE` is empty |
 | `NVR_BACKUP_KEEP` | `14` | Number of configuration backups kept |
+| `NVR_LIVE_TILES_PER_PERSON` / `NVR_LIVE_TILES_PER_WALL` | `16` / `16` | Live tiles one person or API token, and one video wall, may have open at once ([live video](docs/live-video-ready.md)) |
+| `NVR_LIVE_STREAMS` | `32` | Distinct camera streams open for live viewers on the whole server |
+| `NVR_LIVE_MJPEG_PER_PERSON` / `NVR_LIVE_MJPEG` | `2` / `4` | Compatibility-mode (MJPEG) live tiles, for each person and in all |
 | `NVR_LIVE_CONVERSIONS` | `6` | Live streams re-encoded at once, H.265 conversions and cameras with a privacy mask the NVR draws in together ([privacy masks](docs/privacy-masks.md)) |
 | `NVR_EXPORT_QUEUE_PLACES` | `8` | Exports queued or running at once for the whole NVR, one place kept for case packages ([evidence packages](docs/evidence-packages.md)) |
 | `NVR_EXPORTS_PER_PERSON` / `NVR_EXPORTS_PER_ADMINISTRATOR` | `2` / `4` | Exports one person may have queued or running at once |

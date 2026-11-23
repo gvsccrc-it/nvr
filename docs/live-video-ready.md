@@ -27,3 +27,17 @@ A camera that does not answer is tried again after 15 seconds, then 30, 60, up t
 Settings › Diagnostics › Live video start-up counts viewers who **started the camera's stream** and those who **joined a running stream**. With streams held ready, almost every viewer joins a running one (about 0.1 s), and the "started" row stays empty except after a camera was offline or the mode was changed.
 
 **Cameras with keyframes far apart (#496).** A viewer who joins a running stream is given what came since the latest keyframe, so the picture decodes at once. That is kept up to 60 fragments (about 18 seconds) and 32 MB. A camera whose keyframes are further apart (a "smart codec" mode can go a minute between them) has nothing kept past that point: a viewer who joins then is sent nothing until the next keyframe, and then plays from it, rather than being given more than a viewer's queue holds and closed as too slow. Camera health says which cameras these are.
+
+## How many can watch (#487)
+
+Live view is limited by what costs the server something, and each identity has its own share, so one person, script or wall cannot take every place:
+
+| Limit | Default | Setting |
+| --- | --- | --- |
+| Live tiles one person (or one API token) may have open | 16 (a full grid) | `NVR_LIVE_TILES_PER_PERSON` |
+| Live tiles one video wall may have open | 16 | `NVR_LIVE_TILES_PER_WALL` |
+| Distinct camera streams open for viewers, for the whole server | 32 | `NVR_LIVE_STREAMS` |
+| Compatibility-mode (MJPEG) tiles, each a decode and encode of its own | 2 per person, 4 in all | `NVR_LIVE_MJPEG_PER_PERSON`, `NVR_LIVE_MJPEG` |
+| Re-encodes (H.265 converted, or a privacy mask drawn in) | 6 | `NVR_LIVE_CONVERSIONS` |
+
+Viewers of one camera share one camera connection: watching a stream already open for someone else counts against the watcher's own 16 only, not against the server's 32. A refused tile says which limit was reached and whose ("you have 16 live tiles open", "this video wall has…", "the server has 32 camera streams open…"); a person at their own limit affects nobody else.

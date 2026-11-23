@@ -20,7 +20,7 @@ scrape_configs:
 | `nvr_segments_written_total` | counter | camera | segments that became playable |
 | `nvr_segment_write_latency_seconds` | histogram | camera, `le` | seconds from the end of a segment's footage until it was indexed and playable (buckets 1, 2, 5, 10, 30, 60, 120, 300 s). The recorder looks for finished segments every few seconds, so this is that delay, not the disk's speed: see `nvr_storage_write_latency_seconds` for that |
 | `nvr_segments_dropped_total` | counter | camera | segments the recorder produced and could not keep: a file too small to be video, an unreadable index row, or a motion clip that could not be assembled. Counted once per segment per recorder run, so a restart can count a bad file again; a segment that retention removed is not a drop. A recording stopped by an unreachable camera or a full volume leaves no segment to count, and shows in `nvr_camera_recording_state` and the volume's state instead |
-| `nvr_live_viewers`, `nvr_live_viewer_slots` | gauge | – | live video streams and the number allowed |
+| `nvr_live_viewers`, `nvr_live_viewer_slots` | gauge | – | live video streams being watched, and the live tiles one person, token or wall may have open (#487) |
 | `nvr_live_audio_listeners`, `nvr_live_audio_listener_slots` | gauge | – | live audio listeners and the number allowed |
 | `nvr_worker_up`, `nvr_worker_restarts_total`, `nvr_worker_heartbeat_timestamp_seconds` | gauge/counter | `worker` | liveness, restarts and last heartbeat of each worker |
 | `nvr_export_jobs` | gauge | `state` | export jobs by state |
