@@ -449,7 +449,7 @@ class ObjectStoreTierTests(TierCase):
         part = self.media(self.d1, segment_id, Range="bytes=5-14")
         self.assertEqual((part.status_code, part.content), (206, payload[5:15]))
         gets = [entry for entry in self.stub.requests if entry[0] == "GET" and entry[2] == 200]
-        self.assertEqual(len(gets), 2)  # One to verify the copy, one to fetch it into the cache: the second request is served from the cache
+        self.assertEqual(len(gets), 1)  # The copy is confirmed by the checksum the store kept (#486); one GET fetches it into the cache, and the second request is served from there
         self.assertEqual(len(list(tiering.cache_dir().glob("*.mp4"))), 1)
 
     def test_what_comes_back_is_checked_and_a_changed_object_is_refused(self):

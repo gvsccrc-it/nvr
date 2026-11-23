@@ -43,6 +43,7 @@ class TierInput(BaseModel):
     access_key: str | None = Field(default=None, max_length=256)  # Write-only: left out, the saved ones are kept
     secret_key: str | None = Field(default=None, max_length=256)
     allow_private: bool = False
+    read_back: bool | None = None  # An object store: read every file back after upload instead of trusting its checksum (#486). Left out, kept as it is (off for a new tier)
 
     @field_validator("name")
     @classmethod
@@ -77,7 +78,7 @@ class TierInput(BaseModel):
 class PolicyInput(BaseModel):
     tier_id: str = Field(min_length=1, max_length=64)
     after_days: int = Field(ge=1, le=3650)
-    rate_kbps: int = Field(default=tiering.DEFAULT_RATE_KBPS, ge=64, le=10_000_000)
+    rate_kbps: int = Field(default=tiering.DEFAULT_RATE_KBPS, ge=64, le=10_000_000, description="The rate limit in KiB (1,024 bytes) a second; the page shows it in MiB a second")
     enabled: bool = True
 
 
@@ -87,7 +88,18 @@ def _tier_view(row, counts: dict[str, tuple[int, int]], missing: dict[str, int])
             "s3_region": row["s3_region"], "s3_prefix": row["s3_prefix"], "has_credentials": row["credentials_ciphertext"] is not None, "allow_private": bool(row["allow_private"]),
             "last_checked_at": row["last_checked_at"], "last_error": row["last_error"], "failures": row["failures"], "segments": segments, "bytes": size, "created_at": row["created_at"],
             # Segments due to move whose file was not on the volume when last tried (#485): looked for again hourly, never in the way of others
-            "missing_files": missing.get(row["id"], 0)}
+            "missing_files": missing.get(row["id"], 0),
+            # How a copy is confirmed before the hot file goes (#486): a folder is read back; a bucket's checksum is asked for, unless the
+            # store keeps none or the administrator chose to read every file back
+            "read_back": bool(row["read_back"]), "checksums": row["checksums"], "confirmed_by": _confirmed_by(row)}
+
+
+def _confirmed_by(row) -> str:
+    if row["kind"] == "local":
+        return "read_back"
+    if row["read_back"]:
+        return "read_back_chosen"
+    return "read_back_no_checksums" if row["checksums"] == "no" else "checksum"
 
 
 def _view(db) -> dict[str, Any]:
@@ -98,7 +110,8 @@ def _view(db) -> dict[str, Any]:
     missing = {row[0]: row[1] for row in db.execute("SELECT tier_id,COUNT(*) FROM tier_moves WHERE last_error LIKE ? GROUP BY tier_id", (tiering.MISSING_ERROR + "%",))}
     return {"tiers": [_tier_view(row, counts, missing) for row in db.execute("SELECT * FROM cold_tiers ORDER BY name COLLATE NOCASE,id")],
             "policies": [dict(row) | {"enabled": bool(row["enabled"])} for row in db.execute("SELECT * FROM tier_policies ORDER BY volume_id")],
-            "volumes": sorted(configured_volumes()), "moves_in_progress": pending, "cache": {"bytes": cached, "limit_bytes": tiering.cache_limit()}}
+            "volumes": sorted(configured_volumes()), "moves_in_progress": pending, "cache": {"bytes": cached, "limit_bytes": tiering.cache_limit()},
+            "backlog": tiering.backlog_view(db)}
 
 
 @router.get("/api/admin/tiering")
@@ -121,6 +134,8 @@ def _local_path(text: str) -> str:
 def _fields(body: TierInput) -> dict[str, Any]:
     fields: dict[str, Any] = {"name": body.name, "kind": body.kind, "allow_private": int(body.allow_private), "s3_region": body.s3_region, "s3_prefix": body.s3_prefix,
                               "local_path": None, "s3_endpoint": None, "s3_bucket": None}
+    if body.read_back is not None:
+        fields["read_back"] = int(body.read_back)
     if body.kind == "local":
         fields["local_path"] = _local_path(body.local_path or "")
     else:
@@ -203,8 +218,24 @@ def update_tier(tier_id: str, body: TierInput, user: Administrator) -> dict[str,
             db.execute(f"UPDATE cold_tiers SET {restore} WHERE id=?", (*(current[name] for name in (*fields, "credentials_ciphertext")), tier_id))
         raise
     with connect() as db:
-        db.execute("UPDATE cold_tiers SET last_checked_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),last_error=NULL,failures=0 WHERE id=?", (tier_id,))
+        # checksums: whether the store keeps them is found out again by the next move, in case the store behind the settings changed
+        db.execute("UPDATE cold_tiers SET last_checked_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),last_error=NULL,failures=0,checksums=NULL WHERE id=?", (tier_id,))
         record(db, int(user["id"]), "cold_tier_updated", "cold_tier", tier_id, name=fields["name"], credentials_replaced=bool(body.access_key))
+        return _view(db)
+
+
+class ReadBackInput(BaseModel):
+    read_back: bool
+
+
+@router.put("/api/admin/tiering/tiers/{tier_id}/read-back")
+def set_read_back(tier_id: str, body: ReadBackInput, user: Administrator) -> dict[str, Any]:
+    """Whether every file is read back from this object store after it is uploaded (a full download each), instead of confirming the
+    checksum the store kept (#486). A folder tier is always read back."""
+    with connect() as db:
+        if db.execute("UPDATE cold_tiers SET read_back=? WHERE id=?", (int(body.read_back), tier_id)).rowcount == 0:
+            raise HTTPException(status_code=404, detail="Cold tier not found")
+        record(db, int(user["id"]), "cold_tier_read_back_changed", "cold_tier", tier_id, read_back=body.read_back)
         return _view(db)
 
 

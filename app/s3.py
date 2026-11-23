@@ -6,6 +6,8 @@ S3-compatible store accepts. No other library is needed.
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import hmac
 import time
@@ -20,6 +22,11 @@ ALGORITHM = "AWS4-HMAC-SHA256"
 CHUNK = 1024 * 1024
 EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 TIMEOUT = httpx.Timeout(60.0, connect=5.0)
+
+
+def checksum_of(sha256_hex: str) -> str:
+    """A SHA-256 as S3's checksum headers carry it: base64 of the digest's bytes."""
+    return base64.b64encode(bytes.fromhex(sha256_hex)).decode("ascii")
 
 
 class S3Error(Exception):
@@ -84,10 +91,10 @@ class S3Client:
         return f"{self.prefix}/{name}" if self.prefix else name
 
     def _request(self, method: str, name: str, *, payload_hash: str = EMPTY_SHA256, headers: dict[str, str] | None = None, content: Any = None, stream: bool = False,
-                 query: list[tuple[str, str]] | None = None) -> httpx.Response:
+                 query: list[tuple[str, str]] | None = None, amz_headers: dict[str, str] | None = None) -> httpx.Response:
         path = f"{self.base_path}/{self.bucket}" + (f"/{self.key(name)}" if name else "")
         amz_date = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        signed = {"host": self.host, "x-amz-content-sha256": payload_hash, "x-amz-date": amz_date}
+        signed = {"host": self.host, "x-amz-content-sha256": payload_hash, "x-amz-date": amz_date, **(amz_headers or {})}  # x-amz-* headers are signed too
         auth = authorization(method, path, query or [], signed, payload_hash, access_key=self.access_key, secret_key=self.secret_key, region=self.region, service="s3", amz_date=amz_date)
         url = f"{self.origin}{canonical_uri(path)}" + (f"?{canonical_query(query)}" if query else "")
         request = self.http.build_request(method, url, headers={**signed, "Authorization": auth, **(headers or {})}, content=content)
@@ -109,7 +116,9 @@ class S3Client:
     # --- operations -----------------------------------------------------------------------------------------------------------------------------
 
     def put_file(self, name: str, path: Path, sha256: str, size: int, *, rate: Callable[[int], None] | None = None) -> None:
-        """Upload a file. The signed payload hash is the file's SHA-256, so the store rejects a body that is not exactly this file."""
+        """Upload a file. The signed payload hash is the file's SHA-256, so the store rejects a body that is not exactly this file; the same
+        digest goes as the object's checksum (``x-amz-checksum-sha256``), which a store that keeps checksums stores with it and gives back
+        with ``details`` (#486), so the copy can be confirmed without downloading it."""
         def body() -> Iterator[bytes]:
             with path.open("rb") as handle:
                 while chunk := handle.read(CHUNK):
@@ -117,7 +126,8 @@ class S3Client:
                         rate(len(chunk))
                     yield chunk
 
-        response = self._request("PUT", name, payload_hash=sha256, headers={"Content-Length": str(size), "Content-Type": "application/octet-stream"}, content=body())
+        response = self._request("PUT", name, payload_hash=sha256, headers={"Content-Length": str(size), "Content-Type": "application/octet-stream"}, content=body(),
+                                 amz_headers={"x-amz-checksum-sha256": checksum_of(sha256)})
         try:
             self._check(response, 200)
         finally:
@@ -131,6 +141,23 @@ class S3Client:
                 return None
             self._check(response, 200)
             return int(response.headers.get("content-length", "0"))
+        finally:
+            response.close()
+
+    def details(self, name: str) -> tuple[int, str | None] | None:
+        """The object's size and the SHA-256 the store keeps for it (hex), or None for the checksum when the store keeps none; None when
+        there is no such object. A request for the object's details, not its body: nothing is downloaded."""
+        response = self._request("HEAD", name, amz_headers={"x-amz-checksum-mode": "ENABLED"})
+        try:
+            if response.status_code == 404:
+                return None
+            self._check(response, 200)
+            kept = response.headers.get("x-amz-checksum-sha256")
+            try:
+                digest = base64.b64decode(kept, validate=True).hex() if kept else None
+            except (ValueError, binascii.Error):
+                digest = None
+            return int(response.headers.get("content-length", "0")), digest if digest and len(digest) == 64 else None
         finally:
             response.close()
 

@@ -1,10 +1,15 @@
 """A small S3-compatible server for tests (path style: PUT, GET, HEAD, DELETE on ``/bucket/key``) that, like a real store, refuses a request whose AWS Signature Version 4 does not
 check out and an upload whose body does not hash to the ``x-amz-content-sha256`` it was signed with. It keeps objects in memory and can be told to fail or to answer wrongly.
 
+Like S3, it keeps an upload's ``x-amz-checksum-sha256`` (refusing a body that does not match it) and gives it back to a HEAD request that
+asks for it (``x-amz-checksum-mode: ENABLED``). ``checksums = False`` makes it a store that keeps none; ``wrong_checksums`` makes it
+report a different one.
+
 Its signature check uses ``app.s3.authorization``, which the tests prove against the examples AWS publishes, so a client that signs wrongly is refused here as it would be by S3.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -20,6 +25,9 @@ class S3Stub:
         self.requests: list[tuple[str, str, int]] = []  # method, key, status
         self.fail: dict[str, int] = {}  # method -> status to answer once, instead of doing it
         self.corrupt_gets = False
+        self.checksums = True
+        self.wrong_checksums = False
+        self.kept: dict[str, str] = {}  # key -> the checksum header it was uploaded with
         self.lock = threading.Lock()
         stub = self
 
@@ -79,17 +87,28 @@ class S3Stub:
                 with stub.lock:
                     stored = stub.objects.get(key)
                 if self.command == "PUT":
+                    checksum = self.headers.get("x-amz-checksum-sha256") if stub.checksums else None
+                    if checksum is not None and base64.b64encode(hashlib.sha256(body).digest()).decode() != checksum:
+                        return self._answer(400, b"BadDigest", key=key)
                     with stub.lock:
                         stub.objects[key] = body
+                        if checksum is None:
+                            stub.kept.pop(key, None)
+                        else:
+                            stub.kept[key] = checksum
                     return self._answer(200, key=key)
                 if self.command == "DELETE":
                     with stub.lock:
                         stub.objects.pop(key, None)
+                        stub.kept.pop(key, None)
                     return self._answer(204, key=key)
                 if stored is None:
                     return self._answer(404, b"NoSuchKey", key=key)
                 if self.command == "HEAD":
-                    return self._answer(200, headers={"Content-Length": str(len(stored))}, key=key)
+                    headers = {"Content-Length": str(len(stored))}
+                    if stub.checksums and key in stub.kept and self.headers.get("x-amz-checksum-mode", "").upper() == "ENABLED":
+                        headers["x-amz-checksum-sha256"] = base64.b64encode(hashlib.sha256(b"something else").digest()).decode() if stub.wrong_checksums else stub.kept[key]
+                    return self._answer(200, headers=headers, key=key)
                 data = (b"X" + stored[1:]) if stub.corrupt_gets and stored else stored
                 return self._answer(200, data, key=key)
 
