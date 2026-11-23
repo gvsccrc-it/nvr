@@ -178,6 +178,7 @@ def salvage(damaged: Path, output: Path, fill_from: Path | None = None) -> list[
                 _fill(fill_from, out, result, columns)
             results.append(result)
         _copy_sequences(damaged, out)
+        _work_out_derived(out)
         for row in schema:  # After the rows, so that no trigger runs on them and each index is built once
             if row["type"] in {"index", "trigger", "view"} and row["sql"]:
                 try:
@@ -205,6 +206,17 @@ def salvage(damaged: Path, output: Path, fill_from: Path | None = None) -> list[
     out.close()
     output.chmod(0o600)
     return results
+
+
+def _work_out_derived(out: sqlite3.Connection) -> None:
+    """Tables worked out from others are made again from the salvaged rows: copied, they need not agree with what was kept (a row lost,
+    or filled from the older copy). Before the triggers are made, so they do not run."""
+    from app.migrations.m0096_alarm_counts import RECOUNT
+
+    names = {row[0] for row in out.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if {"alarms", "alarm_counts"} <= names:  # The alarm inbox's counts (#517)
+        for statement in RECOUNT:
+            out.execute(statement)
 
 
 def _copy_sequences(damaged: Path, out: sqlite3.Connection) -> None:

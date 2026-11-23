@@ -75,6 +75,25 @@ class SalvageTests(unittest.TestCase):
                 handle.seek(number * 4096)
                 handle.write(bytes(4096))
 
+    def test_the_alarm_counts_are_worked_out_again_from_the_salvaged_alarms(self):
+        db = sqlite3.connect(self.path)  # Foreign keys off: the alarms need no camera or rule
+        db.executemany("INSERT INTO alarms(id,rule_id,rule_name,camera_id,track_id,label,condition_type,occurred_at,box_json,clip_starts_at,clip_ends_at,state,"
+                       "created_at,updated_at) VALUES(?,?,'Gate',?,'t','person','zone_entry','2026-11-21T00:00:00Z','{}','2026-11-21T00:00:00Z',"
+                       "'2026-11-21T00:00:10Z',?,'2026-11-21T00:00:00Z','2026-11-21T00:00:00Z')",
+                       [(f"a{index}", "gate" if index % 2 else None, f"cam{index % 3}", "resolved" if index % 4 else "new") for index in range(40)])
+        db.execute("UPDATE alarm_counts SET count=count+5")  # Counts that no longer agree with the alarms, as copied counts may not
+        db.commit()
+        db.close()
+        db_salvage.salvage(self.path, self.output)
+        salvaged = sqlite3.connect(self.output)
+        try:
+            self.assertEqual(
+                salvaged.execute("SELECT camera_id,rule_key,rule_name,state,count FROM alarm_counts ORDER BY 1,2,3,4").fetchall(),
+                salvaged.execute("SELECT camera_id,COALESCE(rule_id,''),rule_name,state,COUNT(*) FROM alarms GROUP BY 1,2,3,4 ORDER BY 1,2,3,4").fetchall())
+            self.assertTrue(salvaged.execute("SELECT 1 FROM alarm_counts").fetchone())
+        finally:
+            salvaged.close()
+
     def test_a_healthy_file_is_copied_whole(self):
         results = db_salvage.salvage(self.path, self.output)
         self.assertTrue(all(result.whole for result in results))

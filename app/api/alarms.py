@@ -93,27 +93,32 @@ def list_alarms(
     if not user.access.unrestricted:
         # Only alarms of cameras this person may see, in the list, the counts and the rule filter alike.
         permitted = sorted(user.access.cameras or ())
-        permission.append("camera_id IN (%s)" % ",".join("?" * len(permitted)) if permitted else "0")
+        if not permitted:  # Nothing to see (and a clause that is always false leaves the open-alarms index unusable)
+            return {"alarms": [], "counts": {key: 0 for key in ("new", "acknowledged", "assigned", "resolved")}, "rules": []}
+        permission.append("camera_id IN (%s)" % ",".join("?" * len(permitted)))
         permission_values.extend(permitted)
-    scope.extend(permission)
-    scope_values.extend(permission_values)
-    clauses, values = list(scope), list(scope_values)
+    clauses, values = scope + permission, scope_values + permission_values
     if state == "open":
         clauses.append("state IN ('new','acknowledged','assigned')")
     elif state != "all":
         clauses.append("state=?")
         values.append(state)
     where = " WHERE " + " AND ".join(clauses) if clauses else ""
-    scoped = " WHERE " + " AND ".join(scope) if scope else ""
+    # The counts and the rule filter come from alarm_counts, kept up with the alarms by triggers: they used to read every alarm, resolved
+    # history included, on every poll (#517). Its rule column is rule_key: the rule's id, or '' once the rule is gone.
+    counted = [clause.replace("rule_id=?", "rule_key=?") for clause in scope] + permission
     with connect() as db:
-        # The default view (every open alarm, newest first) is read from the index made for it. Without table statistics SQLite would
-        # otherwise take the state index and sort every open alarm on each poll (#349); with a camera or rule filter its own index is better.
-        source = "alarms INDEXED BY alarms_open_order_idx" if state == "open" and not camera_id and not rule_id and user.access.unrestricted else "alarms"
+        # The default view (every open alarm, newest first) is read from the index made for it (#349), for an operator limited to some
+        # cameras too, whose cameras are checked row by row: open alarms are few. Without the hint SQLite would read every alarm of those
+        # cameras, ninety days of history, and sort them on each poll (#517). With a camera or rule filter, that column's index is better.
+        source = "alarms INDEXED BY alarms_open_order_idx" if state == "open" and not camera_id and not rule_id else "alarms"
         rows = db.execute(f"SELECT * FROM {source}" + where + " ORDER BY occurred_at DESC,id LIMIT ?", (*values, limit)).fetchall()
-        counts = {row["state"]: row["count"] for row in db.execute("SELECT state,count(*) AS count FROM alarms" + scoped + " GROUP BY state", scope_values)}
+        counts = {row["state"]: row["count"] for row in db.execute(
+            "SELECT state,SUM(count) AS count FROM alarm_counts" + (" WHERE " + " AND ".join(counted) if counted else "") + " GROUP BY state",
+            scope_values + permission_values)}
         # Every rule that has raised an alarm, for the rule filter (operators cannot list rules).
-        rules = db.execute("SELECT rule_id AS id,max(rule_name) AS name FROM alarms WHERE " + "".join(f"{clause} AND " for clause in permission) + "rule_id IS NOT NULL GROUP BY rule_id ORDER BY name COLLATE NOCASE",
-                           permission_values).fetchall()
+        rules = db.execute("SELECT rule_key AS id,max(rule_name) AS name FROM alarm_counts WHERE " + "".join(f"{clause} AND " for clause in permission)
+                           + "rule_key!='' GROUP BY rule_key ORDER BY name COLLATE NOCASE", permission_values).fetchall()
         return {"alarms": alarms.alarm_views(db, rows),
                 "counts": {key: counts.get(key, 0) for key in ("new", "acknowledged", "assigned", "resolved")},
                 "rules": [dict(rule) for rule in rules]}

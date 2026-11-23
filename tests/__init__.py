@@ -42,8 +42,12 @@ _copying = True
 
 
 def _fresh_identity(db: sqlite3.Connection) -> None:
-    """What a migration makes at random for each installation must not be shared by every copy: two sites in one test are two installations."""
-    db.execute("UPDATE failover_settings SET instance_id=lower(hex(randomblob(16))) WHERE singleton_id=1")
+    """What a migration makes at random for each installation must not be shared by every copy: two sites in one test are two installations.
+
+    A copy of an older schema (a test that stops the migrations early, to test an upgrade) has no failover table yet: nothing to change there.
+    Asking it of such a copy raised when that test ran twice in one process, as when its module is named twice on the command line."""
+    if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='failover_settings'").fetchone():
+        db.execute("UPDATE failover_settings SET instance_id=lower(hex(randomblob(16))) WHERE singleton_id=1")
 
 
 def _migrate(path: Path, connect: Callable[[], sqlite3.Connection]) -> list[int]:
