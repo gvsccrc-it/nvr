@@ -17,6 +17,7 @@ from typing import Any, Callable
 
 import httpx
 
+from . import camera_destination
 from .onvif_client import DEFAULT_PORTS, OnvifClient, OnvifError, Services
 from .onvif_events import probe_motion
 from .onvif_profiles import MediaProfile, Selection, choose_profiles
@@ -62,6 +63,12 @@ async def verify_video(source: str, protocols: str | None = None) -> dict[str, A
     executable = shutil.which("ffmpeg")
     if not executable:
         return {"decoded": False, "reason": "Video verification is unavailable: FFmpeg is not installed"}
+    try:
+        source = await camera_destination.apin_url(source)  # FFmpeg is given the checked address, never a name to look up again (#474)
+    except camera_destination.RefusedDestination as exc:
+        return {"decoded": False, "opened": False, "reason": str(exc)}
+    except OSError:
+        return {"decoded": False, "opened": False, "reason": "The camera's host name could not be looked up"}
     opened = await probe_stream(source) if (protocols or STREAM_PROTOCOLS) is None else {"reachable": True}
     if not opened.get("reachable"):
         return {"decoded": False, "opened": False, "reason": f"The camera's video stream could not be opened: {opened.get('reason', 'no answer')}"}
@@ -175,6 +182,8 @@ class _Inspection:
         try:
             url = await client.locate_device(device_service_url, ports_for(brand))
         except OnvifError as exc:
+            if exc.code == "refused":
+                raise ValueError(exc.message) from None  # The address is refused (#474): no report, the request is refused
             self.done("connect", "failed", _failure(exc))
             self.capabilities["discovery"] = _state("failed", _failure(exc))
             return None

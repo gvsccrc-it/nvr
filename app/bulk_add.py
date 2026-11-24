@@ -22,7 +22,7 @@ from urllib.parse import urlsplit
 from fastapi import HTTPException
 from pydantic import ValidationError
 
-from . import camera_inspect
+from . import camera_destination, camera_inspect
 from .audit import record
 from .clock import stamp
 from .credentials import decrypt, encrypt
@@ -260,7 +260,10 @@ async def process(item: dict[str, Any], recorders: Any) -> None:
         else:
             host, endpoint = split_address(item["host"])
             host = normalise_host(host)
-        report = await camera_inspect.inspect_camera(host, username, password, device_service_url=endpoint, brand="auto", verify=True)
+        # Bulk Add never allows a public address (#474): only an administrator in a browser can, one camera at a time. A refused address
+        # raises ValueError here, before anything connects, and is this row's failure.
+        with camera_destination.public_permitted(False):
+            report = await camera_inspect.inspect_camera(host, username, password, device_service_url=endpoint, brand="auto", verify=True)
         if not report["ok"] and not item["add_anyway"]:
             if claim:
                 await asyncio.to_thread(_release_discovery_add, claim["candidate_id"], claim["token"])

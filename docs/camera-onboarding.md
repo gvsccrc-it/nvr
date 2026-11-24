@@ -88,7 +88,24 @@ Discover, Manual Add and CSV Import are unchanged. Checking, adding and listing 
 
 ## Host names
 
-A camera can be given by host name or IPv6 address as well as IPv4. The address is stored in one spelling (lower case, without brackets or spaces). The NVR does not resolve a host name to check where it points: the administrator who enters it is trusted to, as with a stream address. The weekly hardening check "outside the camera networks" looks at IP addresses only, so a camera saved by name is not covered by it, and the camera's other addresses are still checked.
+A camera can be given by host name or IPv6 address as well as IPv4. The address is stored in one spelling (lower case, without brackets or spaces). Every time the NVR connects, it looks the name up and holds each address it gives to the camera address rule (next section). The weekly hardening check "outside the camera networks" looks at IP addresses only, so a camera saved by name is not covered by it, and the camera's other addresses are still checked.
+
+## Which camera addresses the NVR connects to
+
+Every way of pointing the NVR at a camera follows one rule (#474): inspecting a camera, Quick Add, Manual Add, Bulk Add, CSV import, the stream test, loading profiles, recording and live view, and every use of a stored device address (PTZ, privacy masks, relay outputs, two-way audio, health checks, capability rechecks, motion events, backfill). Without it, a leaked `admin` API token could use these to map the network the NVR sits on, the services on the NVR's own machine and a cloud metadata address included.
+
+| Address | Rule |
+|---|---|
+| Link-local (`169.254.x.x`, `fe80::`), which is where cloud metadata services answer; unspecified (`0.x.x.x`, `::`); multicast; reserved; the NVR's own addresses | Refused, always |
+| On the NVR's own machine (loopback: `127.0.0.0/8`, `::1`) | Refused, unless the server's configuration sets `NVR_CAMERA_ALLOW_LOOPBACK=true` |
+| Private (`10.x`, `172.16-31.x`, `192.168.x`, `100.64.x`, `fc00::/7` and the other ranges the internet does not route) | Allowed |
+| Public (anything the internet routes) | Refused, unless the camera is allowed to be at a public address |
+
+- **Checked on the address actually connected to.** A host name is looked up once, every address it gives must pass, and the connection goes to the address that was checked: a name cannot pass the check and then be looked up again to somewhere else. HTTP requests keep the name for the `Host` header and for TLS; FFmpeg is given the checked address in place of the name (an `rtsps://` camera is then not checked against its certificate's name, which FFmpeg did not do before either).
+- **Before anything connects.** An address the rule refuses is answered with 422 and a sentence saying why; the sentence never holds the address or a login. In Bulk Add and CSV import it is that row's result.
+- **Loopback (`NVR_CAMERA_ALLOW_LOOPBACK`).** For cameras fed through a restreamer on the same machine (MediaMTX, go2rtc), whoever runs the server sets `NVR_CAMERA_ALLOW_LOOPBACK=true` in `.env`. It is server configuration only, so a leaked token cannot turn it on, and the hardening page shows a standing warning while it is on. The tests and CI's browser journeys set it, because their stand-in cameras listen on `127.0.0.1`.
+- **A camera at a public address.** An administrator signed in with a browser ticks **This camera is at a public address** when adding the camera or changing its source (Quick Add's Advanced section, Manual Add, and the camera's General tab). The tick is refused (403) from an API token, whatever its scopes. It is one camera at a time and is written to the security log (`camera_public_address_allowed`). Bulk Add and CSV import never set it, and Discover does not offer it. The tick on a private address allows nothing. The permission is kept in `cameras.public_address` (`allowed`); a later source change at a public address needs the tick again, and one at a private address clears it.
+- **Cameras from before the rule** (migration 108) are all marked `grandfathered`, so none stops recording at the upgrade. Those whose address is public are listed on the hardening page under "Cameras at public addresses"; the next change to their source needs the tick.
 
 ## Not in this slice
 

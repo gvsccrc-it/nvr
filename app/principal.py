@@ -160,6 +160,11 @@ def administrator(user: Annotated[Principal, Depends(current_user)]) -> Principa
     return user
 
 
+def is_browser_session(user: Principal) -> bool:
+    """A person signed in with a browser: never an API token, whatever its scopes, and never a video wall."""
+    return user.scopes is None and user.token_id is None and not user.wall
+
+
 def administrator_session(user: Annotated[Principal, Depends(administrator)]) -> Principal:
     """An administrator signed in with a browser session: never an API token, whatever its scopes (#463).
 
@@ -167,7 +172,7 @@ def administrator_session(user: Annotated[Principal, Depends(administrator)]) ->
     person's second factors, disabling or enabling an account, how long the security log is kept, and camera access grants. An ``admin``
     token is never asked for a second factor, so a leaked one could otherwise turn the second factor off for everyone, lock every other
     account out and shorten the log of having done it. Managing API tokens is refused to tokens the same way (``app/api/automation.py``)."""
-    if user.scopes is not None or user.token_id is not None or user.wall:
+    if not is_browser_session(user):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="This needs an administrator signed in with a browser, not an API token")
     return user
 

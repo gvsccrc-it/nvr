@@ -301,7 +301,7 @@ function CandidateSetup({ candidate, existing, cameras, onChanged, onOpenExistin
       <h2 className="setup-title">{candidateLabel(candidate)}</h2>
       <p className="muted field-hint">Identity {candidate.device_uuid} · capabilities: {Object.entries(candidate.capabilities).map(([key, value]) => `${key.replace(/_/g, " ")} ${value}`).join(", ") || "not reported"}</p>
       <label className="field"><span>Camera name</span><input value={name} onChange={event => setName(event.target.value)} maxLength={120} /></label>
-      <ConnectionFields value={connection} onChange={setConnection} allowUrl={false} />
+      <ConnectionFields value={connection} onChange={setConnection} allowUrl={false} allowPublic={false} />
       <p className="muted field-hint">New cameras use motion recording and start with recording turned off.</p>
       {result ? <p className="notice" data-tone={result.tone} role={result.tone === "good" ? "status" : "alert"}>{result.text}</p> : null}
       <div className="field-actions">

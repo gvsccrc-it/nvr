@@ -29,8 +29,29 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, Iterator
 
+import app.camera_destination as _destination
 import app.migrations as _migrations
 import app.security as _security
+
+# The stand-in cameras (the mock ONVIF camera, PTZ, masks, two-way audio, relay receivers) and CI's simulated RTSP camera listen on
+# 127.0.0.1, which the camera address rule refuses unless the server's configuration allows it (#474). The tests are such a server; the
+# tests of the rule itself (``tests/test_camera_destination.py``) turn it off where they need to.
+os.environ.setdefault("NVR_CAMERA_ALLOW_LOOPBACK", "true")
+
+# Many tests give a camera a stand-in address under the reserved ``.invalid`` name (``rtsp://camera.invalid/main``) and stand FFmpeg in for
+# the camera. The rule looks a name up before anything connects and gives FFmpeg the address it checked, and ``.invalid`` never resolves:
+# for the camera address rule only, such a name is this machine, where nothing answers a camera's port. A test that is about looking names
+# up (``tests/test_camera_destination.py``) uses other names, which go to the real lookup.
+_real_addresses_of = _destination.addresses_of
+
+
+def _stand_in_addresses(host: str, port: int | None = None) -> list[str]:
+    if host.strip().strip("[]").lower().rstrip(".").endswith(".invalid"):
+        return ["127.0.0.1"]
+    return _real_addresses_of(host, port)
+
+
+_destination.addresses_of = _stand_in_addresses
 
 PRODUCTION_PASSWORD_ROUNDS = _security._ITERATIONS
 TEST_PASSWORD_ROUNDS = 1_000

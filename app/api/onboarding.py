@@ -20,7 +20,7 @@ from app.principal import Administrator
 from app.store import connect, read_one
 from app.recording import probe_stream, safe_stream_url
 from app.discovery import discover_onvif, discover_onvif_ip_range
-from app import diagnostics
+from app import camera_destination, diagnostics
 from app.request_validation import normalize_group_name
 from app.api.cameras import CameraCreateRequest, CameraProbeRequest, MotionZoneRequest, camera_view, insert_camera, record_discovery_failure, record_discovery_probe, create_camera
 
@@ -202,7 +202,8 @@ async def apply_camera_import(
         if item is None:
             return None
         async with probe_limit:
-            return await probe_stream(item.stream_url)
+            with camera_destination.public_permitted(False):  # CSV import never allows a public address (#474)
+                return await probe_stream(item.stream_url)
 
     checks = await asyncio.gather(*(check(item) for item in validated))
     results: list[dict[str, object]] = []

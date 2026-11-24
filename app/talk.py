@@ -26,6 +26,7 @@ from urllib.parse import unquote, urljoin, urlsplit
 
 import numpy as np
 
+from app import camera_destination
 from app.audit import record
 from app.store import connect
 
@@ -165,8 +166,9 @@ UNPROTECTED_REFUSED = ("The camera asked for its password to be sent unprotected
 class RtspBackchannel:
     """One RTSP session in which this process sends audio to a camera. Use ``connect`` then ``send`` then ``close``."""
 
-    def __init__(self, url: str, *, allow_basic: bool = False) -> None:
+    def __init__(self, url: str, *, allow_basic: bool = False, allow_public: bool = False) -> None:
         parts = urlsplit(url)
+        self.allow_public = allow_public  # The camera may be at a public address (#474)
         # Whether a request for Basic sign-in may be answered. Talking runs over plain RTSP only, where Basic is the user name and
         # password merely encoded: answered, anything at the camera's address that asks for it is handed them (#476). Off unless an
         # administrator allowed it for this camera.
@@ -282,7 +284,11 @@ class RtspBackchannel:
     # -- the session
     async def connect(self) -> AudioTrack:
         try:
-            self._reader, self._writer = await asyncio.wait_for(asyncio.open_connection(self.host, self.port), CONNECT_TIMEOUT)
+            # The camera address rule, on the address actually connected to: the name is looked up once and that address checked (#474)
+            address = await asyncio.wait_for(camera_destination.aresolve(self.host, self.port, allow_public=self.allow_public), CONNECT_TIMEOUT)
+            self._reader, self._writer = await asyncio.wait_for(asyncio.open_connection(address, self.port), CONNECT_TIMEOUT)
+        except camera_destination.RefusedDestination as exc:
+            raise BackchannelError(str(exc)) from None
         except (OSError, asyncio.TimeoutError) as exc:
             raise BackchannelError("The camera cannot be reached") from exc
         self._drain = asyncio.create_task(self._read_frames())

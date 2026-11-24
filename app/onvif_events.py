@@ -269,8 +269,9 @@ async def subscribe_and_pull(
     *,
     on_detail: Callable[[str], None] | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
+    allow_public: bool = False,
 ) -> None:
-    """Keep an ONVIF PullPoint subscription alive for as long as the task runs.
+    """Keep an ONVIF PullPoint subscription alive for as long as the task runs. ``allow_public``: the camera may be at a public address (#474).
 
     The subscription is renewed before it lapses and made again if the camera drops it. After a fault the NVR reconnects with a growing, bounded,
     jittered wait, and reports ``healthy``, ``unavailable``, ``authentication_error`` or ``unsupported`` for the camera's motion source. Detectors that
@@ -293,7 +294,7 @@ async def subscribe_and_pull(
     while True:
         delay = None
         try:
-            async with OnvifClient(parsed.hostname, username, password, timeout=EVENTS_HTTP_TIMEOUT, transport=transport) as client:
+            async with OnvifClient(parsed.hostname, username, password, timeout=EVENTS_HTTP_TIMEOUT, transport=transport, allow_public=allow_public) as client:
                 url = await client.locate_device(device_service_url)
                 services = await client.services(url)
                 events_url = services.urls.get("events")
@@ -336,6 +337,9 @@ async def subscribe_and_pull(
             raise
         except OnvifError as error:
             detail(error.message)
+            if error.code == "refused":  # The address is refused (#474): asking again will not change that
+                on_status("configuration_error")
+                return
             on_status(_status_for(error))
             delay = AUTH_RETRY_SECONDS if error.code == "auth_rejected" else None
         except (httpx.HTTPError, OSError, ValueError, ET.ParseError):

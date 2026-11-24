@@ -23,6 +23,7 @@ import sqlite3
 from datetime import datetime, timedelta
 from typing import Any
 
+from . import camera_destination
 from .clock import now as _now
 from .credentials import decrypt
 from .incidents import sync_incident
@@ -70,14 +71,15 @@ async def ask(camera_id: str) -> str:
     from .onvif_masks import MasksUnsupported, read_masks
 
     with connect() as db:
-        row = db.execute("SELECT m.zones_json,m.camera_mask_tokens_json,m.written_to,c.device_service_url,c.motion_credentials_ciphertext "
+        row = db.execute("SELECT m.zones_json,m.camera_mask_tokens_json,m.written_to,c.device_service_url,c.motion_credentials_ciphertext,c.public_address "
                          "FROM privacy_masks m JOIN cameras c ON c.id=m.camera_id WHERE m.camera_id=?", (camera_id,)).fetchone()
     if row is None or not row["device_service_url"] or row["device_service_url"] != row["written_to"]:
         return MISSING  # Not the device the masks were written to: never trusted (``privacy.server_zones`` already masks)
     credentials = json.loads(decrypt(row["motion_credentials_ciphertext"])) if row["motion_credentials_ciphertext"] else {}
     try:
-        found = await asyncio.wait_for(read_masks(row["device_service_url"], credentials.get("username", ""), credentials.get("password", "")),
-                                       CHECK_TIMEOUT_SECONDS)
+        with camera_destination.public_permitted(camera_destination.camera_allows_public(row)):  # The camera address rule (#474)
+            found = await asyncio.wait_for(read_masks(row["device_service_url"], credentials.get("username", ""), credentials.get("password", "")),
+                                           CHECK_TIMEOUT_SECONDS)
     except MasksUnsupported:
         return MISSING
     except Exception:  # noqa: BLE001 - whatever the reason, it could not be asked; never logged with the camera's address or login

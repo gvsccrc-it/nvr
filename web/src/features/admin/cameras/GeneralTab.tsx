@@ -5,6 +5,7 @@ import { keys } from "@/api/queries";
 import type { Camera, CameraBrand, OnvifProfile, StreamProbe } from "@/api/types";
 import { useDraft } from "../drafts";
 import { loadProfiles, renameCamera, testSource, updateSource, type SourceDraft } from "./api";
+import { PublicAddressField } from "./add/ConnectionFields";
 import { BRAND_LABEL } from "./inventory";
 
 interface Draft {
@@ -19,6 +20,7 @@ interface Draft {
   device_service_url: string;
   onvif_profile_token: string;
   live_substream_profile_token: string;
+  public_address: boolean;
 }
 
 function published(camera: Camera): Draft {
@@ -35,10 +37,12 @@ function published(camera: Camera): Draft {
     device_service_url: camera.device_service_url ?? "",
     onvif_profile_token: camera.onvif_profile_token ?? "",
     live_substream_profile_token: camera.live_substream_profile_token ?? "",
+    // Ticked only when an administrator allowed it: a camera kept from before the address rule needs the tick at its next source change (#474)
+    public_address: camera.public_address === "allowed",
   };
 }
 
-const SOURCE_FIELDS: (keyof Draft)[] = ["mode", "camera_ip", "stream_url", "username", "password", "clear_credentials", "camera_brand", "device_service_url", "onvif_profile_token", "live_substream_profile_token"];
+const SOURCE_FIELDS: (keyof Draft)[] = ["mode", "camera_ip", "stream_url", "username", "password", "clear_credentials", "camera_brand", "device_service_url", "onvif_profile_token", "live_substream_profile_token", "public_address"];
 
 function sourceOf(draft: Draft): SourceDraft {
   const value = (text: string) => text.trim() || null;
@@ -52,6 +56,7 @@ function sourceOf(draft: Draft): SourceDraft {
     onvif_profile_token: draft.mode === "onvif" ? value(draft.onvif_profile_token) : null,
     live_substream_profile_token: draft.mode === "onvif" ? value(draft.live_substream_profile_token) : null,
     clear_credentials: draft.clear_credentials,
+    public_address: draft.public_address,
   };
 }
 
@@ -214,6 +219,10 @@ export function GeneralTab({ camera, admin }: { camera: Camera; admin: boolean }
                    placeholder={`Saved: ${camera.stream_url} (enter the full URL to change it)`} autoComplete="off" />
           </label>
         )}
+        <PublicAddressField checked={draft.public_address} onChange={checked => change("public_address", checked)} />
+        {camera.public_address === "grandfathered" ? (
+          <p className="muted field-hint">This camera was added before the NVR checked camera addresses. If its address is public, tick the box above when you change its source.</p>
+        ) : null}
       </fieldset>
 
       <fieldset className="field-group">

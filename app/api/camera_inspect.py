@@ -9,7 +9,8 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, model_validator
 
-from app import camera_inspect
+from app import camera_destination, camera_inspect
+from app.api.cameras import public_permission
 from app.audit import record
 from app.onvif_client import normalise_host
 from app.principal import Administrator
@@ -27,6 +28,7 @@ class InspectRequest(BaseModel):
     device_service_url: str | None = Field(default=None, max_length=2048)
     camera_brand: CameraBrand = "auto"
     verify_video: bool = True
+    public_address: bool = False  # "This camera is at a public address" (#474): from an administrator signed in with a browser only
 
     @model_validator(mode="after")
     def validate_request(self) -> "InspectRequest":
@@ -42,11 +44,14 @@ class InspectRequest(BaseModel):
 @router.post("/api/cameras/inspect")
 async def inspect_camera(payload: InspectRequest, admin: Administrator) -> dict[str, object]:
     """Run every onboarding step against one camera and report each step's outcome. A camera that fails a step is still a 200 with the reason:
-    nothing here saves anything, and the report never holds a credential. At most a few inspections run at once."""
+    nothing here saves anything, and the report never holds a credential. At most a few inspections run at once. An address the camera
+    destination rule refuses is a 422 before anything connects (#474)."""
+    allowed = public_permission(payload, admin)
     try:
-        result = await camera_inspect.inspect_camera(
-            payload.host, payload.username or "", payload.password or "", device_service_url=payload.device_service_url,
-            brand=payload.camera_brand, verify=payload.verify_video)
+        with camera_destination.public_permitted(allowed):
+            result = await camera_inspect.inspect_camera(
+                payload.host, payload.username or "", payload.password or "", device_service_url=payload.device_service_url,
+                brand=payload.camera_brand, verify=payload.verify_video)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from None
     await asyncio.to_thread(_note, admin.id, payload.host, result)
@@ -66,12 +71,14 @@ async def inspect_camera_live(payload: InspectRequest, admin: Administrator) -> 
     answers) or ``{"type": "error"}``. A check takes up to a minute; this way the page shows each step when it is done. Closing the page ends
     the check."""
     updates: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+    allowed = public_permission(payload, admin)
 
     async def check() -> None:
         try:
-            result = await camera_inspect.inspect_camera(
-                payload.host, payload.username or "", payload.password or "", device_service_url=payload.device_service_url,
-                brand=payload.camera_brand, verify=payload.verify_video, on_step=lambda step: updates.put_nowait({"type": "step", "step": step}))
+            with camera_destination.public_permitted(allowed):
+                result = await camera_inspect.inspect_camera(
+                    payload.host, payload.username or "", payload.password or "", device_service_url=payload.device_service_url,
+                    brand=payload.camera_brand, verify=payload.verify_video, on_step=lambda step: updates.put_nowait({"type": "step", "step": step}))
         except ValueError as exc:
             updates.put_nowait({"type": "error", "detail": str(exc)})
             return

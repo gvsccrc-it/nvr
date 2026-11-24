@@ -65,6 +65,9 @@ const fixtureEnvironment = {
   NVR_DISCOVERY_INTERFACE: "127.0.0.1",
   NVR_BACKUP_PASSPHRASE_FILE: BACKUP_PASSPHRASE_PATH,
   NVR_BACKUP_PATH: path.join(FIXTURE_DIRECTORY, "backups"),
+  // The simulated camera (MediaMTX) and the stand-in devices listen on 127.0.0.1, which the camera address rule refuses unless the
+  // server's own configuration allows it (#474)
+  NVR_CAMERA_ALLOW_LOOPBACK: "true",
 };
 fs.writeFileSync(FIXTURE_ENVIRONMENT_PATH, `${JSON.stringify(fixtureEnvironment, null, 2)}\n`, { mode: 0o600 });
 fs.chmodSync(FIXTURE_ENVIRONMENT_PATH, 0o600);

@@ -24,7 +24,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable
 
-from . import acceleration, copies_budget
+from . import acceleration, camera_destination, copies_budget
 from .access import may_view_camera
 from .credentials import decrypt
 from .processes import run_to_end
@@ -519,7 +519,7 @@ async def _save(camera_id: str, zones: list[dict[str, float]], actor_id: int) ->
     from .onvif_masks import MasksUnsupported, MaskWriteFailed, write_masks
 
     with connect() as db:
-        camera = db.execute("SELECT device_service_url,motion_credentials_ciphertext FROM cameras WHERE id=?", (camera_id,)).fetchone()
+        camera = db.execute("SELECT device_service_url,motion_credentials_ciphertext,public_address FROM cameras WHERE id=?", (camera_id,)).fetchone()
         if camera is None:
             raise LookupError("Camera not found")
         previous = mask_row(db, camera_id)
@@ -528,7 +528,8 @@ async def _save(camera_id: str, zones: list[dict[str, float]], actor_id: int) ->
     if camera["device_service_url"] and (zones or previous_tokens):
         credentials = json.loads(decrypt(camera["motion_credentials_ciphertext"])) if camera["motion_credentials_ciphertext"] else {}
         try:
-            tokens = await write_masks(camera["device_service_url"], credentials.get("username", ""), credentials.get("password", ""), zones, previous_tokens)
+            with camera_destination.public_permitted(camera_destination.camera_allows_public(camera)):  # The camera address rule (#474)
+                tokens = await write_masks(camera["device_service_url"], credentials.get("username", ""), credentials.get("password", ""), zones, previous_tokens)
             camera_side = "applied" if zones else "none"
             since = _now().isoformat() if zones else None
             written_to = camera["device_service_url"]

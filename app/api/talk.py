@@ -42,7 +42,7 @@ def _camera_row(camera_id: str, user: Principal):
 
 
 def _visible_camera(db, camera_id: str, user: Principal):
-    row = db.execute("SELECT id,name,archived_at,stream_url_ciphertext FROM cameras WHERE id=?", (camera_id,)).fetchone()
+    row = db.execute("SELECT id,name,archived_at,stream_url_ciphertext,public_address FROM cameras WHERE id=?", (camera_id,)).fetchone()
     if row is None or row["archived_at"] or not user.access.can_see(camera_id):
         raise HTTPException(status_code=404, detail="Camera not found")
     return row
@@ -186,7 +186,7 @@ async def talk_stream(websocket: WebSocket, camera_id: str) -> None:
         try:
             url = decrypt(row["stream_url_ciphertext"])
             safe_stream_url(url)
-            backchannel = talk.RtspBackchannel(url, allow_basic=bool(config["allow_basic"]))
+            backchannel = talk.RtspBackchannel(url, allow_basic=bool(config["allow_basic"]), allow_public=row["public_address"] is not None)
             track = await backchannel.connect()
             codec = track.codec
         except talk.BackchannelUnsupported as exc:

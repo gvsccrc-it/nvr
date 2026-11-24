@@ -29,7 +29,7 @@ from xml.sax.saxutils import escape
 
 import httpx
 
-from . import env_numbers
+from . import camera_destination, env_numbers
 from .onvif_profiles import MediaProfile, parse_profiles
 from .onvif_soap import declares_dtd, local as _local, read_capped
 
@@ -67,6 +67,7 @@ ERROR_TEXT = {
     "soap_fault": "The camera refused the request",
     "malformed": "The camera answered, but not with a valid ONVIF response",
     "unsupported": "The camera answered in a way the NVR does not support",
+    "refused": "The NVR does not connect to that camera address",
 }
 
 
@@ -139,11 +140,14 @@ class OnvifClient:
     """One camera's ONVIF services. Make one per camera per operation; it holds what it learned (clock offset, authentication) in memory only."""
 
     def __init__(self, host: str, username: str = "", password: str = "", *, transport: httpx.AsyncBaseTransport | None = None,
-                 timeout: httpx.Timeout = TIMEOUT) -> None:
+                 timeout: httpx.Timeout = TIMEOUT, allow_public: bool | None = None) -> None:
         self.host = normalise_host(host)
         if bool(username) != bool(password):
             raise ValueError("Enter both the camera username and password, or leave both blank")
         self._username, self._password = username, password
+        # Every connection follows the camera address rule (#474), on the address actually connected to. ``allow_public``: this camera may
+        # be at a public address (unset: as the work in progress says, ``camera_destination.public_permitted``).
+        transport = transport or camera_destination.camera_transport(allow_public=allow_public)
         self._http = httpx.AsyncClient(timeout=timeout, trust_env=False, follow_redirects=False, transport=transport)
         self._deadline = 3 * float(timeout.read or 8.0) + float(timeout.connect or 3.0)  # For one whole exchange, however slowly its bytes arrive
         self.clock_offset: timedelta | None = None
@@ -238,6 +242,8 @@ class OnvifClient:
             raise OnvifError("timeout") from None
         except (httpx.HTTPError, OSError):
             raise OnvifError("unreachable") from None
+        except camera_destination.RefusedDestination as exc:
+            raise OnvifError("refused", str(exc)) from None
         root = None
         if data:
             try:
@@ -351,6 +357,8 @@ class OnvifClient:
             try:
                 response, root = await self._once(url, f"{DEVICE}/GetSystemDateAndTime", "<tds:GetSystemDateAndTime/>", "none")
             except OnvifError as exc:
+                if exc.code == "refused":
+                    raise  # The address itself is refused (#474): no other port is tried
                 refused += exc.code == "unreachable"
                 self._note(operation="Locate", service="device", auth="none", outcome=exc.code, status=None, ms=int((time.monotonic() - started) * 1000), port=urlsplit(url).port)
                 continue

@@ -21,7 +21,7 @@ from app.live_hub import LiveHub, Viewer
 from app.processes import end_process
 from app.principal import Administrator, CurrentUser, current_user, requires_scope
 from app.store import connect
-from app import network, privacy, viewing_audit
+from app import camera_destination, network, privacy, viewing_audit
 from app.credentials import decrypt
 from app.recording import safe_stream_url, _manifest_bytes
 
@@ -237,7 +237,7 @@ def live_camera_audio(
     user: CurrentUser,
 ) -> StreamingResponse:
     with connect() as db:
-        camera = db.execute("SELECT stream_url_ciphertext,audio_supported,audio_enabled,archived_at FROM cameras WHERE id=?", (camera_id,)).fetchone()
+        camera = db.execute("SELECT stream_url_ciphertext,audio_supported,audio_enabled,archived_at,public_address FROM cameras WHERE id=?", (camera_id,)).fetchone()
     if camera is None:
         raise HTTPException(status_code=404, detail="Camera not found")
     if camera["archived_at"]:
@@ -267,6 +267,8 @@ def live_camera_audio(
         upcoming: asyncio.Future | None = None
         watching = viewing_audit.LiveSession(user.id, camera_id, "audio")
         try:
+            # FFmpeg is given the address the camera address rule checked, never a name to look up again (#474)
+            target = await camera_destination.apin_url(source, allow_public=camera_destination.camera_allows_public(camera))
             process = await asyncio.create_subprocess_exec(
                 executable, "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0",
                 "-protocol_whitelist", "concat,pipe,rtsp,rtsps,tcp,udp,rtp,tls,crypto", "-i", "pipe:0",
@@ -276,7 +278,7 @@ def live_camera_audio(
             )
             if process.stdin is None or process.stdout is None:
                 return
-            process.stdin.write(_manifest_bytes(source))
+            process.stdin.write(_manifest_bytes(target))
             await process.stdin.drain()
             process.stdin.close()
             while True:
@@ -295,7 +297,7 @@ def live_camera_audio(
                 yield chunk
         except asyncio.CancelledError:
             raise
-        except (OSError, RuntimeError):
+        except (OSError, RuntimeError, camera_destination.RefusedDestination):
             return
         finally:
             if upcoming is not None and not upcoming.done():
@@ -308,10 +310,21 @@ def live_camera_audio(
     return StreamingResponse(stream(), media_type="audio/mpeg", headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
 
+def _allows_public(camera_id: str) -> bool:
+    with connect() as db:
+        row = db.execute("SELECT public_address FROM cameras WHERE id=?", (camera_id,)).fetchone()
+    return row is not None and camera_destination.camera_allows_public(row)
+
+
 async def _mjpeg_frames(camera_id: str, source: str, quality: str, zones: list | None = None):
     executable = shutil.which("ffmpeg")
     if not executable:
         raise RuntimeError("Live video transcoding is unavailable")
+    try:
+        # FFmpeg is given the address the camera address rule checked, with the camera's own permission for a public address (#474)
+        source = await camera_destination.apin_url(source, allow_public=await asyncio.to_thread(_allows_public, camera_id))
+    except (OSError, camera_destination.RefusedDestination) as exc:
+        raise RuntimeError(str(exc)) from None
     width, fps, jpeg_quality = (640, 6, 8) if quality == "low" else (1280, 12, 5)
     args = [
         executable, "-hide_banner", "-nostats", "-loglevel", "error", "-f", "concat", "-safe", "0",
@@ -476,7 +489,7 @@ def _admit(websocket: WebSocket, camera_id: str, unmasked: bool) -> "_Refusal | 
         return _Refusal(code, {"type": "unauthorized" if code == CLOSE_UNAUTHORIZED else "forbidden", "detail": exc.detail})
     with connect() as db:
         camera = db.execute(
-            "SELECT stream_url_ciphertext,live_substream_url_ciphertext,video_codec,audio_enabled,archived_at FROM cameras WHERE id=?",
+            "SELECT stream_url_ciphertext,live_substream_url_ciphertext,video_codec,audio_enabled,archived_at,public_address FROM cameras WHERE id=?",
             (camera_id,),
         ).fetchone()
     if camera is None:
@@ -711,7 +724,8 @@ async def live_stream(
         mark_camera_fresh(camera_id)
 
     joined_running = (running := hub.streams.get(conversion_key)) is not None and running.ready.is_set() and not running.failed
-    stream = hub.join(conversion_key, source, variant.include_audio, viewer, mark_fresh, variant.video_filter, variant.transcode, variant.hevc_copy)
+    with camera_destination.public_permitted(camera_destination.camera_allows_public(camera)):  # The camera address rule (#474)
+        stream = hub.join(conversion_key, source, variant.include_audio, viewer, mark_fresh, variant.video_filter, variant.transcode, variant.hevc_copy)
     wait: dict[str, object] = {"camera_id": camera_id, "at": datetime.now(timezone.utc).isoformat(), "profile": variant.profile, "mode": variant.mode,
                                "joined_running": joined_running}
     session = _LiveViewer(websocket, camera_id, hub, stream, viewer, conversion_key if _converts(variant) else None, listening, variant.include_audio,

@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 
 import httpx
 
+from . import camera_destination
 from .onvif_destination import UnsafeDestination, confine
 from .onvif_soap import call as _soap_call, escape as _escape, local as _local
 from .onvif_stream import DEVICE, MAX_RESPONSE_BYTES, MEDIA, SCHEMA, SOAP
@@ -47,8 +48,9 @@ _discovered: dict[tuple[str, str | None], tuple[str, str]] = {}
 
 
 class PtzClient:
-    def __init__(self, device_service_url: str, username: str, password: str, profile_token: str | None) -> None:
+    def __init__(self, device_service_url: str, username: str, password: str, profile_token: str | None, *, allow_public: bool = False) -> None:
         self.device_service_url = device_service_url
+        self.allow_public = allow_public  # The camera may be at a public address (#474)
         self.auth = httpx.DigestAuth(username, password) if username else None
         self.profile_token = profile_token
         self.ptz_url: str | None = None
@@ -57,7 +59,8 @@ class PtzClient:
         return await _soap_call(client, url, action, _envelope(action, body), MAX_RESPONSE_BYTES)
 
     def _client(self) -> httpx.AsyncClient:
-        return httpx.AsyncClient(auth=self.auth, timeout=httpx.Timeout(8, connect=4), trust_env=False, follow_redirects=False)
+        # Every connection follows the camera address rule, on the address actually connected to (#474)
+        return camera_destination.camera_client(allow_public=self.allow_public, auth=self.auth, timeout=httpx.Timeout(8, connect=4))
 
     async def _prepare(self, client: httpx.AsyncClient) -> str:
         if self.ptz_url and self.profile_token:

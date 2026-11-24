@@ -21,7 +21,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from . import email_outbox, mqtt, ms_mail
+from . import camera_destination, email_outbox, mqtt, ms_mail
 from .alarms import label_text
 from .credentials import decrypt, encrypt
 from .store import connect, has_row
@@ -275,12 +275,13 @@ async def release_interrupted(relays: list[dict[str, Any]]) -> None:
         settings = json.loads(relay["settings_json"] or "{}")
         try:
             with connect() as db:
-                camera = db.execute("SELECT device_service_url,motion_credentials_ciphertext FROM cameras WHERE id=?", (settings.get("camera_id"),)).fetchone()
+                camera = db.execute("SELECT device_service_url,motion_credentials_ciphertext,public_address FROM cameras WHERE id=?", (settings.get("camera_id"),)).fetchone()
             if camera is None or not camera["device_service_url"]:
                 raise LookupError
             credentials = json.loads(decrypt(camera["motion_credentials_ciphertext"])) if camera["motion_credentials_ciphertext"] else {}
             async with asyncio.timeout(ATTEMPT_DEADLINE_SECONDS):
-                await release(camera["device_service_url"], credentials.get("username", ""), credentials.get("password", ""), settings.get("relay_token"))
+                with camera_destination.public_permitted(camera_destination.camera_allows_public(camera)):  # The camera address rule (#474)
+                    await release(camera["device_service_url"], credentials.get("username", ""), credentials.get("password", ""), settings.get("relay_token"))
             outcome = "interrupted_by_restart_released"
         except asyncio.CancelledError:
             raise
@@ -441,12 +442,13 @@ async def _perform(delivery: dict[str, Any]) -> tuple[int | None, str | None, bo
             from .onvif_relay import pulse
 
             with connect() as db:
-                camera = db.execute("SELECT device_service_url,motion_credentials_ciphertext FROM cameras WHERE id=?", (settings.get("camera_id"),)).fetchone()
+                camera = db.execute("SELECT device_service_url,motion_credentials_ciphertext,public_address FROM cameras WHERE id=?", (settings.get("camera_id"),)).fetchone()
             if camera is None or not camera["device_service_url"]:
                 return None, "relay_camera_unavailable", False
             credentials = json.loads(decrypt(camera["motion_credentials_ciphertext"])) if camera["motion_credentials_ciphertext"] else {}
-            await pulse(camera["device_service_url"], credentials.get("username", ""), credentials.get("password", ""),
-                        settings.get("relay_token"), float(settings.get("duration_seconds", 1)))
+            with camera_destination.public_permitted(camera_destination.camera_allows_public(camera)):  # The camera address rule (#474)
+                await pulse(camera["device_service_url"], credentials.get("username", ""), credentials.get("password", ""),
+                            settings.get("relay_token"), float(settings.get("duration_seconds", 1)))
             return None, None, False
         return None, "unknown_action", False
     except mqtt.MqttRefused as exc:
