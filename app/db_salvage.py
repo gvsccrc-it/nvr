@@ -222,6 +222,11 @@ def _work_out_derived(out: sqlite3.Connection) -> None:
 
         for statement in RESPAN:
             out.execute(statement)
+    if "insight_fresh" in names:  # Insights and heatmap totals: forgotten, and worked out again by the background (#515)
+        from app.migrations.m0109_insight_totals import FORGET
+
+        for statement in FORGET:
+            out.execute(statement)
 
 
 def _copy_sequences(damaged: Path, out: sqlite3.Connection) -> None:
