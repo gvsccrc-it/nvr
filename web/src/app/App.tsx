@@ -10,7 +10,6 @@ import { SignInPage } from "@/features/auth/SignInPage";
 import { AdministratorOnly, NotFound } from "@/features/placeholders/Pages";
 import { LiveWorkspace } from "@/features/live/LiveWorkspace";
 import { useLiveStore } from "@/features/live/store";
-import { CamerasInventory, CamerasShell } from "@/features/admin/cameras/CamerasWorkspace";
 import { useCamerasStore } from "@/features/admin/cameras/store";
 import { usePlaybackStore } from "@/features/playback/store";
 import { useUnmaskedStore } from "@/features/privacy/store";
@@ -23,6 +22,9 @@ import { refreshNativePush, watchNotificationTaps } from "@/native/push";
 import { rememberThisPhone } from "@/native/session";
 
 // Everything except the first screen (Live) and the shell loads when it is first opened (#281).
+// The camera inventory is an administrator's page as much as anyone's: loaded when first opened, not with Live (#537)
+const CamerasShell = lazyPage(() => import("@/features/admin/cameras/CamerasWorkspace"), "CamerasShell");
+const CamerasInventory = lazyPage(() => import("@/features/admin/cameras/CamerasWorkspace"), "CamerasInventory");
 const PlaybackWorkspace = lazyPage(() => import("@/features/playback/PlaybackWorkspace"), "PlaybackWorkspace");
 const InsightsWorkspace = lazyPage(() => import("@/features/insights/InsightsWorkspace"), "InsightsWorkspace");
 const DigestsList = lazyPage(() => import("@/features/digests/DigestsWorkspace"), "DigestsList");
@@ -57,9 +59,9 @@ function router(me: Me) {
           { path: "cases/:caseId", element: <Page><CaseView /></Page> },
           {
             path: "cameras",
-            element: <CamerasShell admin={me.role === "administrator"}><Outlet /></CamerasShell>,
+            element: <Page><CamerasShell admin={me.role === "administrator"}><Outlet /></CamerasShell></Page>,
             children: [
-              { index: true, element: <CamerasInventory /> },
+              { index: true, element: <Page><CamerasInventory /></Page> },
               { path: "health", element: <Page><FleetHealth /></Page> },
               { path: "maintenance", element: <Page><MaintenanceWorkspace /></Page> },
               { path: "add", element: <AdminRoute me={me}><Page><AddCameras /></Page></AdminRoute> },
