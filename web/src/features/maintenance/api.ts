@@ -18,8 +18,10 @@ export interface MaintenanceWindow {
   created_by: string | null;
   suppressed_alarms: number;
   suppressed_incidents: number;
-  /** Whether this person may end it: an administrator any window, anyone else the ones they opened. */
+  /** Whether this person may end it: an administrator any window, anyone else the ones they opened. Whoever may end it may also extend it. */
   can_end: boolean;
+  /** Running and inside its reminder time (ten minutes before the end, less for a short window): shown with a way to extend it. */
+  ending_soon: boolean;
 }
 
 export interface MaintenanceList {
@@ -58,6 +60,14 @@ export function useEndWindow() {
   const client = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => api(`/api/maintenance/${encodeURIComponent(id)}/end`, { method: "POST" }),
+    onSuccess: () => client.invalidateQueries({ queryKey: MAINTENANCE_KEY }),
+  });
+}
+
+export function useExtendWindow() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, minutes }: { id: string; minutes: number }) => api<MaintenanceWindow>(`/api/maintenance/${encodeURIComponent(id)}/extend`, { method: "POST", body: { minutes } }),
     onSuccess: () => client.invalidateQueries({ queryKey: MAINTENANCE_KEY }),
   });
 }

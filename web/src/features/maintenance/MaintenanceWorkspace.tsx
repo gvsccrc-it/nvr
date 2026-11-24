@@ -2,6 +2,7 @@ import { useState, type FormEvent } from "react";
 import { useCameraGroups, useCameras, useMe } from "@/api/queries";
 import { failureText } from "@/features/admin/tabDraft";
 import { useEndWindow, useMaintenance, useOpenWindow, type MaintenanceWindow } from "./api";
+import { ExtendWindow } from "./ExtendWindow";
 
 const DURATIONS: [number, string][] = [[30, "30 minutes"], [60, "1 hour"], [120, "2 hours"], [240, "4 hours"], [480, "8 hours"]];
 const LONGER: [number, string][] = [[1440, "1 day"], [4320, "3 days"], [10080, "7 days"]];
@@ -29,9 +30,12 @@ function WindowRow({ window, onEnd, ending }: { window: MaintenanceWindow; onEnd
         ) : null}
       </div>
       {open ? (
-        <button type="button" className="button" disabled={ending} onClick={() => onEnd(window.id)}>
-          {window.state === "upcoming" ? `Cancel ${window.name}` : `End ${window.name} now`}
-        </button>
+        <div className="field-actions">
+          <button type="button" className="button" disabled={ending} onClick={() => onEnd(window.id)}>
+            {window.state === "upcoming" ? `Cancel ${window.name}` : `End ${window.name} now`}
+          </button>
+          <ExtendWindow window={window} />
+        </div>
       ) : null}
     </li>
   );
@@ -79,7 +83,7 @@ export function MaintenanceWorkspace() {
       {error ? <p className="notice" data-tone="bad" role="alert">{error}</p> : null}
       <section className="field-group settings-block" aria-label="Start maintenance">
         <h2 className="field-heading">Start maintenance</h2>
-        <p className="muted">While cameras are being worked on, nothing is sent about them: no push, pop-in, webhook, email or other rule action. Alarms are still kept in the inbox, marked as during maintenance. Recording carries on. A camera still faulty when the window ends is announced then.</p>
+        <p className="muted">While cameras are being worked on, nothing is sent about them: no push, pop-in, webhook, email or other rule action. Alarms are still kept in the inbox, marked as during maintenance. Recording carries on; AI analysis of the cameras pauses until the window ends, and that time shows as not analyzed. A camera still faulty when the window ends is announced then. Whoever opened a window is reminded shortly before it ends, and can extend it.</p>
         <form onSubmit={submit} aria-label="Open a maintenance window">
           <label className="field"><span>What is being done</span>
             <input value={form.name} maxLength={120} placeholder="Cleaning the dock camera lens" onChange={event => setForm({ ...form, name: event.target.value })} />
@@ -118,7 +122,7 @@ export function MaintenanceWorkspace() {
             <select value={form.minutes} onChange={event => setForm({ ...form, minutes: Number(event.target.value) })}>
               {durations.map(([minutes, label]) => <option key={minutes} value={minutes}>{label}</option>)}
             </select>
-            <small className="muted field-hint">At most {administrator ? `${list.data?.limits.administrator_days ?? 7} days` : `${list.data?.limits.operator_hours ?? 8} hours`}. If the work goes on, end it and start another.</small>
+            <small className="muted field-hint">At most {administrator ? `${list.data?.limits.administrator_days ?? 7} days` : `${list.data?.limits.operator_hours ?? 8} hours`}. A running window can be extended up to the same limit; you are reminded before yours ends.</small>
           </label>
           <label className="field"><span>Starts (optional, now if empty)</span>
             <input type="datetime-local" value={form.later} onChange={event => setForm({ ...form, later: event.target.value })} />

@@ -20,7 +20,7 @@ from typing import Any, Callable, Iterable, NamedTuple
 
 import numpy as np
 
-from . import acceleration, ai_capacity, camera_destination, privacy
+from . import acceleration, ai_capacity, camera_destination, maintenance, privacy
 from .credentials import decrypt
 from .processes import end_process
 from .track_privacy import box_touches, box_usable
@@ -383,7 +383,11 @@ def set_camera_state(camera_id: str, state: str, error: str | None = None, at: d
 
 STATE_WRITE_SECONDS = 5.0  # While a camera stays "analyzed", its row is refreshed this often; any other change is written at once
 ATTEMPT_WRITE_SECONDS = 60.0  # While a camera stays failed or delayed for the same reason, the time of its last attempt is refreshed this often
-RESTING_STATES = {"disabled", "skipped"}  # Nothing is being attempted: the row is written when the state or its reason changes, and not again
+RESTING_STATES = {"disabled", "skipped", "maintenance"}  # Nothing is being attempted: the row is written when the state or its reason changes, and not again
+# The coverage a camera's state is recorded as. A camera paused for a maintenance window (#234) is "skipped", a stretch of its own with the
+# window as its reason, so the pause is never merged into a stretch of another kind (a wait for capacity, a connection) and its reason lost.
+_COVERAGE_STATE = {"analyzed": "analyzed", "delayed": "delayed", "failed": "failed", "unanalyzed": "unanalyzed", "maintenance": "skipped"}
+MAINTENANCE_TEXT = "Paused for maintenance: {name}"
 
 
 def _written_recently(written: str | None, moment: datetime, within: float = STATE_WRITE_SECONDS) -> bool:
@@ -413,14 +417,15 @@ def _set_camera_state(db: sqlite3.Connection, camera_id: str, state: str, error:
             return
     db.execute("UPDATE ai_camera_settings SET status=?,last_attempt_at=?,last_success_at=CASE WHEN ?='analyzed' THEN ? ELSE last_success_at END,last_error=?,updated_at=? WHERE camera_id=?",
                (state, stamp, state, stamp, error, stamp, camera_id))
-    active = db.execute("SELECT id,state FROM ai_coverage WHERE camera_id=? AND ends_at IS NULL ORDER BY id DESC LIMIT 1", (camera_id,)).fetchone()
+    active = db.execute("SELECT id,state,detail FROM ai_coverage WHERE camera_id=? AND ends_at IS NULL ORDER BY id DESC LIMIT 1", (camera_id,)).fetchone()
     if state == "disabled":
         if active:
             db.execute("UPDATE ai_coverage SET ends_at=? WHERE id=?", (stamp, active["id"]))
         _end_delayed_incident(db, camera_id, state)
         return
-    coverage_state = state if state in {"analyzed", "delayed", "failed", "unanalyzed"} else "unanalyzed"
-    if active and active["state"] == coverage_state:
+    coverage_state = _COVERAGE_STATE.get(state, "unanalyzed")
+    # One maintenance window followed at once by another: each keeps its own stretch and its own name.
+    if active and active["state"] == coverage_state and not (state == "maintenance" and active["detail"] != (error or "")):
         db.execute("UPDATE ai_coverage SET detail=? WHERE id=?", (error or "", active["id"]))
     else:
         if active:
@@ -457,6 +462,13 @@ def _end_delayed_incident(db: sqlite3.Connection, camera_id: str, state: str) ->
     if was == "delayed":
         sync_incident(db, incident_key=key, camera_id=camera_id, fault_type="ai_analysis", summary="AI analysis is no longer delayed: the camera is not being analysed",
                       active=False, details={"analysis_state": state, "reason": None})
+
+
+def _maintenance_pause(camera_id: str) -> str | None:
+    """The name of the maintenance window covering the camera now, whose analysis is then paused (#234), or None. Blocking."""
+    with connect() as db:
+        window = maintenance.covering(db, camera_id)
+    return None if window is None else str(window["name"])
 
 
 def _camera_source(camera_id: str, use_substream: bool) -> str:
@@ -621,18 +633,20 @@ class DetectionManager:
         score = {camera_id: (1 if watched.get(camera_id) else 0) + (1 if camera_id in falls_on else 0) + (1 if camera_id in plates_on else 0) for camera_id in camera_ids}
         return sorted(camera_ids, key=lambda camera_id: -score[camera_id])  # Stable: ties stay in name order
 
-    def _survey(self) -> tuple[list[str], dict[str, dict[str, Any] | None], tuple[str, int, int | None], list[str]]:
-        """Everything a pass reads before it decides: the cameras, each one's settings, the limit, and who wants analysis, most important
-        first. Blocking; the pass runs it in a thread so a busy database cannot stop the AI worker's loop and its heartbeat (#348)."""
+    def _survey(self) -> tuple[list[str], dict[str, dict[str, Any] | None], tuple[str, int, int | None], list[str], dict[str, str]]:
+        """Everything a pass reads before it decides: the cameras, each one's settings, the limit, who wants analysis, most important
+        first, and the cameras paused for a maintenance window (#234), which do not want it now and take no place. Blocking; the pass runs
+        it in a thread so a busy database cannot stop the AI worker's loop and its heartbeat (#348)."""
         with connect() as db:
             cameras = [row["id"] for row in db.execute("SELECT id FROM cameras WHERE enabled=1 ORDER BY name COLLATE NOCASE")]
+            paused = maintenance.paused_cameras(db)  # Read once a pass (every 5 seconds), never per frame: a few small queries
         configs = {camera_id: effective_camera_config(camera_id) for camera_id in cameras}
-        wanting = self._by_importance([camera_id for camera_id in cameras if configs[camera_id] and configs[camera_id]["enabled"]])
-        return cameras, configs, self._runtime(), wanting
+        wanting = self._by_importance([camera_id for camera_id in cameras if configs[camera_id] and configs[camera_id]["enabled"] and camera_id not in paused])
+        return cameras, configs, self._runtime(), wanting, paused
 
     async def reconcile(self) -> None:
         settled_before = dict(self._settled)
-        cameras, configs, (mode, fixed, last_limit), wanting = await asyncio.to_thread(self._survey)
+        cameras, configs, (mode, fixed, last_limit), wanting, paused = await asyncio.to_thread(self._survey)
         analysed = sum(1 for camera_id in wanting if camera_id in self.tasks and not self.tasks[camera_id].done())
         if mode == "fixed":
             limit = fixed
@@ -652,7 +666,7 @@ class DetectionManager:
             if self._settled.get(camera_id, 0) != settled_before.get(camera_id, 0):
                 # Its settings were saved and applied after this pass read them: what the pass read would undo them until the next pass.
                 continue
-            await self.sync_camera(camera_id, capacity_allowed=camera_id in eligible, config=configs[camera_id])
+            await self.sync_camera(camera_id, capacity_allowed=camera_id in eligible, config=configs[camera_id], paused=paused.get(camera_id))
         await asyncio.to_thread(self._write_status, mode, limit, len(wanting))
 
     def _write_status(self, mode: str, limit: int, wanting: int) -> None:
@@ -697,20 +711,23 @@ class DetectionManager:
         mode, fixed, last_limit = self._runtime()
         return fixed if mode == "fixed" else (ai_capacity.Controller.starting(ai_capacity.hardware_ceiling(self.capacity.sampler.cores(), self.capacity.sampler.memory_total()), last_limit).limit)
 
-    async def sync_camera(self, camera_id: str, force_restart: bool = False, capacity_allowed: bool | None = None, config: Any = _UNREAD) -> None:
+    async def sync_camera(self, camera_id: str, force_restart: bool = False, capacity_allowed: bool | None = None, config: Any = _UNREAD,
+                          paused: Any = _UNREAD) -> None:
         """Start, restart or stop one camera's analysis to match its settings. ``config`` is the camera's settings when the caller has
-        just read them. Every database call is made in a thread, and one camera is settled at a time, so a message arriving in the middle
-        of a pass cannot start a second analysis of a camera."""
+        just read them, and ``paused`` the name of the maintenance window covering it (None for none). Every database call is made in a
+        thread, and one camera is settled at a time, so a message arriving in the middle of a pass cannot start a second analysis of a camera."""
         if config is _UNREAD:  # Settled from its settings as they are now, read below
             self._settled[camera_id] = self._settled.get(camera_id, 0) + 1
         async with self._sync_lock:
-            await self._sync_camera(camera_id, force_restart, capacity_allowed, config)
+            await self._sync_camera(camera_id, force_restart, capacity_allowed, config, paused)
 
-    async def _sync_camera(self, camera_id: str, force_restart: bool, capacity_allowed: bool | None, config: Any) -> None:
+    async def _sync_camera(self, camera_id: str, force_restart: bool, capacity_allowed: bool | None, config: Any, paused: Any = _UNREAD) -> None:
         if self.stopping:
             return
         if config is _UNREAD:
             config = await asyncio.to_thread(effective_camera_config, camera_id)
+        if paused is _UNREAD:
+            paused = await asyncio.to_thread(_maintenance_pause, camera_id) if config and config["enabled"] else None
         set_camera_state = self._state
         task = self.tasks.get(camera_id)
         signature = None if config is None else (
@@ -732,6 +749,16 @@ class DetectionManager:
             self.tasks.pop(camera_id, None)
             self.task_configs.pop(camera_id, None)
             await set_camera_state(camera_id, "disabled")
+            return
+        if paused is not None:
+            # In a maintenance window (#234): no frames are read or analysed until it ends, and the place is free for another camera. The
+            # next pass after the window ends (within 5 seconds) starts it again. Recording is the recorder's and goes on.
+            if task and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            self.tasks.pop(camera_id, None)
+            self.task_configs.pop(camera_id, None)
+            await set_camera_state(camera_id, "maintenance", MAINTENANCE_TEXT.format(name=paused))
             return
         if not config.get("model_available", False) and self.detector is None:
             await set_camera_state(camera_id, "failed", "Selected model changed or is unvalidated; validate and save the AI runtime settings")
