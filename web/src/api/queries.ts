@@ -332,6 +332,8 @@ export function useConsoleStatus() {
 export interface FailoverStatus {
   role: "off" | "primary" | "standby"; headline: string; recording_held: string | null; peer_state: string | null; last_contact_at: string | null;
   takeover_active: boolean; takeover_started_at: string | null; epoch: number; last_error: string | null; last_sync_at: string | null; last_sync_error: string | null; config_created_at: string | null;
+  /** How this NVR reaches the other (#502): HTTPS pinned to its certificate, HTTPS checked by certificate authorities, or plain HTTP. */
+  link?: "pinned" | "https" | "unencrypted" | null;
 }
 
 /** Where failover stands on this NVR (a primary, a standby, or off), for the status area. */

@@ -23,7 +23,7 @@ from fastapi.testclient import TestClient
 
 from app import failover
 from app.store import connect
-from tests.test_failover import SECRET, FailoverCase
+from tests.test_failover import LINK, SECRET, FailoverCase
 
 FOOTAGE = b"the standby's own recording " * 40
 PLANTED = b"something else entirely " * 40
@@ -171,7 +171,7 @@ class StandbySignsTests(FailoverCase):
         with connect() as db:
             db.execute("UPDATE failover_state SET takeover_active=0")
             db.execute("UPDATE failover_episodes SET state='handback'")
-        client = TestClient(self.app)
+        client = TestClient(self.app, base_url=LINK)
         for path in ("/api/inbound/failover/footage?epoch=1", "/api/inbound/failover/footage/999999?epoch=1"):
             answer, headers = self.request(client, "GET", path)
             self.assertTrue(failover.verify_answer(SECRET, path, answer.content, headers["X-Failover-Signature"], answer.headers["x-failover-timestamp"], answer.headers["x-failover-signature"]), path)
@@ -188,7 +188,7 @@ class StandbySignsTests(FailoverCase):
 
     def test_a_refusal_of_a_request_that_was_not_signed_is_not_signed(self):
         self.configure("standby")
-        answer = TestClient(self.app).get("/api/inbound/failover/footage/1?epoch=1")
+        answer = TestClient(self.app, base_url=LINK).get("/api/inbound/failover/footage/1?epoch=1")
         self.assertEqual(answer.status_code, 401)
         self.assertNotIn("x-failover-signature", answer.headers)
 
@@ -200,7 +200,7 @@ class ReplayAndClockTests(FailoverCase):
 
     def test_a_request_sent_twice_is_refused_the_second_time(self):
         self.configure("standby")
-        client = TestClient(self.app)
+        client = TestClient(self.app, base_url=LINK)
         headers = failover.sign(SECRET, "POST", "/api/inbound/failover/lease", b"{}")
         self.assertEqual(client.post("/api/inbound/failover/lease", content=b"{}", headers=headers).status_code, 200)
         replayed = client.post("/api/inbound/failover/lease", content=b"{}", headers=headers)
@@ -211,7 +211,7 @@ class ReplayAndClockTests(FailoverCase):
         self.configure("standby")
         headers = failover.sign(SECRET, "POST", "/api/inbound/failover/lease", b"{}")
         headers[failover.NONCE_HEADER] = "0" * 32  # A fresh value, the signature left as it was
-        self.assertEqual(TestClient(self.app).post("/api/inbound/failover/lease", content=b"{}", headers=headers).status_code, 401)
+        self.assertEqual(TestClient(self.app, base_url=LINK).post("/api/inbound/failover/lease", content=b"{}", headers=headers).status_code, 401)
 
     def test_an_nvr_not_yet_upgraded_is_refused_but_heard_so_the_standby_does_not_take_over_while_it_records(self):
         self.configure("standby")
@@ -219,7 +219,7 @@ class ReplayAndClockTests(FailoverCase):
             failover._set_state(db, last_renewed_at=None)
         old = failover.sign(SECRET, "POST", "/api/inbound/failover/lease", b"{}")
         old = {key: value for key, value in old.items() if key in ("X-Failover-Timestamp", "X-Failover-Signature")}  # What an older version sends
-        answer = TestClient(self.app).post("/api/inbound/failover/lease", content=b"{}", headers=old)
+        answer = TestClient(self.app, base_url=LINK).post("/api/inbound/failover/lease", content=b"{}", headers=old)
         self.assertEqual(answer.status_code, 426)
         self.assertIn("upgrade both NVRs", answer.json()["detail"])
         self.assertIsNotNone(self.state()["last_renewed_at"])
@@ -229,12 +229,12 @@ class ReplayAndClockTests(FailoverCase):
     def test_a_request_signed_right_but_out_of_time_is_reported_as_the_clocks(self):
         self.configure("standby")
         headers = failover.sign(SECRET, "POST", "/api/inbound/failover/lease", b"{}", timestamp=int(time.time()) - 125)
-        answer = TestClient(self.app).post("/api/inbound/failover/lease", content=b"{}", headers=headers)
+        answer = TestClient(self.app, base_url=LINK).post("/api/inbound/failover/lease", content=b"{}", headers=headers)
         self.assertEqual(answer.status_code, 401)
         self.assertRegex(answer.json()["detail"], r"clocks differ by about 12[56] seconds")  # Signed 125 s ago, read a moment later
         self.assertIn("clocks differ", self.state()["last_error"])
         wrong = failover.sign("not-the-secret-0123456789", "POST", "/api/inbound/failover/lease", b"{}", timestamp=int(time.time()) - 125)
-        self.assertEqual(TestClient(self.app).post("/api/inbound/failover/lease", content=b"{}", headers=wrong).json()["detail"],
+        self.assertEqual(TestClient(self.app, base_url=LINK).post("/api/inbound/failover/lease", content=b"{}", headers=wrong).json()["detail"],
                          "The request is not signed with this NVR's failover secret")  # Without the secret, nothing is said about the clocks
 
     def test_the_primary_names_the_clock_for_an_answer_signed_right_but_out_of_time(self):

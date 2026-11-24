@@ -17,6 +17,7 @@ interface Report {
   unprotected_talk?: { camera_id: string; camera_name: string }[];
   public_cameras?: { camera_id: string; camera_name: string; permission: "allowed" | "grandfathered" }[];
   camera_loopback_allowed?: boolean;
+  failover_link?: { peer_url: string; sends_unencrypted: boolean; accepts_unencrypted: boolean; permission: "allowed" | "kept_from_upgrade" } | null;
   run?: { running: boolean; started_at: string | null; probes_total: number; probes_done: number; not_answered: { camera_id: string; camera_name: string }[] };
 }
 
@@ -99,6 +100,20 @@ export function HardeningSettings() {
             The server's configuration sets <code>NVR_CAMERA_ALLOW_LOOPBACK</code>, so a camera address may be on this machine itself (127.0.0.1 or ::1). That is for cameras fed through a
             restreamer on the same machine. While it is on, an administrator, or an <code>admin</code> API token, can point the NVR at services that listen only on this machine.
             Remove the setting from the server's configuration when no camera needs it.
+            </span>
+          </p>
+        </section>
+      ) : null}
+      {data?.failover_link ? (
+        <section className="field-group settings-block" aria-label="Unencrypted failover link">
+          <h2 className="field-heading">Unencrypted failover link</h2>
+          <p className="notice" data-tone="warn">
+            <span>
+            {data.failover_link.permission === "allowed" ? "\u201cAllow an unencrypted link\u201d is ticked under Settings, Failover" : "The failover pair was set up before the HTTPS link and is kept working as it was"}:
+            {data.failover_link.sends_unencrypted ? ` this NVR sends to the other one (${data.failover_link.peer_url}) over plain HTTP,` : ""}
+            {data.failover_link.accepts_unencrypted ? " this NVR answers the other one's requests when they arrive unencrypted," : ""} so footage and the failover messages
+            can cross the network unprotected. Move the pair to HTTPS under Settings, Failover: on the primary first, then on the standby, enter the other NVR's <code>https://</code> link address and
+            its certificate fingerprint, untick the box, and save.
             </span>
           </p>
         </section>

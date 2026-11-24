@@ -14,7 +14,7 @@ import httpx
 
 from app import failover
 from app.store import connect
-from tests.test_failover import SECRET, FailoverCase
+from tests.test_failover import LINK, SECRET, FailoverCase
 
 PATH = "/api/inbound/failover/lease"
 NOT_GRANTED = json.dumps({"granted": False, "state": "stopping"}).encode()
@@ -78,7 +78,7 @@ class SignedAnswerTests(AnswerCase):
         self.configure("standby")
         body = b"{}"
         headers = failover.sign(SECRET, "POST", PATH, body)
-        answer = TestClient(self.app).post(PATH, content=body, headers=headers)
+        answer = TestClient(self.app, base_url=LINK).post(PATH, content=body, headers=headers)
         self.assertEqual(answer.status_code, 200, answer.text)
         self.assertTrue(failover.verify_answer(SECRET, PATH, answer.content, headers["X-Failover-Signature"], answer.headers["x-failover-timestamp"], answer.headers["x-failover-signature"]))
         self.assertFalse(failover.verify_answer(SECRET, PATH, answer.content, "sha256=" + "c" * 64, answer.headers["x-failover-timestamp"], answer.headers["x-failover-signature"]))

@@ -21,6 +21,12 @@ may record the same cameras: the standby takes over, the primary carries on, and
 That overlap is the price of never losing recording to a failure of the standby; it is documented in docs/failover-recorder.md.
 
 **Incidents.** Takeover raises an incident on the standby when it happens and on the primary when it learns of it; both recover when the handback is complete.
+
+**The link (#502, part 2).** The two talk over HTTPS by default: each NVR serves the failover endpoints on a port of their own with a
+certificate it made for itself (``app.failover_link``, served by ``app.failover_listener``), and each pins the other's certificate by its
+fingerprint when they are paired. Plain HTTP works only while "Allow an unencrypted link" is ticked on both: this NVR does not send to an
+``http://`` address, nor answer a request that reached it unencrypted, unless its own box is ticked. A pair set up before that release
+keeps working as it was (``legacy_link``) until its address is changed, and the hardening page lists it.
 """
 from __future__ import annotations
 
@@ -47,6 +53,7 @@ import httpx
 
 from . import backup
 from .credentials import decrypt, key_path
+from .failover_link import CertificateMismatch, pinned_transport
 from .incidents import sync_incident
 from .store import connect, database_path, has_row
 from .webhooks import validate_target_url
@@ -100,7 +107,9 @@ def read_settings(db: sqlite3.Connection) -> dict[str, Any]:
     row = db.execute("SELECT * FROM failover_settings WHERE singleton_id=1").fetchone()
     return {"role": row["role"], "peer_url": row["peer_url"], "has_secret": row["secret_ciphertext"] is not None, "allow_private": bool(row["allow_private"]),
             "silence_seconds": int(row["silence_seconds"]), "lease_seconds": int(row["lease_seconds"]), "sync_seconds": int(row["sync_seconds"]),
-            "instance_id": row["instance_id"], "updated_at": row["updated_at"]}
+            "instance_id": row["instance_id"], "updated_at": row["updated_at"],
+            # The link (#502, part 2): the other NVR's pinned certificate, "Allow an unencrypted link", and a pair kept as it was from before
+            "peer_fingerprint": row["peer_fingerprint"], "allow_unencrypted": bool(row["allow_unencrypted"]), "legacy_link": bool(row["legacy_link"])}
 
 
 def read_state(db: sqlite3.Connection) -> dict[str, Any]:
@@ -295,6 +304,87 @@ def note_outdated_peer() -> None:
         if read_settings(db)["role"] == "standby" and not read_state(db)["takeover_active"]:
             _set_state(db, last_renewed_at=_stamp(), last_contact_at=_stamp(),
                        last_error="The primary has not been upgraded: its requests are refused until both NVRs run the same version")
+
+
+# --- the link: HTTPS with the other NVR's certificate pinned, or plain HTTP where both allow it (#502, part 2) -----------------------------------
+
+CERTIFICATE_KEY = "failover:certificate"
+UNENCRYPTED_OUT = ("The other NVR's address is plain http://, and this NVR does not allow an unencrypted failover link: enter the address of the "
+                   "other NVR's HTTPS failover link (https://<address>:8443) and its certificate fingerprint, or tick \"Allow an unencrypted link\" on both NVRs")
+UNENCRYPTED_IN = ("This NVR does not accept the failover link unencrypted: use the address of its HTTPS failover link and its certificate fingerprint, "
+                  "or tick \"Allow an unencrypted link\" on both NVRs")
+
+
+class LinkRefused(ValueError):
+    """This NVR will not send to the other one over the link as it is set up (plain HTTP without "Allow an unencrypted link")."""
+
+
+def unencrypted_allowed(settings: dict[str, Any]) -> bool:
+    """Whether this NVR may use plain HTTP with the other: "Allow an unencrypted link" ticked, or a pair kept as it was from before #502."""
+    return bool(settings.get("allow_unencrypted") or settings.get("legacy_link"))
+
+
+def link_client(settings: dict[str, Any], timeout: httpx.Timeout) -> httpx.AsyncClient:
+    """A client for the other NVR, as the link is set up: pinned to its certificate for an ``https://`` address with a fingerprint, plain
+    only where this NVR allows an unencrypted link. An ``https://`` address without a fingerprint (one through a proxy with a public
+    certificate, as could be set up before #502) is verified against the usual certificate authorities, as it always was."""
+    scheme = str(settings.get("peer_url") or "").split(":", 1)[0].lower()
+    if scheme == "http" and not unencrypted_allowed(settings):
+        raise LinkRefused(UNENCRYPTED_OUT)
+    if scheme == "https" and settings.get("peer_fingerprint"):
+        return httpx.AsyncClient(timeout=timeout, follow_redirects=False, trust_env=False, transport=pinned_transport(str(settings["peer_fingerprint"])))
+    return httpx.AsyncClient(timeout=timeout, follow_redirects=False, trust_env=False)
+
+
+def mismatch_message(exc: CertificateMismatch) -> str:
+    return (f"{exc}. The connection was refused. If the other NVR's certificate was replaced (a new installation, its credential key restored "
+            "from a backup, or a new certificate made on its failover page), pair the two again with the fingerprint shown on its failover page; "
+            "otherwise something between the two NVRs may be intercepting the link")
+
+
+def certificate_incident(db: sqlite3.Connection, active: bool, message: str | None = None) -> None:
+    """Raised when the other NVR presents a certificate other than the pinned one, recovered at the next exchange it verifies."""
+    if active or has_row(db, "SELECT 1 FROM incidents WHERE incident_key=? AND fault_active=1", (CERTIFICATE_KEY,)):
+        summary = ("The other failover NVR presented a certificate that is not the one it was paired with: the failover link is refused" if active
+                   else "The other failover NVR presents the certificate it was paired with again")
+        sync_incident(db, incident_key=CERTIFICATE_KEY, camera_id=None, fault_type="failover", summary=summary, active=active, details={"error": message} if message else {})
+
+
+def note_certificate(problem: CertificateMismatch | None) -> None:
+    """A refused certificate (an incident, and the reason on the status), or a verified exchange (the incident recovers)."""
+    with connect() as db:
+        if problem is not None:
+            message = mismatch_message(problem)
+            logger.warning("The failover link was refused: %s", message)  # Fingerprints only: they are public
+            _set_state(db, peer_state="wrong_certificate", last_error=message)
+            certificate_incident(db, True, message)
+        else:
+            certificate_incident(db, False)
+
+
+def refuse_unencrypted() -> None:
+    """For a request signed right that reached this NVR unencrypted: allowed only while this NVR allows an unencrypted link. A refused
+    one still shows the primary is alive, so a standby does not take over from a recording primary while the two are being moved to HTTPS."""
+    with connect() as db:
+        settings = read_settings(db)
+        if unencrypted_allowed(settings):
+            return
+        if settings["role"] == "standby" and not read_state(db)["takeover_active"]:
+            _set_state(db, last_renewed_at=_stamp(), last_contact_at=_stamp(), last_error="The primary sends its requests unencrypted, which this NVR does not allow: " + UNENCRYPTED_IN)
+    raise PeerError(403, UNENCRYPTED_IN)
+
+
+def link_warning(db: sqlite3.Connection) -> dict[str, Any] | None:
+    """For the hardening page: this NVR's failover link where it is, or may be, unencrypted. None when it is not."""
+    settings = read_settings(db)
+    if settings["role"] == "off" or not settings["peer_url"]:
+        return None
+    sends = str(settings["peer_url"]).lower().startswith("http://")
+    accepts = unencrypted_allowed(settings)
+    if not (sends or accepts):
+        return None
+    return {"peer_url": settings["peer_url"], "sends_unencrypted": sends, "accepts_unencrypted": accepts,
+            "permission": "allowed" if settings["allow_unencrypted"] else "kept_from_upgrade"}
 
 
 def check_peer_url(url: str, allow_private: bool) -> str:
@@ -782,11 +872,14 @@ def status_view(db: sqlite3.Connection) -> dict[str, Any]:
                     "no_room": "Primary: not enough free space to bring back the standby's footage",
                     "starting": "Primary: starting, waiting to hear from the standby", "standby_stopping": "Primary: waiting for the standby to stop recording", "handback": "Primary: bringing back the standby's footage",
                     "unverified": "Primary: the standby's answer was not signed and was ignored (recording continues)",
+                    "wrong_certificate": "Primary: the standby presented a certificate other than the one it was paired with, and was refused (recording continues)",
                     "not_handing_back": "Primary: the standby did not hand back in time; this primary is recording again",
                     }.get(str(state["peer_state"]), "Primary")
     return {"role": role, "headline": headline, "lease_until": state["lease_until"], "recording_held": held, "peer_state": state["peer_state"], "last_contact_at": state["last_contact_at"],
             "takeover_active": bool(state["takeover_active"]), "takeover_started_at": state["takeover_started_at"], "epoch": state["epoch"], "last_error": state["last_error"],
-            "last_sync_at": state["last_sync_at"], "last_sync_error": state["last_sync_error"], "config_created_at": state["config_created_at"]}
+            "last_sync_at": state["last_sync_at"], "last_sync_error": state["last_sync_error"], "config_created_at": state["config_created_at"],
+            "link": None if role == "off" or not settings["peer_url"] else "unencrypted" if str(settings["peer_url"]).lower().startswith("http://")
+            else "pinned" if settings["peer_fingerprint"] else "https"}
 
 
 # --- the manager --------------------------------------------------------------------------------------------------------------------------------
@@ -856,7 +949,7 @@ class FailoverManager:
         if client is not None:  # An import's own connection, kept open across its requests (#510)
             response = await client.request(method, url, content=body or None, headers=headers, timeout=TIMEOUT, **options)
         else:
-            async with httpx.AsyncClient(timeout=TIMEOUT, follow_redirects=False, trust_env=False) as fresh:
+            async with link_client(settings, TIMEOUT) as fresh:
                 response = await fresh.request(method, url, content=body or None, headers=headers, **options)
         response.extensions["failover_request_signature"] = headers["X-Failover-Signature"]  # What a signed answer must be an answer to
         return response
@@ -865,6 +958,12 @@ class FailoverManager:
         sent = _now()
         try:
             response = await self._call(settings, secret, "POST", "/api/inbound/failover/lease", {"instance_id": settings["instance_id"], "lease_seconds": settings["lease_seconds"]})
+        except CertificateMismatch as exc:  # Refused before anything was sent: the primary keeps recording, and says why (#502)
+            await asyncio.to_thread(note_certificate, exc)
+            return
+        except LinkRefused as exc:
+            await asyncio.to_thread(self._record_peer, "refused", str(exc))
+            return
         except (httpx.HTTPError, ValueError) as exc:
             await asyncio.to_thread(self._record_peer, "unreachable", f"The standby could not be reached: {type(exc).__name__}")
             return
@@ -907,7 +1006,7 @@ class FailoverManager:
             detail = str(response.json().get("detail", ""))
         except (ValueError, AttributeError):
             detail = ""
-        if "clocks differ" in detail or "upgrade both" in detail:
+        if "clocks differ" in detail or "upgrade both" in detail or "unencrypted" in detail:
             return f"The standby refused the request: {detail[:300]}"
         return "The standby refused the signature: the failover secrets differ"
 
@@ -919,6 +1018,7 @@ class FailoverManager:
     @staticmethod
     def _apply_answer(settings: dict[str, Any], sent: datetime, answer: dict[str, Any]) -> None:
         with connect() as db:
+            certificate_incident(db, False)  # A verified answer: the link is the paired one again (read first: nothing is written while none is active)
             if answer.get("granted") is True:
                 _set_state(db, lease_until=_stamp(sent + timedelta(seconds=settings["lease_seconds"])), yield_until=None, yield_since=None, last_contact_at=_stamp(), last_error=None,
                            peer_state="handback" if answer.get("handback") else "ok", epoch=int(answer.get("epoch") or 0))
@@ -944,7 +1044,11 @@ class FailoverManager:
         a while, and a primary that stopped renewing for all of it looked silent to its standby (#510)."""
         if self._last_renewal == float("-inf"):
             self._last_renewal = time.monotonic()  # The pass that leads here renews first; counted from the import's start otherwise
-        async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=4.0), follow_redirects=False, trust_env=False) as client:
+        try:
+            client = link_client(settings, httpx.Timeout(120.0, connect=4.0))
+        except LinkRefused:
+            return  # The renewal says why
+        async with client:
             await self._import_over(client, settings, secret, epoch)
 
     async def _keep_lease(self, settings: dict[str, Any], secret: str) -> None:
@@ -1042,7 +1146,7 @@ class FailoverManager:
         digest, received = hashlib.sha256(), 0
         own = client is None
         if own:
-            client = httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=4.0), follow_redirects=False, trust_env=False)
+            client = link_client(settings, httpx.Timeout(120.0, connect=4.0))
         try:
             async with contextlib.AsyncExitStack() as stack:
                 if own:
@@ -1104,7 +1208,7 @@ class FailoverManager:
             url = check_peer_url(settings["peer_url"], settings["allow_private"]) + path
             with tempfile.TemporaryDirectory(prefix=f"{WORK_PREFIX}fetch-", dir=database_path().parent) as directory:  # Beside the database, not in the system's temporary folder
                 archive = Path(directory) / "primary.nvrbackup"
-                async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=4.0), follow_redirects=False, trust_env=False) as client:
+                async with link_client(settings, httpx.Timeout(300.0, connect=4.0)) as client:
                     async with client.stream("GET", url, headers=headers) as response:
                         if response.status_code != 200:
                             detail = (await response.aread()).decode("utf-8", "replace")[:200]
@@ -1112,9 +1216,16 @@ class FailoverManager:
                         with archive.open("wb") as handle:
                             async for chunk in response.aiter_bytes(1024 * 1024):
                                 await asyncio.to_thread(handle.write, chunk)
-                return await asyncio.to_thread(apply_configuration, archive)
+                copied = await asyncio.to_thread(apply_configuration, archive)
+            if settings.get("peer_fingerprint"):
+                await asyncio.to_thread(note_certificate, None)
+            return copied
+        except CertificateMismatch as exc:
+            await asyncio.to_thread(note_certificate, exc)
+            await asyncio.to_thread(self._sync_failed, settings, mismatch_message(exc))
+            return None
         except (httpx.HTTPError, ValueError, SyncError, OSError, tarfile.TarError, sqlite3.Error) as exc:
-            message = str(exc) if isinstance(exc, SyncError) else f"The primary could not be reached for its configuration: {type(exc).__name__}"
+            message = str(exc) if isinstance(exc, (SyncError, LinkRefused)) else f"The primary could not be reached for its configuration: {type(exc).__name__}"
             await asyncio.to_thread(self._sync_failed, settings, message)
             return None
 

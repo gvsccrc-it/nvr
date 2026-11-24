@@ -8,6 +8,7 @@ import uvicorn
 from uvicorn.config import LOGGING_CONFIG
 
 from app import db_health, logforward, open_files
+from app.failover_listener import FailoverLink
 from app.entrypoint import listen_host, listen_port
 
 
@@ -39,7 +40,12 @@ def main() -> None:
     db_health.install_log_filter("web")  # A background task of the web process that meets a damaged database says so once and fails the health check (#453)
     # Forwarded headers are believed only from NVR_TRUSTED_PROXIES (app.network), never by uvicorn on its own: its default trusts any 127.0.0.1 sender.
     open_files.raise_limit()
-    uvicorn.run("app.main:app", **server_settings())
+    link = FailoverLink()  # The failover link's own HTTPS listener, while failover is on (#502)
+    link.start()
+    try:
+        uvicorn.run("app.main:app", **server_settings())
+    finally:
+        link.stop()
 
 
 def server_settings() -> dict[str, object]:

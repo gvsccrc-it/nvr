@@ -100,6 +100,7 @@
  "tests.test_failover": 49.7,
  "tests.test_failover_answers": 2.0,
  "tests.test_failover_handback_signed": 4.5,
+ "tests.test_failover_https": 29.2,
  "tests.test_failover_import_cost": 2.2,
  "tests.test_fall_detection": 9.6,
  "tests.test_fall_eval": 19.3,
