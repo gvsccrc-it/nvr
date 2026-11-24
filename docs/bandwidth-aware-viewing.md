@@ -33,6 +33,16 @@ app on a cellular connection (or with the browser's data-saver on), where the br
 - Tiles that are scrolled out of sight, or when the page is in the background, are released: their connection and server
   slot are freed, and they resume when they are visible again.
 
+## A hidden Live page
+
+Whatever the data setting, a Live page that has been hidden (another tab, a minimised window) for **2 minutes** gives its
+streams back: each tile keeps its last picture, says "Paused while this tab was hidden", shows no Live label, and plays
+again as soon as the page is shown. This frees the server's streams and the live-view places they count against.
+
+Not paused: the video wall (`/wall`), a tile you are listening to, and a shared view an administrator has marked **Keep
+streaming when hidden** (a checkbox on the Live toolbar while the shared view is open). That setting is off by default,
+belongs to the view rather than to a person, and each change is written to the audit log.
+
 ## How long live video takes to start
 
 Settings > Diagnostics > **Live video start-up** shows how long people waited, since the NVR last started, from asking for a camera to the first picture leaving the server (`GET /api/system/live-startup`, administrators only; the last 200 starts are kept in memory):

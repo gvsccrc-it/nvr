@@ -7,6 +7,8 @@ import { VideoTile } from "./VideoTile";
 
 const GAP = 4;
 import { CAMERA_DRAG_TYPE } from "@/features/cameras/CameraBrowser";
+import { useHiddenTooLong } from "./hiddenPause";
+import { useLiveViews } from "@/api/queries";
 
 function draggedCamera(event: DragEvent): string | null {
   return event.dataTransfer.getData(CAMERA_DRAG_TYPE) || null;
@@ -26,6 +28,11 @@ export function LiveGrid({ cameras, onReplaceRequest }: { cameras: Map<string, C
   const arrangement = useLiveStore(store => store.arrangement);
   const activeId = useLiveStore(store => store.activeId);
   const enlargedId = useLiveStore(store => store.enlargedId);
+  // Hidden for 2 minutes, the page gives its streams back (#533), unless the loaded shared view keeps streaming (a control-room screen)
+  const view = useLiveStore(store => store.view);
+  const views = useLiveViews();
+  const keepStreaming = view?.scope === "shared" && Boolean(views.data?.find(item => item.scope === "shared" && item.name === view.name)?.keep_streaming);
+  const hiddenTooLong = useHiddenTooLong(!keepStreaming);
   const { replace, place, toggle } = useLiveStore.getState();
   const container = useRef<HTMLDivElement>(null);
   const mountOrder = useRef<string[]>([]);
@@ -112,7 +119,7 @@ export function LiveGrid({ cameras, onReplaceRequest }: { cameras: Map<string, C
                 replace(id, incoming);
               }}
             >
-              <VideoTile camera={cameras.get(id)!} active={activeId === id} enlarged={enlargedId === id} suspended={hidden} lowDataCapped={positions.get(id)! >= LOW_DATA_MAX_TILES}
+              <VideoTile camera={cameras.get(id)!} active={activeId === id} enlarged={enlargedId === id} suspended={hidden} hiddenTooLong={hiddenTooLong} lowDataCapped={positions.get(id)! >= LOW_DATA_MAX_TILES}
                          onReplaceRequest={() => onReplaceRequest(id)} />
             </div>
           );

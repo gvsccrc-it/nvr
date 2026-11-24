@@ -241,6 +241,8 @@ export interface SavedView {
   grid_size: number;
   tile_camera_ids: (string | null)[];
   layout_mode: "auto" | "manual";
+  /** A shared view an administrator marked to keep streaming while its page is hidden (#533); absent for a personal view. */
+  keep_streaming?: boolean;
   /** How the fisheye cameras in this view are shown (raw cameras are left out). */
   dewarp?: Record<string, DewarpState>;
 }
