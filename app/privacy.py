@@ -88,6 +88,11 @@ def validate_zones(zones: list[dict[str, Any]]) -> list[dict[str, float]]:
     return clean
 
 
+def _trust_version(db: sqlite3.Connection, camera_id: str) -> int:
+    row = db.execute("SELECT trust_version FROM privacy_masks WHERE camera_id=?", (camera_id,)).fetchone()
+    return int(row[0]) if row else 0
+
+
 def mask_row(db: sqlite3.Connection, camera_id: str) -> sqlite3.Row | None:
     return db.execute("SELECT * FROM privacy_masks WHERE camera_id=?", (camera_id,)).fetchone()
 
@@ -100,14 +105,28 @@ def server_zones(db: sqlite3.Connection, camera_id: str, recorded_at: datetime |
     zones = json.loads(row["zones_json"])
     if not zones:
         return []
+    if row["always_server"]:
+        return zones  # "Always mask on the NVR as well" (#468)
     if row["camera_side"] == "applied" and row["camera_masked_since"]:
-        # Trust the camera only while it is the device the masks were written to.
+        # Trust the camera only while it is the device the masks were written to, and only while its masks are confirmed (#468).
         device = db.execute("SELECT device_service_url FROM cameras WHERE id=?", (camera_id,)).fetchone()
         if device is not None and device["device_service_url"] and device["device_service_url"] == row["written_to"]:
-            since = datetime.fromisoformat(row["camera_masked_since"]) + CAMERA_MASK_MARGIN
-            if recorded_at is None or recorded_at >= since:
+            gaps = db.execute("SELECT started_at,ended_at FROM privacy_mask_gaps WHERE camera_id=?", (camera_id,)).fetchall()
+            if recorded_at is None:
+                if not any(gap["ended_at"] is None for gap in gaps):
+                    return []
+            elif recorded_at >= datetime.fromisoformat(row["camera_masked_since"]) + CAMERA_MASK_MARGIN and not _in_gap(gaps, recorded_at):
                 return []
     return zones
+
+
+def _in_gap(gaps: list[sqlite3.Row], recorded_at: datetime) -> bool:
+    """Whether footage recorded at this time was recorded while the camera's masks were not confirmed: masked by the NVR on the way out."""
+    for gap in gaps:
+        started = datetime.fromisoformat(gap["started_at"])
+        if recorded_at >= started and (gap["ended_at"] is None or recorded_at < datetime.fromisoformat(gap["ended_at"]) + CAMERA_MASK_MARGIN):
+            return True
+    return False
 
 
 def status(db: sqlite3.Connection, camera_id: str) -> dict[str, Any]:
@@ -123,8 +142,10 @@ def status(db: sqlite3.Connection, camera_id: str) -> dict[str, Any]:
     else:
         recordings = ("Recordings on disk are NOT masked: this camera does not apply privacy masks itself. "
                       "The NVR masks every live view, recording, snapshot and export.")
+    from .privacy_check import state as confirmation
+
     return {"zones": zones, "camera_side": camera_side, "camera_masked_since": since, "recordings": recordings,
-            "server_enforced": bool(server_zones(db, camera_id))}
+            "server_enforced": bool(server_zones(db, camera_id)), **confirmation(db, camera_id)}
 
 
 def drawbox_filter(zones: list[dict[str, float]]) -> str:
@@ -216,6 +237,8 @@ class StreamGuard:
         self._access_checked = time.monotonic()
         self.generation = generation(camera_id)
         self.until: datetime | None = None
+        with connect() as db:
+            self.trust_version = _trust_version(db, camera_id)
         if unmasked:
             with connect() as db:
                 grant = active_grant(db, int(principal.id), camera_id)
@@ -261,6 +284,9 @@ class StreamGuard:
                 allowed = access.can_see(self.camera_id) and db.execute("SELECT 1 FROM cameras WHERE id=?", (self.camera_id,)).fetchone() is not None
             if not allowed:
                 self.reason = self.reason or "access"
+            elif _trust_version(db, self.camera_id) != self.trust_version:
+                # Whether the camera's own masks are trusted changed, in the background worker (#468): start again with the right masks
+                self.reason = self.reason or "masks"
 
     def _masks_valid(self) -> bool:
         if self.reason is not None:
@@ -455,6 +481,24 @@ async def masked_recording(source: Path, zones: list[dict[str, float]], wanted: 
             _render_locks.pop(digest, None)
 
 
+def set_always_server(camera_id: str, enabled: bool, actor_id: int) -> dict[str, Any]:
+    """"Always mask on the NVR as well" (#468): the NVR draws this camera's masks itself even while the camera's own are confirmed. Off by
+    default: it re-encodes the camera's live video for every masked view. Open streams restart with the new masking."""
+    with connect() as db:
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            db.execute("INSERT INTO privacy_masks(camera_id,zones_json,updated_at,always_server) VALUES(?,'[]',?,?) "
+                       "ON CONFLICT(camera_id) DO UPDATE SET always_server=excluded.always_server,trust_version=trust_version+1",
+                       (camera_id, _now().isoformat(), int(enabled)))
+            _audit(db, actor_id, "privacy_masks_always_server_changed", camera_id, {"enabled": enabled})
+        except BaseException:
+            db.execute("ROLLBACK")
+            raise
+        db.execute("COMMIT")
+        _bump(camera_id)
+        return status(db, camera_id)
+
+
 async def save(camera_id: str, zones: list[dict[str, float]], actor_id: int) -> dict[str, Any]:
     """Store the masks, and write them to the camera where it accepts ONVIF masks."""
     lock = _save_locks.setdefault(camera_id, asyncio.Lock())
@@ -502,6 +546,12 @@ def _store_masks(camera_id: str, zones: list[dict[str, float]], actor_id: int, c
                        "camera_mask_tokens_json=excluded.camera_mask_tokens_json,camera_masked_since=excluded.camera_masked_since,"
                        "written_to=excluded.written_to,updated_at=excluded.updated_at",
                        (camera_id, json.dumps(zones), camera_side if zones else "none", json.dumps(tokens), since, written_to, _now().isoformat()))
+            # Written to the camera just now (or no longer trusted to it): that is a confirmation, and any gap is closed from here (#468)
+            db.execute("UPDATE privacy_masks SET confirmed_at=?,checked_at=?,unreachable_since=NULL,check_requested=0,trust_version=trust_version+1 WHERE camera_id=?",
+                       (since, since, camera_id))
+            db.execute("UPDATE privacy_mask_gaps SET ended_at=? WHERE camera_id=? AND ended_at IS NULL", (_now().isoformat(), camera_id))
+            from .incidents import sync_incident  # Written afresh, or masked by the NVR from now on: either way nothing is unconfirmed
+            sync_incident(db, incident_key=f"privacy_masks:{camera_id}", camera_id=camera_id, fault_type="privacy_masks", summary="", active=False)
             _audit(db, actor_id, "privacy_masks_updated", camera_id, {"areas": len(zones), "camera_side": camera_side})
         except BaseException:
             db.execute("ROLLBACK")

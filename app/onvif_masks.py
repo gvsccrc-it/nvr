@@ -46,24 +46,68 @@ async def _call(client: httpx.AsyncClient, url: str, action: str, body: str) -> 
     return await _soap_call(client, url, action, _envelope(action, body), MAX_RESPONSE_BYTES)
 
 
+def _client(username: str, password: str) -> httpx.AsyncClient:
+    auth = httpx.DigestAuth(username, password) if username else None
+    return httpx.AsyncClient(auth=auth, timeout=httpx.Timeout(10, connect=5), trust_env=False, follow_redirects=False)
+
+
+async def _media2(client: httpx.AsyncClient, device_service_url: str) -> str:
+    """The camera's Media2 address, kept to the camera's own host. Raises ``MasksUnsupported`` when it has none."""
+    services = await _call(client, device_service_url, f"{DEVICE}/GetServices", "<tds:GetServices><tds:IncludeCapability>false</tds:IncludeCapability></tds:GetServices>")
+    media2 = None
+    for service in services.iter():
+        if _local(service.tag) != "Service":
+            continue
+        namespace = next((child.text for child in service if _local(child.tag) == "Namespace"), None)
+        if namespace == MEDIA2:
+            media2 = next((child.text.strip() for child in service if _local(child.tag) == "XAddr" and child.text), None)
+    if not media2:
+        raise MasksUnsupported()
+    try:
+        return confine(device_service_url, media2)
+    except UnsafeDestination as exc:
+        raise MasksUnsupported() from exc
+
+
+def _rounded(points: list[tuple[float, float]]) -> tuple[tuple[float, float], ...]:
+    return tuple((round(x, 3), round(y, 3)) for x, y in points)
+
+
+async def read_masks(device_service_url: str, username: str, password: str) -> dict[str, tuple[bool, tuple[tuple[float, float], ...]]]:
+    """The masks the camera holds now (#468): each token with whether it is enabled and its polygon (points rounded to 0.001).
+
+    ``MasksUnsupported`` when the camera has no Media2 service or will not list masks (a different camera at the same address, or one reset to
+    a state without them); any other exception when it could not be asked."""
+    async with _client(username, password) as client:
+        media2 = await _media2(client, device_service_url)
+        try:
+            reply = await _call(client, media2, f"{MEDIA2}/GetMasks", "<tr2:GetMasks/>")
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in {401, 403} or exc.response.status_code >= 500:
+                raise  # Not an answer about masks: the login or the camera failed
+            raise MasksUnsupported() from exc
+    found: dict[str, tuple[bool, tuple[tuple[float, float], ...]]] = {}
+    for node in reply.iter():
+        if _local(node.tag) != "Masks":
+            continue
+        token = node.get("token") or next((child.text.strip() for child in node if _local(child.tag) == "token" and child.text), None)
+        if not token:
+            continue
+        points = [(float(point.get("x", "nan")), float(point.get("y", "nan"))) for point in node.iter() if _local(point.tag) == "Point"]
+        enabled = next((child.text.strip().lower() != "false" for child in node.iter() if _local(child.tag) == "Enabled" and child.text), True)
+        found[token] = (enabled, _rounded(points))
+    return found
+
+
+def expected_polygons(zones: list[dict[str, float]]) -> set[tuple[tuple[float, float], ...]]:
+    """The polygons the NVR wrote for ``zones``, as ``read_masks`` reports them."""
+    return {_rounded(polygon(zone)) for zone in zones}
+
+
 async def write_masks(device_service_url: str, username: str, password: str, zones: list[dict[str, float]], previous_tokens: list[str]) -> list[str]:
     """Replace the NVR's masks on the camera with ``zones``. Returns the new mask tokens."""
-    auth = httpx.DigestAuth(username, password) if username else None
-    async with httpx.AsyncClient(auth=auth, timeout=httpx.Timeout(10, connect=5), trust_env=False, follow_redirects=False) as client:
-        services = await _call(client, device_service_url, f"{DEVICE}/GetServices", "<tds:GetServices><tds:IncludeCapability>false</tds:IncludeCapability></tds:GetServices>")
-        media2 = None
-        for service in services.iter():
-            if _local(service.tag) != "Service":
-                continue
-            namespace = next((child.text for child in service if _local(child.tag) == "Namespace"), None)
-            if namespace == MEDIA2:
-                media2 = next((child.text.strip() for child in service if _local(child.tag) == "XAddr" and child.text), None)
-        if not media2:
-            raise MasksUnsupported()
-        try:
-            media2 = confine(device_service_url, media2)
-        except UnsafeDestination as exc:
-            raise MasksUnsupported() from exc
+    async with _client(username, password) as client:
+        media2 = await _media2(client, device_service_url)
         configurations = await _call(client, media2, f"{MEDIA2}/GetVideoSourceConfigurations", "<tr2:GetVideoSourceConfigurations/>")
         # Every video source: a stream from a source left unmasked would carry the private area.
         sources = list(dict.fromkeys(node.get("token") for node in configurations.iter() if _local(node.tag) == "Configurations" and node.get("token")))

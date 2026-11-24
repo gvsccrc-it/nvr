@@ -60,6 +60,17 @@ async def put_masks(camera_id: str, payload: MasksRequest, user: Administrator) 
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
+class AlwaysServerRequest(BaseModel):
+    enabled: bool
+
+
+@router.put("/api/cameras/{camera_id}/privacy/always-server")
+def put_always_server(camera_id: str, payload: AlwaysServerRequest, user: Administrator) -> dict[str, object]:
+    """Whether the NVR also masks this camera itself while the camera's own masks are confirmed (#468). Off by default."""
+    _camera(camera_id)
+    return privacy.set_always_server(camera_id, payload.enabled, int(user["id"]))
+
+
 @router.post("/api/cameras/{camera_id}/privacy/unmasked")
 def grant_unmasked(camera_id: str, payload: UnmaskedRequest, user: Administrator) -> dict[str, object]:
     """Let this administrator see the camera unmasked for a short while, for the reason given (audited)."""

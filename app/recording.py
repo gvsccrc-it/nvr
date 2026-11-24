@@ -753,8 +753,12 @@ class RecordingManager:
         written = self._status_written.get(camera_id)
         if unless_written_within and written is not None and written[0] == (value, error, fault) and now - written[1] < unless_written_within:
             return
+        reconnected = value == "recording" and written is not None and written[0][0] in {"reconnecting", "unavailable", "failed"}
         self._status_written[camera_id] = ((value, error, fault), now)
         with connect() as db:
+            if reconnected:  # The stream is back after a drop: the camera may have restarted or been reset, so ask for its privacy masks (#468)
+                from .privacy_check import request_check
+                request_check(db, camera_id)
             db.execute(
                 "UPDATE cameras SET recording_status=?, last_error=?, "
                 "stream_fault=CASE WHEN ? IN ('reconnecting','unavailable','failed') THEN ? WHEN ? IN ('recording','stopped','scheduled_idle') THEN NULL ELSE stream_fault END, "

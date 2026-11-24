@@ -25,6 +25,7 @@ from app import capabilities as camera_capabilities, diagnostics, privacy
 from app.retention import effective_retention
 from app.api.policies import effective_schedule_view
 from app.audit import record as audit_record
+from app.privacy_check import request_check as request_mask_check
 
 router = APIRouter()
 
@@ -748,6 +749,7 @@ async def update_camera_source(
                 db.execute("UPDATE cameras SET motion_credentials_ciphertext=? WHERE id=?",
                            (encrypt(json.dumps({"username": entered[0], "password": entered[1]}, separators=(",", ":"))) if entered else None, camera_id))
             audit_record(db, user.id, "camera_source_changed", "camera", camera_id, device_host=new_host, onvif_login=onvif_login)
+            request_mask_check(db, camera_id)  # A new source or login: ask the camera for its privacy masks at the next pass (#468)
             db.execute(
                 "UPDATE cameras SET camera_ip=?,camera_brand=?,device_service_url=?,onvif_profile_token=?,live_substream_profile_token=?,"
                 "motion_service_url=COALESCE(?,motion_service_url),"
@@ -860,6 +862,7 @@ async def rotate_camera_credentials(
                 "UPDATE cameras SET stream_url_ciphertext=?,live_substream_url_ciphertext=NULL,audio_supported=?,audio_enabled=CASE WHEN ?=0 THEN 0 ELSE audio_enabled END,video_codec=?,video_width=?,video_height=?,last_probe_at=?,last_error=NULL,updated_at=? WHERE id=?",
                 (encrypt(stream_url), int(bool(capability.get("audio"))), int(bool(capability.get("audio"))), video["codec"], video["width"], video["height"], datetime.now(timezone.utc).isoformat(), datetime.now(timezone.utc).isoformat(), camera_id),
             )
+            request_mask_check(db, camera_id)  # New login: ask the camera for its privacy masks at the next pass (#468)
 
     await asyncio.to_thread(save)
     await request.app.state.recorders.sync_camera(camera_id, force_restart=True)
@@ -940,6 +943,8 @@ async def configure_motion_source(
             # Recorded once the change is certain to be made. The address holds no login (the request refuses one with credentials in it).
             audit_record(db, user.id, "camera_motion_source_changed", "camera", camera_id, event_host=new_host,
                          onvif_login="replaced" if credentials_supplied else "kept", fallback=bool(fallback_enabled))
+            if credentials_supplied:
+                request_mask_check(db, camera_id)  # A new ONVIF login: ask the camera for its privacy masks at the next pass (#468)
 
     await asyncio.to_thread(save)
     await request.app.state.recorders.sync_camera(camera_id, force_restart=True)
