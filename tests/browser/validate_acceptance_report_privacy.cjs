@@ -14,6 +14,7 @@ const allowedWebServerEnvironment = new Set([
   "NVR_BROWSER_FIXTURE_PASSWORD_PATH",
   "NVR_BROWSER_HOST",
   "NVR_BROWSER_PORT",
+  "NVR_CAMERA_ALLOW_LOOPBACK",  // The simulated camera listens on this machine (#474); a switch, not a secret
   "NVR_SEGMENT_SECONDS",
   "NVR_DISCOVERY_INTERFACE",
   "NVR_BACKUP_PASSPHRASE_FILE",
