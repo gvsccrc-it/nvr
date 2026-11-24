@@ -94,6 +94,11 @@ def put_failover(body: FailoverInput, user: Administrator) -> dict[str, Any]:
             legacy = current["legacy_link"] and body.role != "off" and peer == current["peer_url"]
             if peer and peer.lower().startswith("http://") and not (body.allow_unencrypted or legacy):
                 raise HTTPException(status_code=422, detail=failover.UNENCRYPTED_OUT)
+            # Every new https:// pair pins the other NVR's certificate (the owner's decision on #502, 24 Nov): no public certificate authority
+            # is trusted for the link. A pair saved before this without one keeps working while its address stays the same.
+            kept_unpinned = current["role"] != "off" and peer == current["peer_url"] and not current["peer_fingerprint"]
+            if peer and peer.lower().startswith("https://") and not fingerprint and not kept_unpinned:
+                raise HTTPException(status_code=422, detail=failover.FINGERPRINT_REQUIRED)
             if body.role != "off" and not body.secret and not current["has_secret"]:
                 raise HTTPException(status_code=422, detail=f"Enter a failover secret of at least {failover.MIN_SECRET_LENGTH} characters, the same on both NVRs")
             if current["role"] == "standby" and body.role != "standby" and (state["takeover_active"] or db.execute("SELECT 1 FROM failover_episodes WHERE role='standby' AND state='handback'").fetchone()):

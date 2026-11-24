@@ -81,6 +81,7 @@ class HandbackCase(FailoverCase):
         real = httpx.AsyncClient
 
         def client(**options):
+            options.pop("transport", None)  # The stand-in standby replaces the network, the pinned one included (#502)
             return real(transport=httpx.MockTransport(standby), **options)
 
         with connect() as db:

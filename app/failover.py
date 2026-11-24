@@ -374,16 +374,22 @@ def refuse_unencrypted() -> None:
     raise PeerError(403, UNENCRYPTED_IN)
 
 
+FINGERPRINT_REQUIRED = ("Enter the other NVR's certificate fingerprint: it is shown on the other NVR's failover page. Every https:// pair "
+                        "pins the other NVR's certificate")
+
+
 def link_warning(db: sqlite3.Connection) -> dict[str, Any] | None:
-    """For the hardening page: this NVR's failover link where it is, or may be, unencrypted. None when it is not."""
+    """For the hardening page: this NVR's failover link where it is, or may be, unencrypted, or an https:// pair kept from before fingerprints
+    were required that trusts public certificate authorities instead of pinning the other NVR (#502). None when neither."""
     settings = read_settings(db)
     if settings["role"] == "off" or not settings["peer_url"]:
         return None
     sends = str(settings["peer_url"]).lower().startswith("http://")
     accepts = unencrypted_allowed(settings)
-    if not (sends or accepts):
+    unpinned = str(settings["peer_url"]).lower().startswith("https://") and not settings["peer_fingerprint"]
+    if not (sends or accepts or unpinned):
         return None
-    return {"peer_url": settings["peer_url"], "sends_unencrypted": sends, "accepts_unencrypted": accepts,
+    return {"peer_url": settings["peer_url"], "sends_unencrypted": sends, "accepts_unencrypted": accepts, "unpinned": unpinned,
             "permission": "allowed" if settings["allow_unencrypted"] else "kept_from_upgrade"}
 
 

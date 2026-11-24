@@ -29,6 +29,10 @@ test("an administrator sets this NVR up as a standby and the status area says so
 
   await form.getByLabel("Silence before the standby takes over (seconds)").fill("120");
   await form.getByRole("button", { name: "Save failover settings" }).click();
+  // Every https:// pair pins the other NVR's certificate (#502): without its fingerprint the pair is refused
+  await expect(page.getByRole("alert")).toContainText("fingerprint");
+  await form.getByLabel("Certificate fingerprint of the other NVR").fill("AB".repeat(32));
+  await form.getByRole("button", { name: "Save failover settings" }).click();
   await expect(page.getByText("Saved.")).toBeVisible();
   await expect(page.getByRole("region", { name: "Failover state" })).toContainText("Standby: watching the primary");
   await expect(page.getByRole("status", { name: "Operational status" }).getByRole("button", { name: "Failover: standby" })).toBeVisible();
