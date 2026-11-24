@@ -30,6 +30,21 @@ Some cameras lock an account after a few failed logins. Once every sign-in metho
 
 `NVR_ONVIF_TIMEOUT_SECONDS` sets how long the NVR waits for each ONVIF request.
 
+## A camera that asks for its password unprotected
+
+A camera's video stream (RTSP) can ask for its password in one of two ways:
+
+- **Digest:** the password itself never crosses the network.
+- **Basic:** the user name and password are sent merely encoded. Anything that can see the traffic on the camera network, or that answers at the camera's address, can read them.
+
+**The NVR's recording and live video answer Basic** when a camera asks for it, because they are read by FFmpeg, which does. This is the owner's decision on #476: it is documented rather than refused, so cameras that can do nothing else keep recording. (Two-way audio is stricter: it refuses Basic unless an administrator allows it for that camera; see [two-way-audio.md](two-way-audio.md).)
+
+What to do about it:
+
+- **Put the cameras on their own network or VLAN**, which only the NVR can reach, so nobody else can see their traffic or pose as a camera. See [production-checklist.md](production-checklist.md), "Network".
+- **Prefer cameras, and camera settings, that use Digest** for RTSP. Many cameras let you choose Digest only in their web page's security or RTSP settings.
+- **Give each camera's NVR account a password used nowhere else**, so one read off the camera network opens nothing beyond that camera.
+
 ## Profile lists
 
 `/api/cameras/onvif-profiles` now also returns each profile's codec, resolution, frame rate, whether it has audio, which Media service listed it, and `suggested` (`record` or `live`) for the ones the NVR would choose. The report's `video` field gives the decoded stream's codec and size once verified. H.265 is chosen only when no H.264 is offered, with a warning that playback may be limited.

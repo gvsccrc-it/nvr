@@ -48,7 +48,7 @@ The NVR answers Digest. It **does not answer a request for Basic** sign-in: the 
 
 For an older camera that can do nothing else, an administrator can tick **Allow unprotected sign-in for two-way audio** in that camera's Talk tab. The change is written to the security log (`camera_talk_unprotected_sign_in_allowed`, and `…_refused` when it is turned off again), and the camera is listed on the hardening page for as long as the tick is on. Leaving the setting out of a change keeps it as it was.
 
-**The recording stream is not covered by this yet.** The NVR's recording and live video are read by FFmpeg, and FFmpeg answers a request for Basic sign-in on plain RTSP (checked with FFmpeg 6.1; see #476).
+**Recording and live video are not covered by this, by the owner's decision on #476.** They are read by FFmpeg, which answers a request for Basic sign-in on plain RTSP (checked with FFmpeg 6.1). See [A camera that asks for its password unprotected](camera-onboarding.md#a-camera-that-asks-for-its-password-unprotected) for what that means and what to do.
 
 ## What a camera may send back
 

@@ -16,6 +16,7 @@ Addresses below are examples from the documentation ranges (`192.0.2.0/24`, `198
   ```
 
   ONVIF event delivery from the cameras also reaches the NVR on this port: allow the camera network to it only if you use ONVIF events (`sudo ufw allow from 198.51.100.0/24 to any port 8280 proto tcp`).
+- [ ] **Keep the cameras on their own network or VLAN**, reachable by the NVR and nothing people use. Some cameras ask for their password in a form anyone on their network can read (Basic sign-in), and the NVR's recording answers it (#476); see [camera-onboarding.md](camera-onboarding.md#a-camera-that-asks-for-its-password-unprotected).
 - [ ] **HTTPS before real use.** Put the NVR behind a reverse proxy or one of the tunnels in [remote-access.md](remote-access.md) (Tailscale, Cloudflare Tunnel, WireGuard). Plain HTTP sends passwords and video unencrypted.
 - [ ] **Tell the NVR how it is reached.** In `.env`:
   - `NVR_PUBLIC_URL=https://nvr.example.test` (the address people use);
