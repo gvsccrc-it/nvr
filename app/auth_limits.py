@@ -42,6 +42,9 @@ from app.clock import now as _now
 # (failures allowed before waiting starts, first wait in seconds)
 LIMITS = {"pair": (4, 2), "account": (19, 2), "address": (19, 2)}
 MAX_WAIT_SECONDS = 300
+# Wrong passwords for one account from outside the local network, in one clock hour, after which attempts from outside wait for the next
+# hour (#457). The local network and browsers that have signed in to the account before are not counted and never wait for it.
+ACCOUNT_HOUR_CAP = 60
 FORGET_AFTER = timedelta(minutes=15)
 
 
@@ -149,6 +152,35 @@ def _count(db: sqlite3.Connection, buckets: list[tuple[str, str]], address: str,
             record(db, None, "auth_throttled", scope, _logged_key(db, scope, key), failures=failures, wait_seconds=wait, address=address)
             if scope == "account":
                 _guessing(db, key, active=True)
+    for scope, key in buckets:
+        if scope == "account":
+            _count_hour(db, key, address, now)
+
+
+def _hour(now: datetime) -> int:
+    return int(now.timestamp() // 3600)
+
+
+def _count_hour(db: sqlite3.Connection, account: str, address: str, now: datetime) -> None:
+    """Count a wrong password from outside against the account's hour, and at ``ACCOUNT_HOUR_CAP`` hold the account (its account-wide bucket)
+    until the hour ends (#457). Counted for every attempt that reached the account's count, whichever address it came from."""
+    hour = _hour(now)
+    db.execute("DELETE FROM auth_account_hours WHERE hour<?", (hour - 1,))
+    db.execute("INSERT INTO auth_account_hours(account,hour,failures) VALUES(?,?,1) "
+               "ON CONFLICT(account,hour) DO UPDATE SET failures=failures+1", (account, hour))
+    failures = int(db.execute("SELECT failures FROM auth_account_hours WHERE account=? AND hour=?", (account, hour)).fetchone()[0])
+    if failures < ACCOUNT_HOUR_CAP:
+        return
+    until = datetime.fromtimestamp((hour + 1) * 3600, tz=now.tzinfo).isoformat()
+    db.execute("INSERT INTO auth_failures(scope,key,failures,last_failure_at,blocked_until) VALUES('account',?,?,?,?) "
+               "ON CONFLICT(scope,key) DO UPDATE SET last_failure_at=excluded.last_failure_at,"
+               "blocked_until=CASE WHEN blocked_until IS NULL OR blocked_until<excluded.blocked_until THEN excluded.blocked_until ELSE blocked_until END",
+               (account, failures, now.isoformat(), until))
+    if failures == ACCOUNT_HOUR_CAP:
+        if _may_log(db, "account", account):
+            record(db, None, "auth_throttled", "account", _logged_key(db, "account", account), failures=failures,
+                   wait_seconds=int((datetime.fromisoformat(until) - now).total_seconds()) + 1, address=address, reason="hourly_cap")
+        _guessing(db, account, active=True)
 
 
 def _guessing(db: sqlite3.Connection, account: str, *, active: bool) -> None:
@@ -246,6 +278,8 @@ def release(account: str, address: str, include_address: bool = True) -> None:
                 if row is None:
                     continue
                 failures = max(0, int(row["failures"]) - 1)
+                if scope == "account":  # Not a wrong password after all: it does not count against the account's hour either (#457)
+                    db.execute("UPDATE auth_account_hours SET failures=MAX(0,failures-1) WHERE account=? AND hour=?", (key, _hour(_now())))
                 if failures == 0:
                     db.execute("DELETE FROM auth_failures WHERE scope=? AND key=?", (scope, key))
                     continue
@@ -263,4 +297,5 @@ def succeeded(account: str, address: str) -> None:
     release(account, address)
     with connect() as db:
         db.execute("DELETE FROM auth_failures WHERE (scope='account' AND key=?) OR (scope='pair' AND key=?)", (account, f"{account}|{counted_as(address)}"))
+        db.execute("DELETE FROM auth_account_hours WHERE account=?", (account,))
         _guessing(db, account, active=False)

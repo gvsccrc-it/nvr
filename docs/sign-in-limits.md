@@ -16,6 +16,8 @@ Past the allowance each further attempt waits twice as long as the last, from 2 
 
 An address already being slowed for an account adds nothing more to that account's account-wide count. One outside address cannot make everyone wait.
 
+**An hourly cap per account (#457).** The waits above forget failures after 15 quiet minutes, so a guesser spreading tries over many addresses in bursts could still try about 76 times an hour. On top of them, wrong passwords for one account from outside the local network are capped at **60 in a clock hour** (`ACCOUNT_HOUR_CAP`). At the cap, attempts at that account from outside are refused, a right password included, until the hour ends. Reaching it is in the security log (`auth_throttled` with `reason: hourly_cap`) and raises the guessing incident below. The same callers the account-wide wait leaves alone are not counted and never held by the cap. A right password takes its count back, and a completed sign-in clears the hour.
+
 IPv6 addresses are counted by their /64: one host has a whole /64 of addresses to use.
 
 ## Who the account-wide wait leaves alone
