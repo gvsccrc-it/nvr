@@ -193,9 +193,10 @@ class LimitsTests(unittest.TestCase):
     def test_the_compose_file_sets_the_open_file_limit(self):
         service = yaml.safe_load((ROOT / "compose.yaml").read_text(encoding="utf-8"))["services"]["nvr"]
         self.assertEqual(service["ulimits"]["nofile"], {"soft": 65536, "hard": 65536})
-        # No process limit yet, on purpose: the 4,096 first decided on #546 is fewer threads than 200 cameras with server-side motion
-        # detection run (about 21 a detector, measured). It waits for the owner's answer on the ticket.
-        self.assertNotIn("pids_limit", service)
+        # The owner's decision on #546: 16,384. Threads count, and 200 cameras with server-side motion detection run about 21 each in
+        # the detector's FFmpeg alone (measured), past 4,096: a lower limit stops recording on a large site.
+        self.assertEqual(service["pids_limit"], 16384)
+        self.assertGreaterEqual(service["pids_limit"], 200 * (21 + 3) + 1024)  # Every camera detecting and recording, with room for the rest
 
 
 if __name__ == "__main__":
