@@ -49,14 +49,18 @@ test("hidden for 2 minutes, the tiles stop, keep their picture and say so, and p
   for (const name of ["Camera 001", "Camera 002"]) {
     const paused = tile(page, name);
     await expect(paused).toHaveAttribute("data-phase", "paused");
-    await expect(paused.getByRole("status")).toHaveText("Paused while this tab was hidden");
+    // The notice, and the time of the last frame, which stays put: a paused tile shows no moving clock
+    await expect(paused.getByRole("status")).toContainText("Paused while this tab was hidden");
     await expect(paused.locator(".tile-state")).not.toContainText("Live");
     await expect(paused.locator("video.tile-video")).toHaveCount(1); // Its last picture stays
   }
   const opened = sockets.opened();
+  const overlay = tile(page, "Camera 001").getByRole("status");
+  const before = await overlay.textContent();
   await page.clock.fastForward(60_000);
   await page.waitForTimeout(2_000);
   expect(sockets.opened()).toBe(opened); // Nothing reconnects while hidden
+  expect(await overlay.textContent()).toBe(before); // And nothing on the tile moves
 
   await setHidden(page, false);
   await bothLive(page, sockets);
