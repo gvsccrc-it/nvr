@@ -126,7 +126,9 @@ def _within_access(request: HTTPConnection, principal: Principal) -> Principal:
 def current_user(request: HTTPConnection) -> Principal:
     """Resolve the caller of an HTTP request or WebSocket handshake."""
     authorization = request.headers.get("authorization")
-    if authorization is not None:
+    # Only a Bearer header is an API token, and it wins over a session cookie (#292). Any other scheme belongs to something else (a reverse
+    # proxy's Basic sign-in is sent with every request) and is left alone: the session cookie decides (#465).
+    if authorization is not None and is_bearer(authorization):
         return _within_access(request, _token_principal(request, authorization))
     raw = request.cookies.get(COOKIE_NAME)
     if not raw:
@@ -179,6 +181,11 @@ def signed_in_person(user: Annotated[Principal, Depends(current_user)]) -> Princ
     if user.scopes is not None or user.token_id is not None or user.wall:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="This is for a signed-in person, not an API token or a video wall")
     return user
+
+
+def is_bearer(authorization: str) -> bool:
+    """Whether an Authorization header uses the Bearer scheme (any case), with or without a token after it."""
+    return authorization.strip().partition(" ")[0].lower() == "bearer"
 
 
 def _token_principal(request: HTTPConnection, authorization: str) -> Principal:

@@ -23,6 +23,13 @@ The proxies the overrides use run on the host network and reach the NVR on `127.
 
 **Wherever the caller cannot be known, it counts as outside the local network, never as local:** forwarded headers from a peer that is not listed (a proxy the NVR was not told about), a trusted proxy that sends no usable `X-Forwarded-For` (missing, malformed or more than ten entries), and everything that rests on `NVR_TRUST_FORWARDED_FOR`, which any sender could write. This is what stops someone outside from looking local by sending a header of their own.
 
+### A proxy with its own sign-in
+
+A proxy may ask for its own sign-in (HTTP Basic, for example) before it lets anyone through; the browser then sends an
+`Authorization` header with every request. The NVR treats only an `Authorization: Bearer` header as an API token. A header
+with any other scheme is left alone, and the browser's NVR session decides who is calling (#465). A Bearer token still wins
+over a session in the same request, and a Bearer header with a missing or unknown token is refused.
+
 ## Where "local" ends
 
 Whether a caller is *remote* or *local* is decided by the first of these that fits its address:
