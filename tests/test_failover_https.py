@@ -195,6 +195,29 @@ class CertificateTests(FailoverCase):
 class PairingTests(FailoverCase):
     PEER = "https://192.0.2.20:8443"
 
+    def test_a_new_https_pair_needs_the_other_nvrs_fingerprint(self):
+        """The owner's decision of 24 Nov: every new https:// pair pins the other NVR's certificate; no certificate authority is trusted."""
+        base = {"role": "primary", "peer_url": self.PEER, "secret": SECRET, "silence_seconds": 12, "lease_seconds": 5, "sync_seconds": 60}
+        refused = self.admin.put("/api/admin/failover", json=base)
+        self.assertEqual(refused.status_code, 422)
+        self.assertIn("fingerprint", refused.json()["detail"])
+        with connect() as db:
+            self.assertEqual(failover.read_settings(db)["role"], "off")  # Nothing was saved
+        self.assertEqual(self.admin.put("/api/admin/failover", json={**base, "peer_fingerprint": "ab" * 32}).status_code, 200)
+
+    def test_a_pair_saved_before_without_a_fingerprint_keeps_working_until_its_address_changes(self):
+        self.configure("primary", peer_url=self.PEER)
+        with connect() as db:  # As saved before fingerprints were required
+            db.execute("UPDATE failover_settings SET peer_fingerprint=NULL")
+        base = {"role": "primary", "peer_url": self.PEER, "silence_seconds": 15, "lease_seconds": 5, "sync_seconds": 60}
+        self.assertEqual(self.admin.put("/api/admin/failover", json=base).status_code, 200, "re-saving an existing pair was refused")
+        warning = self.admin.get("/api/hardening").json()["failover_link"]
+        self.assertEqual((warning["unpinned"], warning["sends_unencrypted"], warning["accepts_unencrypted"]), (True, False, False))
+        moved = self.admin.put("/api/admin/failover", json={**base, "peer_url": "https://192.0.2.21:8443"})
+        self.assertEqual(moved.status_code, 422)  # A new address is a new pair
+        self.assertEqual(self.admin.put("/api/admin/failover", json={**base, "peer_fingerprint": "ab" * 32}).status_code, 200)
+        self.assertIsNone(self.admin.get("/api/hardening").json()["failover_link"])  # Pinned now: nothing to warn about
+
     def test_pairing_records_the_other_nvrs_fingerprint(self):
         fingerprint = hashlib.sha256(b"the other NVR's certificate").hexdigest()
         pasted = failover_link.display(fingerprint).lower()  # As copied from the other page, in either case
@@ -453,7 +476,8 @@ class GrandfatheredTests(FailoverCase):
 
     def test_it_is_listed_on_the_hardening_page(self):
         warning = self.admin.get("/api/hardening").json()["failover_link"]
-        self.assertEqual(warning, {"peer_url": self.OLD, "sends_unencrypted": True, "accepts_unencrypted": True, "permission": "kept_from_upgrade"})
+        self.assertEqual(warning, {"peer_url": self.OLD, "sends_unencrypted": True, "accepts_unencrypted": True, "unpinned": False,
+                                   "permission": "kept_from_upgrade"})
 
     def test_saved_again_unchanged_it_is_kept_and_a_new_address_follows_the_new_rules(self):
         self.configure("standby", peer_url=self.OLD, lease_seconds=6)  # Another setting changed, the address not

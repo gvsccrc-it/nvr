@@ -112,6 +112,7 @@ class ImportConnectionTests(HandbackCase):
                     return httpx.Response(200, content=body, headers=standby.signed(request, body))
                 return standby(request)
 
+            options.pop("transport", None)  # The stand-in standby replaces the network, the pinned one included (#502)
             return real(transport=httpx.MockTransport(handler), **options)
 
         with connect() as db:

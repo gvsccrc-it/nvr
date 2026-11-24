@@ -17,7 +17,7 @@ interface Report {
   unprotected_talk?: { camera_id: string; camera_name: string }[];
   public_cameras?: { camera_id: string; camera_name: string; permission: "allowed" | "grandfathered" }[];
   camera_loopback_allowed?: boolean;
-  failover_link?: { peer_url: string; sends_unencrypted: boolean; accepts_unencrypted: boolean; permission: "allowed" | "kept_from_upgrade" } | null;
+  failover_link?: { peer_url: string; sends_unencrypted: boolean; accepts_unencrypted: boolean; unpinned?: boolean; permission: "allowed" | "kept_from_upgrade" } | null;
   run?: { running: boolean; started_at: string | null; probes_total: number; probes_done: number; not_answered: { camera_id: string; camera_name: string }[] };
 }
 
@@ -104,7 +104,19 @@ export function HardeningSettings() {
           </p>
         </section>
       ) : null}
-      {data?.failover_link ? (
+      {data?.failover_link?.unpinned ? (
+        <section className="field-group settings-block" aria-label="Failover link not pinned">
+          <h2 className="field-heading">Failover link not pinned</h2>
+          <p className="notice" data-tone="warn">
+            <span>
+            The failover pair ({data.failover_link.peer_url}) was saved before a certificate fingerprint was required. It is encrypted, but trusts any
+            certificate a public authority signed for that address instead of the other NVR's own. Enter the other NVR's certificate fingerprint
+            under Settings, Failover, and save.
+            </span>
+          </p>
+        </section>
+      ) : null}
+      {data?.failover_link && (data.failover_link.sends_unencrypted || data.failover_link.accepts_unencrypted) ? (
         <section className="field-group settings-block" aria-label="Unencrypted failover link">
           <h2 className="field-heading">Unencrypted failover link</h2>
           <p className="notice" data-tone="warn">

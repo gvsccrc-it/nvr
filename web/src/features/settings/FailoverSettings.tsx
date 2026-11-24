@@ -86,7 +86,7 @@ export function FailoverSettings() {
           and the other NVR's fingerprint here: each then connects only to the other's certificate and refuses any other. Open the port between the two NVRs only.
         </p>
         <p><span className="muted">Certificate fingerprint (SHA-256): </span><code className="fingerprint" aria-label="This NVR's certificate fingerprint">{data?.link.fingerprint ?? "Loading…"}</code></p>
-        {data && !data.link.port ? <p className="notice" data-tone="warn"><span>The link's port is turned off on this NVR (<code>NVR_FAILOVER_LINK_PORT=0</code>), so the other NVR can reach it only over an unencrypted link or through a proxy.</span></p> : null}
+        {data && !data.link.port ? <p className="notice" data-tone="warn"><span>The link's port is turned off on this NVR (<code>NVR_FAILOVER_LINK_PORT=0</code>), so the other NVR can reach it only over an unencrypted link.</span></p> : null}
         <div className="field-actions">
           <button type="button" className="button" disabled={renew.isPending} onClick={() => { if (window.confirm("Make a new certificate for this NVR's failover link? The other NVR refuses the link until its administrator enters the new fingerprint.")) renew.mutate(); }}>
             Make a new certificate
@@ -129,7 +129,7 @@ export function FailoverSettings() {
               <label className="check"><input type="checkbox" checked={form.allow_unencrypted} onChange={event => setForm({ ...form, allow_unencrypted: event.target.checked })} /> Allow an unencrypted link</label>
               <p className="muted field-hint">
                 Plain <code>http://</code> between the two works only while this is ticked on both NVRs; footage and the failover messages then cross the network unencrypted (the configuration copy stays sealed with the backup passphrase), and the hardening page says so.
-                Leave it off and use the other NVR's <code>https://</code> link address with its fingerprint. An <code>https://</code> address without a fingerprint is for a proxy with a public certificate.
+                Leave it off and use the other NVR's <code>https://</code> link address with its fingerprint. Every <code>https://</code> address needs the other NVR's fingerprint.
               </p>
               {kept ? (
                 <p className="notice" data-tone="warn">

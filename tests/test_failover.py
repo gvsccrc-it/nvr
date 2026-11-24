@@ -29,6 +29,7 @@ from tests.fixtures.nvr_site import PASSWORD, ROOT, NvrSite
 from tests.test_access_grants import GrantCase
 
 SECRET = "failover-shared-secret-0123456789"
+PEER_FINGERPRINT = "ab" * 32  # A stand-in for the other NVR's certificate fingerprint (#502): every https:// pair pins one
 PASSPHRASE = "failover-backup-passphrase-123456"
 # The other NVR reaches the failover endpoints over HTTPS (#502): a request that arrived unencrypted is refused unless an unencrypted link is allowed
 LINK = "https://testserver"
@@ -68,6 +69,8 @@ class FailoverCase(GrantCase):
 
     def configure(self, role: str, **extra):
         body = {"role": role, "peer_url": "https://peer.example", "secret": SECRET, "silence_seconds": 12, "lease_seconds": 5, "sync_seconds": 60, **extra}
+        if str(body.get("peer_url") or "").startswith("https://") and "peer_fingerprint" not in body:
+            body["peer_fingerprint"] = PEER_FINGERPRINT  # Every https:// pair pins the other NVR's certificate (#502)
         response = self.admin.put("/api/admin/failover", json=body)
         self.assertEqual(response.status_code, 200, response.text)
         return response.json()
@@ -295,7 +298,7 @@ class SettingsTests(FailoverCase):
         with connect() as db:
             ciphertext = db.execute("SELECT secret_ciphertext FROM failover_settings").fetchone()[0]
         self.assertNotIn(SECRET.encode(), bytes(ciphertext))
-        base = {"role": "standby", "peer_url": "https://peer.example", "silence_seconds": 12, "lease_seconds": 5, "sync_seconds": 60}
+        base = {"role": "standby", "peer_url": "https://peer.example", "peer_fingerprint": PEER_FINGERPRINT, "silence_seconds": 12, "lease_seconds": 5, "sync_seconds": 60}
         self.assertEqual(self.admin.put("/api/admin/failover", json={**base, "silence_seconds": 9}).status_code, 422)  # Under the lease twice over
         self.assertEqual(self.admin.put("/api/admin/failover", json={**base, "lease_seconds": 30, "silence_seconds": 50}).status_code, 422)
         self.assertEqual(self.admin.put("/api/admin/failover", json={**base, "secret": "short"}).status_code, 422)
@@ -312,12 +315,12 @@ class SettingsTests(FailoverCase):
             return [{"action": row["action"], "details": row["details_json"]} for row in db.execute("SELECT action,details_json FROM audit_log")]
 
     def test_the_first_secret_is_required_and_a_standby_cannot_be_changed_while_it_is_recording(self):
-        response = self.admin.put("/api/admin/failover", json={"role": "primary", "peer_url": "https://peer.example", "silence_seconds": 12, "lease_seconds": 5})
+        response = self.admin.put("/api/admin/failover", json={"role": "primary", "peer_url": "https://peer.example", "peer_fingerprint": PEER_FINGERPRINT, "silence_seconds": 12, "lease_seconds": 5})
         self.assertEqual(response.status_code, 422)
         self.configure("standby")
         failover.check_takeover(at(60))
         self.assertEqual(self.admin.put("/api/admin/failover", json={"role": "off"}).status_code, 409)
-        self.assertEqual(self.admin.put("/api/admin/failover", json={"role": "primary", "peer_url": "https://peer.example", "silence_seconds": 12, "lease_seconds": 5}).status_code, 409)
+        self.assertEqual(self.admin.put("/api/admin/failover", json={"role": "primary", "peer_url": "https://peer.example", "peer_fingerprint": PEER_FINGERPRINT, "silence_seconds": 12, "lease_seconds": 5}).status_code, 409)
 
     def test_only_administrators_change_failover_and_everyone_sees_where_it_stands(self):
         for client in (self.limited, self.full):
