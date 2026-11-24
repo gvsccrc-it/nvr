@@ -29,10 +29,11 @@ class RetentionApiTests(unittest.TestCase):
         self.group = str(uuid.uuid4())
         self.camera = str(uuid.uuid4())
         with connect() as db:
+            db.execute("INSERT INTO users(id,username,password_hash,role) VALUES(1,'tester','unused','administrator')")  # The person the stand-ins below name
             db.execute("INSERT INTO camera_groups(id,name) VALUES(?,?)", (self.group,"API group"))
             db.execute("INSERT INTO cameras(id,name,group_id,stream_url_ciphertext) VALUES(?,?,?,X'01')", (self.camera,"API camera",self.group))
         app.dependency_overrides[current_user] = lambda: principal(1, "tester", "administrator")
-        app.dependency_overrides[administrator] = lambda: None
+        app.dependency_overrides[administrator] = lambda: principal(1, "tester", "administrator")  # Who made a change is in the security log (#459)
         self.context = TestClient(app)
         self.client = self.context.__enter__()
 

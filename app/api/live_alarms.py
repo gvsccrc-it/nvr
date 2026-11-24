@@ -7,7 +7,8 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, Field
 
-from app import live_alarms
+from app import auth_limits, live_alarms, security_log
+from app.audit import record
 from app.clock import stamp
 from app.api.web_interface import interface_version
 from app.api_tokens import TokenRejected, authenticate, token_scopes
@@ -56,7 +57,7 @@ def get_pop_ins(user: CurrentUser, after: str | None = Query(default=None, max_l
 
 
 @router.post("/api/wall/session")
-def wall_sign_in(payload: WallSignIn, response: Response) -> dict[str, object]:
+def wall_sign_in(payload: WallSignIn, request: Request, response: Response) -> dict[str, object]:
     """Sign a video wall in with an API token limited to read and media."""
     try:
         row = authenticate(payload.token.strip())
@@ -70,6 +71,9 @@ def wall_sign_in(payload: WallSignIn, response: Response) -> dict[str, object]:
     with connect() as db:
         db.execute("DELETE FROM wall_sessions WHERE expires_at<=?", (stamp(now),))
         db.execute("INSERT INTO wall_sessions(token_hash,api_token_id,expires_at) VALUES(?,?,?)", (token_digest(raw), row["id"], stamp(expires)))
+        # A video wall signing in, by its token's name (never the token): on record like a person's sign-in (#459)
+        address = auth_limits.client_address(request)
+        record(db, None, "wall_signed_in", "api_token", row["id"], name=row["name"], address=str(address), network=security_log.network_of(address))
     response.set_cookie(WALL_COOKIE_NAME, raw, httponly=True, secure=secure_cookie(), samesite="strict", path="/", max_age=WALL_SESSION_DAYS * 86400)
     return _wall_view(row["name"])
 

@@ -145,7 +145,7 @@ def _count(db: sqlite3.Connection, buckets: list[tuple[str, str]], address: str,
         db.execute("INSERT INTO auth_failures(scope,key,failures,last_failure_at,blocked_until) VALUES(?,?,?,?,?) "
                    "ON CONFLICT(scope,key) DO UPDATE SET failures=excluded.failures,last_failure_at=excluded.last_failure_at,blocked_until=excluded.blocked_until",
                    (scope, key, failures, now.isoformat(), (now + timedelta(seconds=wait)).isoformat() if wait else None))
-        if wait and failures - 1 == LIMITS[scope][0]:
+        if wait and failures - 1 == LIMITS[scope][0] and _may_log(db, scope, key):
             record(db, None, "auth_throttled", scope, _logged_key(db, scope, key), failures=failures, wait_seconds=wait, address=address)
             if scope == "account":
                 _guessing(db, key, active=True)
@@ -162,6 +162,19 @@ def _guessing(db: sqlite3.Connection, account: str, *, active: bool) -> None:
                   summary=f"Wrong passwords for the account {user['username']} are arriving from several addresses. Sign-in to it from outside the local network "
                           "is being slowed. People on the local network, and browsers that have signed in to it before, are not affected.",
                   details={"account": user["username"]})
+
+
+def _may_log(db: sqlite3.Connection, scope: str, key: str) -> bool:
+    """Whether a threshold row may be written: for an account that exists, at most ``security_log.FAILED_SIGN_IN_ROWS_PER_HOUR`` failure
+    rows an hour (#459), so guesses from many addresses cannot fill the log. Addresses and unknown names are not bounded here."""
+    if scope == "address":
+        return True
+    account = key.rpartition("|")[0] if scope == "pair" else key
+    user = db.execute("SELECT id FROM users WHERE username=? COLLATE NOCASE", (account,)).fetchone()
+    if user is None:
+        return True
+    from .security_log import failure_rows_left
+    return failure_rows_left(db, account, int(user["id"]))
 
 
 def _logged_key(db: sqlite3.Connection, scope: str, key: str) -> str:

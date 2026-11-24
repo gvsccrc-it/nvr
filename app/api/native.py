@@ -3,10 +3,10 @@ from __future__ import annotations
 
 import sqlite3
 
-from fastapi import APIRouter, HTTPException, Response, status
+from fastapi import APIRouter, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 
-from app import device_sessions, native_push
+from app import auth_limits, device_sessions, native_push, security_log
 from app.api.identity import start_session
 from app.principal import Administrator, CurrentUser, SignedInPerson
 from app.store import connect
@@ -65,7 +65,7 @@ def create_device_session(payload: DeviceSessionRequest, user: SignedInPerson) -
 
 
 @router.post("/api/native/device-sessions/resume")
-def resume_device_session(payload: ResumeRequest, response: Response) -> dict[str, object]:
+def resume_device_session(payload: ResumeRequest, request: Request, response: Response) -> dict[str, object]:
     """Exchange the phone's secret (after the person unlocks it) for a session and a replacement secret. Anything else is the same 401."""
     resumed = device_sessions.resume(payload.token)
     if resumed is None:
@@ -75,6 +75,8 @@ def resume_device_session(payload: ResumeRequest, response: Response) -> dict[st
     except sqlite3.IntegrityError:
         # The phone was taken away between the exchange and the session being made: nothing is issued.
         raise HTTPException(status_code=401, detail="Sign in again") from None
+    with connect() as db:
+        security_log.signed_in(db, int(resumed["user_id"]), "phone", auth_limits.client_address(request))
     return {"username": resumed["username"], "role": resumed["role"], "token": resumed["token"], "expires_at": resumed["expires_at"]}
 
 
