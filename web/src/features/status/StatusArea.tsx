@@ -10,6 +10,7 @@ import { AlarmsInbox } from "@/features/alarms/AlarmsInbox";
 import { useAlarmCounts } from "@/features/alarms/api";
 import { ExportJobs } from "@/features/exports/ExportJobs";
 import { useEndWindow, useMaintenance, type MaintenanceWindow } from "@/features/maintenance/api";
+import { ExtendWindow } from "@/features/maintenance/ExtendWindow";
 import { usePlaybackStore } from "@/features/playback/store";
 import { formatRelative } from "@/lib/time";
 import { summarize, type StatusSummary, type Tone } from "./summary";
@@ -88,7 +89,10 @@ export function StatusArea() {
   const unreachable = cameras.isError || incidents.isError;
   const maintenance = useMaintenance().data;
   const activeWindows = (maintenance?.windows ?? []).filter(window => window.state === "active");
-  const maintenanceLabel = maintenance?.site_active ? "Maintenance: whole site" : maintenance?.covered_camera_ids.length ? `Maintenance: ${maintenance.covered_camera_ids.length} camera${maintenance.covered_camera_ids.length === 1 ? "" : "s"}` : activeWindows.length ? `Maintenance: ${activeWindows.length} window${activeWindows.length === 1 ? "" : "s"}` : null;
+  const endingSoon = activeWindows.some(window => window.ending_soon && window.can_end);
+  const coveredLabel = maintenance?.site_active ? "Maintenance: whole site" : maintenance?.covered_camera_ids.length ? `Maintenance: ${maintenance.covered_camera_ids.length} camera${maintenance.covered_camera_ids.length === 1 ? "" : "s"}` : activeWindows.length ? `Maintenance: ${activeWindows.length} window${activeWindows.length === 1 ? "" : "s"}` : null;
+  // A window this person may extend is about to end (#234): the chip says so until it is extended or ends.
+  const maintenanceLabel = coveredLabel && endingSoon ? `${coveredLabel} (ends soon)` : coveredLabel;
   const alarms = useAlarmCounts();
   const inbox = useAlarmInbox();
   useLinkFromAddress();
@@ -143,7 +147,7 @@ function MaintenanceSection({ focused, onClose }: { focused: boolean; onClose: (
   return (
     <section aria-labelledby="status-maintenance" data-focused={focused}>
       <h3 id="status-maintenance">Maintenance</h3>
-      <p className="muted">While cameras are being worked on they send no alerts. Alarms are still kept, marked; recording carries on.</p>
+      <p className="muted">While cameras are being worked on they send no alerts and their AI analysis pauses. Alarms are still kept, marked; recording carries on.</p>
       {windows.length ? (
         <ul className="status-list">
           {windows.map(window => (
@@ -158,6 +162,7 @@ function MaintenanceSection({ focused, onClose }: { focused: boolean; onClose: (
                   {window.state === "upcoming" ? `Cancel ${window.name}` : `End ${window.name} now`}
                 </button>
               ) : null}
+              {window.state === "active" ? <ExtendWindow window={window} /> : null}
             </li>
           ))}
         </ul>

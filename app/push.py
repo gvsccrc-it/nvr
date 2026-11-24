@@ -8,6 +8,9 @@ the device (RFC 8291, ``aes128gcm``) and signed for the push service with the
 installation's VAPID key (RFC 8292). Failures retry with backoff; a subscription the
 push service reports gone (404/410) is removed.
 
+The same queue carries one other kind of notification: the reminder to the person who opened a maintenance window that it is about to
+end (#234), which names no alarm and no camera and goes only to that person's devices.
+
 A notification's thumbnail is fetched through a short-lived signed link that names
 one alarm. It carries no session or API token.
 """
@@ -38,7 +41,7 @@ from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-from . import base64url
+from . import base64url, maintenance
 from .access import may_view_camera
 from .alarms import label_text
 from .credentials import decrypt, derived_key, encrypt
@@ -329,6 +332,38 @@ def queue_reminder(db: sqlite3.Connection, alarm_id: str, body: str) -> int:
     return queued
 
 
+def queue_maintenance_reminder(db: sqlite3.Connection, window: sqlite3.Row, at: datetime) -> int:
+    """Tell the person who opened a maintenance window, on every device they subscribed, that it ends soon and can be extended (#234).
+    Not about an alarm, so their alarm choices (rules, groups, quiet hours) do not apply: they asked for this window and are working in it.
+    Inside the caller's transaction; a failure here is logged and undone on its own, and never stops the window being marked reminded."""
+    db.execute("SAVEPOINT push_maintenance")
+    try:
+        ends = datetime.fromisoformat(window["ends_at"])
+        site = db.execute("SELECT time_zone FROM site_display_settings WHERE singleton_id=1").fetchone()
+        try:
+            shown = ends.astimezone(ZoneInfo(site["time_zone"])) if site else ends
+        except ZoneInfoNotFoundError:
+            shown = ends
+        minutes = max(1, round((ends - at).total_seconds() / 60))
+        payload = json.dumps({
+            "title": f"Maintenance ends in {minutes} minute{'s' if minutes != 1 else ''}: {window['name']}",
+            "body": f"It ends at {shown.strftime('%H:%M')}. If the work is not finished, open it to extend it.",
+            "url": "/cameras/maintenance", "maintenance_window_id": window["id"],
+        }, separators=(",", ":"))
+        now = _now().isoformat()
+        queued = 0
+        for subscription in db.execute("SELECT id FROM push_subscriptions WHERE user_id=?", (window["created_by"],)).fetchall():
+            queued += db.execute("INSERT INTO push_deliveries(id,subscription_id,alarm_id,maintenance_window_id,payload_json,next_attempt_at) VALUES(?,?,NULL,?,?,?)",
+                                 (str(uuid.uuid4()), subscription["id"], window["id"], payload, now)).rowcount
+    except Exception:  # noqa: BLE001 - a notification must not cost the record that the reminder is done
+        db.execute("ROLLBACK TO push_maintenance")
+        db.execute("RELEASE push_maintenance")
+        logger.exception("The maintenance reminder for window %s could not be queued", window["id"])
+        return 0
+    db.execute("RELEASE push_maintenance")
+    return queued
+
+
 def _queue_for_alarm(db: sqlite3.Connection, alarm_id: str, reminder: str | None = None) -> int:
     alarm = db.execute("SELECT a.*,c.name AS camera_name,c.group_id FROM alarms a JOIN cameras c ON c.id=a.camera_id WHERE a.id=?", (alarm_id,)).fetchone()
     if alarm is None:
@@ -380,8 +415,8 @@ def _claim(db: sqlite3.Connection) -> sqlite3.Row | None:
     db.execute("BEGIN IMMEDIATE")
     try:
         row = db.execute(
-            "SELECT d.id,d.payload_json,d.attempt_count,s.id AS subscription_id,s.user_id,s.kind,s.endpoint,s.p256dh,s.auth,a.camera_id FROM push_deliveries d "
-            "JOIN push_subscriptions s ON s.id=d.subscription_id JOIN alarms a ON a.id=d.alarm_id "
+            "SELECT d.id,d.payload_json,d.attempt_count,d.alarm_id,s.id AS subscription_id,s.user_id,s.kind,s.endpoint,s.p256dh,s.auth,a.camera_id FROM push_deliveries d "
+            "JOIN push_subscriptions s ON s.id=d.subscription_id LEFT JOIN alarms a ON a.id=d.alarm_id "  # No alarm: a maintenance reminder to its opener
             "WHERE d.status='queued' AND d.next_attempt_at<=? ORDER BY d.next_attempt_at LIMIT 1",
             (_now().isoformat(),)).fetchone()
         if row is not None:
@@ -447,7 +482,8 @@ def deliver_due(client: httpx.Client | None = None, limit: int = 50) -> list[str
             if delivery is None:
                 break
             with connect() as db:
-                allowed = may_view_camera(db, delivery["user_id"], delivery["camera_id"])
+                # A maintenance reminder names no camera and goes only to the devices of the person who opened the window.
+                allowed = delivery["alarm_id"] is None or may_view_camera(db, delivery["user_id"], delivery["camera_id"])
             if not allowed:
                 # The device changed hands, or its owner lost access, since this was queued.
                 outcomes.append(_finish(delivery, None, "invalid: the recipient may no longer see this camera"))
@@ -563,6 +599,12 @@ class PushManager:
     async def _run(self) -> None:
         while True:
             started = time.monotonic()
+            try:
+                await asyncio.to_thread(maintenance.remind_due)  # A maintenance window about to end: its reminder is queued, then sent below
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - a failed reminder pass is tried again next time; delivery goes on
+                logger.exception("Maintenance reminder pass failed")
             try:
                 await asyncio.to_thread(deliver_due)
             except asyncio.CancelledError:

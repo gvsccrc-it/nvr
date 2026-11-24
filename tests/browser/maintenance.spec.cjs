@@ -87,3 +87,29 @@ test("a window on the whole site says so in the status bar", async ({ page }) =>
   await page.getByRole("button", { name: "End Power work now" }).click();
   await expect(bar.getByRole("button", { name: /^Maintenance:/ })).toHaveCount(0);
 });
+
+test("a running window can be extended from the maintenance page and from the status panel", async ({ page }) => {
+  seedFixtures(1);
+  await signInNext(page);
+  await page.goto("/cameras/maintenance");
+  const form = page.getByRole("form", { name: "Open a maintenance window" });
+  await form.getByLabel("What is being done").fill("Mast repair");
+  await form.getByLabel("For how long").selectOption("30");
+  await form.getByRole("checkbox").first().check();
+  await form.getByRole("button", { name: "Start maintenance" }).click();
+  const active = page.getByRole("list", { name: "Active windows" });
+  await expect(active).toContainText("Mast repair");
+  const until = async () => (await active.locator("p.muted", { hasText: /^Until / }).first().textContent()) ?? "";
+  const before = await until();
+  const extended = page.waitForResponse(response => response.url().includes("/extend") && response.request().method() === "POST");
+  await active.getByRole("button", { name: "Extend Mast repair by 1 hour" }).click();
+  expect((await extended).status()).toBe(200);
+  await expect.poll(until).not.toBe(before);
+
+  const bar = page.getByRole("status", { name: "Operational status" });
+  await bar.getByRole("button", { name: "Maintenance: 1 camera" }).click();
+  const drawer = page.getByRole("dialog", { name: "Operational status" });
+  const again = page.waitForResponse(response => response.url().includes("/extend") && response.request().method() === "POST");
+  await drawer.getByRole("button", { name: "Extend Mast repair by 30 minutes" }).click();
+  expect((await again).status()).toBe(200);
+});

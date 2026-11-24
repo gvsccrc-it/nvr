@@ -36,6 +36,10 @@ class WindowInput(BaseModel):
         return self
 
 
+class ExtendInput(BaseModel):
+    minutes: int = Field(ge=1, le=int(maintenance.MAX_EXTENSION.total_seconds() // 60))
+
+
 def _visible(db, user: CurrentUser, row) -> dict[str, Any] | None:
     """The window as this person may see it, or None when it concerns nothing they can see (and they did not open it)."""
     view = maintenance.view(db, row)
@@ -115,3 +119,32 @@ def end_window(window_id: str, user: CurrentUser) -> dict[str, Any]:
         db.execute("COMMIT")
         after = db.execute("SELECT * FROM maintenance_windows WHERE id=?", (window_id,)).fetchone()
         return maintenance.view(db, after) if after is not None else {"id": window_id, "state": "removed"}
+
+
+@router.post("/api/maintenance/{window_id}/extend")
+def extend_window(window_id: str, payload: ExtendInput, user: CurrentUser) -> dict[str, Any]:
+    """Move a window's end later, within the limit of opening one (eight hours in all, seven days for an administrator). Who may end a
+    window may extend it: an administrator any, anyone else the ones they opened. Its reminder is set again for the new end."""
+    administrator = user["role"] == "administrator"
+    with connect() as db:
+        row = db.execute("SELECT * FROM maintenance_windows WHERE id=?", (window_id,)).fetchone()
+        if row is None or (not administrator and row["created_by"] != int(user["id"])):
+            raise HTTPException(status_code=404, detail="Maintenance window not found")  # Someone else's window is not found, like a hidden camera
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            after = maintenance.extend(db, window_id, payload.minutes, administrator=administrator)
+            record(db, int(user["id"]), "maintenance_extended", "maintenance_window", window_id, name=after["name"], minutes=payload.minutes,
+                   ends_was=row["ends_at"], ends_at=after["ends_at"])
+        except LookupError:
+            db.execute("ROLLBACK")
+            raise HTTPException(status_code=404, detail="Maintenance window not found") from None
+        except maintenance.WindowError as exc:
+            db.execute("ROLLBACK")
+            raise HTTPException(status_code=409 if isinstance(exc, maintenance.WindowEnded) else 422, detail=str(exc)) from None
+        except BaseException:
+            db.execute("ROLLBACK")
+            raise
+        db.execute("COMMIT")
+        view = maintenance.view(db, after)
+        view["can_end"] = True
+        return view
