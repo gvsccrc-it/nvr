@@ -19,7 +19,7 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 from authlib.integrations.starlette_client import OAuth
 
-from app import accounts, auth_limits as limits, known_browser, mfa, network
+from app import accounts, auth_limits as limits, known_browser, mfa, network, security_log
 from app.audit import record
 from app.clock import stamp
 from app.access import ensure_default_grant
@@ -188,6 +188,7 @@ def bootstrap(payload: BootstrapRequest, request: Request, response: Response) -
             )
             user_id = int(cur.lastrowid)
             record(db, user_id, "setup_completed", "user", user_id, username=username, address=address)
+            security_log.signed_in(db, user_id, "setup", address)
             db.commit()
         except sqlite3.IntegrityError as exc:
             db.rollback()
@@ -197,11 +198,12 @@ def bootstrap(payload: BootstrapRequest, request: Request, response: Response) -
     return {"username": username, "role": "administrator"}
 
 
-def signed_in(response: Response, user: sqlite3.Row, account: str, address: str, remote: bool) -> dict[str, object]:
-    """Start the session, clear the account's failures, and say whether the policy still owes a second factor."""
+def signed_in(response: Response, user: sqlite3.Row, account: str, address: str, remote: bool, method: str) -> dict[str, object]:
+    """Start the session, clear the account's failures, record the sign-in (#459), and say whether the policy still owes a second factor."""
     start_session(response, int(user["id"]))
     limits.succeeded(account, address)
     with connect() as db:
+        security_log.signed_in(db, int(user["id"]), method, address)
         # This browser has now signed in to this account: the account-wide sign-in wait will leave it alone (#457). Not a session.
         known_browser.remember(db, getattr(address, "tokens", ()), response, int(user["id"]), secure=secure_cookie())
         owes = mfa.required_for(mfa.policy(db), user["role"], local=user["provider_issuer"] is None, remote_policy=mfa.remote_required(db),
@@ -228,6 +230,9 @@ def login(payload: LoginRequest, request: Request, response: Response) -> dict[s
         limits.release(account, address)  # Not checked, so not a wrong password
         raise HTTPException(status_code=429, detail="Many people are signing in at this moment. Try again in a few seconds.", headers={"Retry-After": "2"}) from None
     if not right:
+        if user is not None:  # An account that exists: its first failure in a run is on record (#459). An unknown name is not an account.
+            with connect() as db:
+                security_log.sign_in_failed(db, int(user["id"]), account, "password", address)
         raise HTTPException(status_code=401, detail="Invalid username or password")
     with connect() as db:
         found = mfa.factors(db, int(user["id"]))
@@ -235,7 +240,7 @@ def login(payload: LoginRequest, request: Request, response: Response) -> dict[s
             limits.release(account, address)  # The password was right; the second step is where guessing continues.
             methods = [name for name, available in (("passkey", bool(found["passkeys"])), ("totp", found["totp"]), ("recovery", found["recovery_codes_remaining"] > 0)) if available]
             return {"mfa_required": True, "challenge": mfa.new_challenge(db, "login", int(user["id"])), "methods": methods}
-    return signed_in(response, user, account, address, network.request_is_remote(request))
+    return signed_in(response, user, account, address, network.request_is_remote(request), "password")
 
 
 @router.post("/api/auth/logout", status_code=status.HTTP_204_NO_CONTENT)
@@ -358,6 +363,7 @@ async def oidc_callback(request: Request) -> RedirectResponse:
     if role is None:
         await asyncio.to_thread(_entra_role_removed, issuer, subject)
         raise HTTPException(status_code=403, detail="Your Entra account has no NVR role assignment")
+    address = limits.client_address(request)
     display = claims.get("preferred_username")
     username = display.strip()[:128] if isinstance(display, str) and display.strip() else f"entra-{subject[:112]}"
     def sign_in():
@@ -377,13 +383,17 @@ async def oidc_callback(request: Request) -> RedirectResponse:
                     user_id = int(cur.lastrowid)
                 except sqlite3.IntegrityError as exc:
                     raise HTTPException(status_code=403, detail="Unable to provision this Entra identity") from exc
+                record(db, None, "entra_account_created", "user", user_id, username=username, role=role, address=str(address))
             else:
                 user_id = int(user["id"])
                 db.execute("UPDATE users SET role=?,provider_roles_json=? WHERE id=?", (role, json.dumps(_claimed_roles(claims)), user_id))
+                if user["role"] != role:  # From the Entra role assignment, at sign-in (#459)
+                    record(db, None, "entra_role_changed", "user", user_id, username=user["username"], before=user["role"], after=role)
                 if user["role"] != "operator":
                     # Someone who has just become an operator has the access operators always had, until narrowed. Only then:
                     # an operator an administrator left with no grant stays with none at their next sign-in.
                     ensure_default_grant(db, user_id)
+            security_log.signed_in(db, user_id, "entra", address)
         return user_id
 
     # Off the event loop: database writes at every Entra sign-in, and a slow password hash at a person's first (#354).

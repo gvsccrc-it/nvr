@@ -20,6 +20,19 @@ Two years (730 days) unless changed: **Security log retention** on the same page
 - An administrator ending someone's session (`session_ended`), disabling or enabling an account (`user_disabled`, `user_enabled`), a password change (`password_changed`) and a change to the site's date and time display (`display_settings_changed`) are recorded.
 - **Searches** (#519): a licence plate search (`search_plate`, with the pattern), an attribute search (`search_attributes`, with its filters), a search in words (`search_words`, with the words) and **Find similar** (`search_similar`, with the object it started from) are recorded with the person, the cameras searched and the time range. Never a picture or an embedding. The same person repeating the same search within a minute adds no row. A plate someone searched for is personal data, so it is kept here, which only administrators read, and nowhere else. The row is written just after the search answers, so the search never waits for it.
 
+- **Sign-ins** (#459): every completed sign-in is a `signed_in` row with its `method` (`password`, `password+totp`, `password+recovery`,
+  `password+passkey`, `passkey`, `entra`, `setup` for the first-run administrator, `phone` for the app resuming), the `address`, and
+  `network`: `local` or `remote`, as the sign-in limits counted it. A video wall signing in is `wall_signed_in`, with its token's name.
+- **Failed sign-ins** (#459): a wrong password for an account that exists is a `sign_in_failed` row, for the first failure of a run (none for that
+  account in the last 15 minutes). Each time a throttle threshold is crossed there is an `auth_throttled` row, as before. Together they are
+  bounded to 10 rows per account per hour, so guessing cannot fill the log. A username that belongs to nobody never gets a `sign_in_failed`
+  row, and appears only as its digest in `auth_throttled`. A wrong second-factor code is `mfa_failed`, as before.
+- **Entra accounts** (#459): `entra_account_created` the first time someone signs in through Entra, and `entra_role_changed` (with `before` and
+  `after`) when their role assignment in Entra changed since their last sign-in.
+- **Recording settings** (#459), each with the value `before` and `after` (`null`: none of its own, so the group's or the default applies):
+  `retention_changed` and `schedule_changed` for a camera group or a camera; `camera_group_members_changed` (also `added` and `removed`);
+  `camera_group_deleted`, with its name, members, retention and schedule. Saving the same value again adds no row.
+
 ## For developers
 
 `app.audit.record` writes a row in the caller's transaction; `app/security_log.py` reads and prunes them; `app/api/security_log.py` holds the routes. Migration 70 adds the retention setting and the indexes the person and action filters use. Tests: `tests/test_security_log.py`, `tests/browser/security-log.spec.cjs`.

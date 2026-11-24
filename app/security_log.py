@@ -31,6 +31,48 @@ def prune(db: sqlite3.Connection, now: datetime | None = None) -> int:
     return db.execute("DELETE FROM audit_log WHERE created_at<?", (cutoff,)).rowcount
 
 
+FAILED_SIGN_IN_ROWS_PER_HOUR = 10  # For one account, so that guessing cannot fill the log (#459)
+_FAILURE_ACTIONS = ("sign_in_failed", "auth_throttled")
+FAILURE_RUN = timedelta(minutes=15)  # As long as the sign-in limits remember a failure (``app.auth_limits.FORGET_AFTER``)
+
+
+def network_of(address: str) -> str:
+    """Whether a sign-in counted as from the local network or from outside it, for the log: ``app.auth_limits.Caller`` knows."""
+    return "local" if getattr(address, "local", False) else "remote"
+
+
+def signed_in(db: sqlite3.Connection, user_id: int, method: str, address: str) -> None:
+    """One row for each completed sign-in (#459): who, how, from which address, and whether it counted as local. Never a password, code or token."""
+    from .audit import record
+
+    record(db, user_id, "signed_in", "user", user_id, method=method, address=str(address), network=network_of(address))
+
+
+def failure_rows_left(db: sqlite3.Connection, account: str, user_id: int, now: datetime | None = None) -> bool:
+    """Whether the log may take another failed sign-in row for this account this hour: the first failure and the throttle thresholds are
+    recorded, at most ``FAILED_SIGN_IN_ROWS_PER_HOUR`` together. Reads only, through the action index."""
+    since = stamp((now or _now()) - timedelta(hours=1))
+    written = db.execute(
+        "SELECT COUNT(*) FROM audit_log WHERE action IN (?,?) AND created_at>=? AND "
+        "((action='sign_in_failed' AND resource_type='user' AND resource_id=?) OR (action='auth_throttled' AND (resource_id=? OR substr(resource_id,1,?)=?)))",
+        (*_FAILURE_ACTIONS, since, str(user_id), account, len(account) + 1, account + "|")).fetchone()[0]
+    return int(written) < FAILED_SIGN_IN_ROWS_PER_HOUR
+
+
+def sign_in_failed(db: sqlite3.Connection, user_id: int, account: str, method: str, address: str) -> None:
+    """A wrong password for an account that exists (#459). The first failure of a run is recorded (none for this account in the last
+    ``FAILURE_RUN``), within the hourly bound; the throttle thresholds that follow are the ``auth_throttled`` rows. Unknown names are not
+    accounts and are never written here (the throttle rows keep them as ``unknown_name`` digests). Reads first: a failure that is not
+    recorded takes no write lock."""
+    from .audit import record
+
+    since = stamp(_now() - FAILURE_RUN)
+    first = not has_row(db, "SELECT 1 FROM audit_log WHERE action='sign_in_failed' AND created_at>=? AND resource_type='user' AND resource_id=? LIMIT 1",
+                        (since, str(user_id)))
+    if first and failure_rows_left(db, account, user_id):
+        record(db, None, "sign_in_failed", "user", user_id, method=method, address=str(address), network=network_of(address))
+
+
 def unknown_name(typed: str) -> str:
     """What the log keeps of a username that belongs to nobody. People type passwords into the username box, so the text itself is never
     stored: a keyed digest still shows that the same thing was tried repeatedly, and cannot be reversed or looked up in a table."""

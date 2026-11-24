@@ -86,6 +86,29 @@ class CameraScheduleRequest(GroupScheduleRequest):
         return self
 
 
+def _retention_of(db: sqlite3.Connection, scope_type: str, scope_id: str) -> dict[str, object] | None:
+    """A group's or camera's own retention, as the security log holds it before and after a change (#459); None when it has none."""
+    row = db.execute("SELECT retention_days,purpose,legal_basis FROM retention_policy_overrides WHERE scope_type=? AND scope_id=?", (scope_type, scope_id)).fetchone()
+    return {"retention_days": int(row["retention_days"]), "purpose": row["purpose"], "legal_basis": row["legal_basis"]} if row else None
+
+
+def _schedule_of(db: sqlite3.Connection, scope_type: str, scope_id: str) -> dict[str, object] | None:
+    """A group's or camera's own recording schedule, as the security log holds it (#459); None when it has none."""
+    row = db.execute("SELECT timezone_name,schedule_json FROM recording_policy_overrides WHERE scope_type=? AND scope_id=?", (scope_type, scope_id)).fetchone()
+    return {"timezone": row["timezone_name"], "intervals": json.loads(row["schedule_json"])} if row else None
+
+
+def _changed(db: sqlite3.Connection, admin, action: str, resource_type: str, resource_id: str, before: object, after: object) -> None:
+    """One security log row for a retention or schedule change, with the value before and after (None: none of its own, so inherited).
+    Saving the same value again writes nothing (#459)."""
+    if before != after:
+        record(db, int(admin["id"]), action, resource_type, resource_id, before=before, after=after)
+
+
+def _members_of(db: sqlite3.Connection, group_id: str) -> list[str]:
+    return [row["camera_id"] for row in db.execute("SELECT camera_id FROM camera_group_memberships WHERE group_id=? ORDER BY camera_id", (group_id,)).fetchall()]
+
+
 @router.get("/api/camera-groups")
 @console.federated(console.split_plain, console.combine_groups)
 def list_camera_groups(user: CurrentUser) -> dict[str, object]:
@@ -151,13 +174,17 @@ def update_camera_group(
 @router.delete("/api/camera-groups/{group_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_camera_group(
     group_id: str,
-    _: Administrator,
+    admin: Administrator,
 ) -> Response:
     with connect() as db:
-        if db.execute("SELECT 1 FROM camera_groups WHERE id=?", (group_id,)).fetchone() is None:
+        group = db.execute("SELECT name FROM camera_groups WHERE id=?", (group_id,)).fetchone()
+        if group is None:
             raise HTTPException(status_code=404, detail="Camera group not found")
         if db.execute("SELECT 1 FROM cameras WHERE group_id=? LIMIT 1", (group_id,)).fetchone() is not None:
             raise HTTPException(status_code=409, detail="Reassign cameras from this policy group before deleting it")
+        # What the group was, for the security log: its members decide what an operator with a grant for it could see (#459)
+        record(db, int(admin["id"]), "camera_group_deleted", "camera_group", group_id, name=group["name"], members=_members_of(db, group_id),
+               retention=_retention_of(db, "group", group_id), schedule=_schedule_of(db, "group", group_id))
         db.execute("DELETE FROM recording_policy_overrides WHERE scope_type='group' AND scope_id=?", (group_id,))
         db.execute("DELETE FROM retention_policy_overrides WHERE scope_type='group' AND scope_id=?", (group_id,))
         db.execute("DELETE FROM camera_groups WHERE id=?", (group_id,))
@@ -168,7 +195,7 @@ def delete_camera_group(
 def replace_camera_group_members(
     group_id: str,
     payload: CameraGroupMembershipRequest,
-    _: Administrator,
+    admin: Administrator,
 ) -> dict[str, object]:
     camera_ids = list(dict.fromkeys(payload.camera_ids))
     with connect() as db:
@@ -181,11 +208,16 @@ def replace_camera_group_members(
             if len(found) != len(camera_ids):
                 raise HTTPException(status_code=422, detail="One or more selected cameras do not exist")
         db.execute("BEGIN IMMEDIATE")
+        before = _members_of(db, group_id)
         db.execute("DELETE FROM camera_group_memberships WHERE group_id=?", (group_id,))
         db.executemany(
             "INSERT INTO camera_group_memberships(group_id,camera_id) VALUES(?,?)",
             [(group_id, camera_id) for camera_id in camera_ids],
         )
+        after = sorted(camera_ids)
+        if after != before:  # Saving the same members again changes nothing, and writes nothing to the log
+            record(db, int(admin["id"]), "camera_group_members_changed", "camera_group", group_id, name=group["name"], before=before, after=after,
+                   added=sorted(set(after) - set(before)), removed=sorted(set(before) - set(after)))
         return _camera_group_view(db, group)
 
 
@@ -201,7 +233,7 @@ def get_group_retention(group_id: str, _: CurrentUser) -> dict[str, object]:
 
 
 @router.put("/api/camera-groups/{group_id}/retention")
-def set_group_retention(group_id: str, payload: RetentionRequest, _: Administrator) -> dict[str, object]:
+def set_group_retention(group_id: str, payload: RetentionRequest, admin: Administrator) -> dict[str, object]:
     with connect() as db:
         if db.execute("SELECT 1 FROM camera_groups WHERE id=?", (group_id,)).fetchone() is None:
             raise HTTPException(status_code=404, detail="Camera group not found")
@@ -211,16 +243,20 @@ def set_group_retention(group_id: str, payload: RetentionRequest, _: Administrat
                                                              saved["legal_basis"] if saved and payload.legal_basis is None else payload.legal_basis or "")
         except notices.NoticeError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from None
+        before = _retention_of(db, "group", group_id)
         db.execute("INSERT INTO retention_policy_overrides(scope_type,scope_id,retention_days,purpose,legal_basis) VALUES('group',?,?,?,?) ON CONFLICT(scope_type,scope_id) DO UPDATE SET retention_days=excluded.retention_days,purpose=excluded.purpose,legal_basis=excluded.legal_basis,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')", (group_id,payload.retention_days,purpose,legal_basis))
+        _changed(db, admin, "retention_changed", "camera_group", group_id, before, _retention_of(db, "group", group_id))
     return get_group_retention(group_id, _=None)
 
 
 @router.delete("/api/camera-groups/{group_id}/retention", status_code=status.HTTP_204_NO_CONTENT)
-def delete_group_retention(group_id: str, _: Administrator) -> Response:
+def delete_group_retention(group_id: str, admin: Administrator) -> Response:
     with connect() as db:
         if db.execute("SELECT 1 FROM camera_groups WHERE id=?", (group_id,)).fetchone() is None:
             raise HTTPException(status_code=404, detail="Camera group not found")
+        before = _retention_of(db, "group", group_id)
         db.execute("DELETE FROM retention_policy_overrides WHERE scope_type='group' AND scope_id=?", (group_id,))
+        _changed(db, admin, "retention_changed", "camera_group", group_id, before, None)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -238,7 +274,7 @@ def get_camera_retention(camera_id: str, _: CurrentUser) -> dict[str, object]:
 
 
 @router.put("/api/cameras/{camera_id}/retention")
-def set_camera_retention(camera_id: str, payload: RetentionRequest, _: Administrator) -> dict[str, object]:
+def set_camera_retention(camera_id: str, payload: RetentionRequest, admin: Administrator) -> dict[str, object]:
     with connect() as db:
         if db.execute("SELECT 1 FROM cameras WHERE id=?", (camera_id,)).fetchone() is None:
             raise HTTPException(status_code=404, detail="Camera not found")
@@ -248,16 +284,20 @@ def set_camera_retention(camera_id: str, payload: RetentionRequest, _: Administr
                                                              saved["legal_basis"] if saved and payload.legal_basis is None else payload.legal_basis or "")
         except notices.NoticeError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from None
+        before = _retention_of(db, "camera", camera_id)
         db.execute("INSERT INTO retention_policy_overrides(scope_type,scope_id,retention_days,purpose,legal_basis) VALUES('camera',?,?,?,?) ON CONFLICT(scope_type,scope_id) DO UPDATE SET retention_days=excluded.retention_days,purpose=excluded.purpose,legal_basis=excluded.legal_basis,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')", (camera_id,payload.retention_days,purpose,legal_basis))
+        _changed(db, admin, "retention_changed", "camera", camera_id, before, _retention_of(db, "camera", camera_id))
     return get_camera_retention(camera_id, _=None)
 
 
 @router.delete("/api/cameras/{camera_id}/retention", status_code=status.HTTP_204_NO_CONTENT)
-def delete_camera_retention(camera_id: str, _: Administrator) -> Response:
+def delete_camera_retention(camera_id: str, admin: Administrator) -> Response:
     with connect() as db:
         if db.execute("SELECT 1 FROM cameras WHERE id=?", (camera_id,)).fetchone() is None:
             raise HTTPException(status_code=404, detail="Camera not found")
+        before = _retention_of(db, "camera", camera_id)
         db.execute("DELETE FROM retention_policy_overrides WHERE scope_type='camera' AND scope_id=?", (camera_id,))
+        _changed(db, admin, "retention_changed", "camera", camera_id, before, None)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -378,18 +418,20 @@ async def update_group_schedule(
     group_id: str,
     payload: GroupScheduleRequest,
     request: Request,
-    _: Administrator,
+    admin: Administrator,
 ) -> dict[str, object]:
     intervals = validate_schedule(payload.timezone, [item.model_dump() for item in payload.intervals])
     def save():
         with connect() as db:
             if db.execute("SELECT 1 FROM camera_groups WHERE id=?", (group_id,)).fetchone() is None:
                 raise HTTPException(status_code=404, detail="Camera group not found")
+            before = _schedule_of(db, "group", group_id)
             db.execute(
                 "INSERT INTO recording_policy_overrides(scope_type,scope_id,timezone_name,schedule_json) VALUES('group',?,?,?) "
                 "ON CONFLICT(scope_type,scope_id) DO UPDATE SET timezone_name=excluded.timezone_name,schedule_json=excluded.schedule_json,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')",
                 (group_id, payload.timezone, json.dumps(intervals, separators=(",", ":"))),
             )
+            _changed(db, admin, "schedule_changed", "camera_group", group_id, before, _schedule_of(db, "group", group_id))
             camera_ids = [row["id"] for row in db.execute("SELECT id FROM cameras WHERE group_id=?", (group_id,)).fetchall()]
         return camera_ids
 
@@ -402,13 +444,15 @@ async def update_group_schedule(
 async def delete_group_schedule(
     group_id: str,
     request: Request,
-    _: Administrator,
+    admin: Administrator,
 ) -> Response:
     def save():
         with connect() as db:
             if db.execute("SELECT 1 FROM camera_groups WHERE id=?", (group_id,)).fetchone() is None:
                 raise HTTPException(status_code=404, detail="Camera group not found")
+            before = _schedule_of(db, "group", group_id)
             db.execute("DELETE FROM recording_policy_overrides WHERE scope_type='group' AND scope_id=?", (group_id,))
+            _changed(db, admin, "schedule_changed", "camera_group", group_id, before, None)
             camera_ids = [row["id"] for row in db.execute("SELECT id FROM cameras WHERE group_id=?", (group_id,)).fetchall()]
         return camera_ids
 
@@ -449,7 +493,7 @@ async def update_camera_schedule(
     camera_id: str,
     payload: CameraScheduleRequest,
     request: Request,
-    _: Administrator,
+    admin: Administrator,
 ) -> dict[str, object]:
     if payload.inherit_group:
         intervals = []
@@ -459,6 +503,7 @@ async def update_camera_schedule(
         with connect() as db:
             if db.execute("SELECT 1 FROM cameras WHERE id=?", (camera_id,)).fetchone() is None:
                 raise HTTPException(status_code=404, detail="Camera not found")
+            before = _schedule_of(db, "camera", camera_id)
             if payload.inherit_group:
                 db.execute("DELETE FROM recording_policy_overrides WHERE scope_type='camera' AND scope_id=?", (camera_id,))
             else:
@@ -467,6 +512,7 @@ async def update_camera_schedule(
                     "ON CONFLICT(scope_type,scope_id) DO UPDATE SET timezone_name=excluded.timezone_name,schedule_json=excluded.schedule_json,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')",
                     (camera_id, payload.timezone, json.dumps(intervals, separators=(",", ":"))),
                 )
+            _changed(db, admin, "schedule_changed", "camera", camera_id, before, _schedule_of(db, "camera", camera_id))
 
     await asyncio.to_thread(save)
     await request.app.state.recorders.sync_camera(camera_id, force_restart=True)
@@ -477,13 +523,15 @@ async def update_camera_schedule(
 async def delete_camera_schedule(
     camera_id: str,
     request: Request,
-    _: Administrator,
+    admin: Administrator,
 ) -> Response:
     def save():
         with connect() as db:
             if db.execute("SELECT 1 FROM cameras WHERE id=?", (camera_id,)).fetchone() is None:
                 raise HTTPException(status_code=404, detail="Camera not found")
+            before = _schedule_of(db, "camera", camera_id)
             db.execute("DELETE FROM recording_policy_overrides WHERE scope_type='camera' AND scope_id=?", (camera_id,))
+            _changed(db, admin, "schedule_changed", "camera", camera_id, before, None)
 
     await asyncio.to_thread(save)
     await request.app.state.recorders.sync_camera(camera_id, force_restart=True)

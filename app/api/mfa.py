@@ -100,7 +100,7 @@ def verify_second_factor(payload: SecondFactorRequest, request: Request, respons
     with connect() as db:
         _consume(db, payload.challenge)
         record(db, user_id, "mfa_recovery_code_used" if payload.method == "recovery" else "mfa_used", "user", user_id, method=payload.method, address=address)
-    return signed_in(response, user, account, address, network.request_is_remote(request))
+    return signed_in(response, user, account, address, network.request_is_remote(request), f"password+{payload.method}")
 
 
 def _passkeys_of(db: sqlite3.Connection, user_id: int) -> list[dict[str, Any]]:
@@ -174,7 +174,7 @@ def verify_passkey_second_factor(payload: PasskeyAssertion, request: Request, re
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     with connect() as db:
         record(db, user_id, "mfa_used", "user", user_id, method="passkey", address=address)
-    return signed_in(response, user, account, address, network.request_is_remote(request))
+    return signed_in(response, user, account, address, network.request_is_remote(request), "password+passkey")
 
 
 # --- Sign-in: a passkey alone -----------------------------------------------------------
@@ -237,7 +237,7 @@ def passkey_sign_in(payload: PasskeyAssertion, request: Request, response: Respo
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     with connect() as db:
         record(db, int(user["id"]), "mfa_used", "user", int(user["id"]), method="passkey_sign_in", address=address)
-    return signed_in(response, user, account, address, network.request_is_remote(request))
+    return signed_in(response, user, account, address, network.request_is_remote(request), "passkey")
 
 
 # --- Enrolment, from the account menu ---------------------------------------------------
