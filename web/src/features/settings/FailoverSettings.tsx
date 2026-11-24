@@ -85,7 +85,7 @@ export function FailoverSettings() {
           The two NVRs talk over HTTPS on a port of their own{data?.link.port ? ` (${data.link.port} on this NVR)` : ""}, with a certificate each makes for itself. When you pair them, enter this fingerprint on the other NVR,
           and the other NVR's fingerprint here: each then connects only to the other's certificate and refuses any other. Open the port between the two NVRs only.
         </p>
-        <p><span className="muted">Certificate fingerprint (SHA-256): </span><code aria-label="This NVR's certificate fingerprint">{data?.link.fingerprint ?? "Loading…"}</code></p>
+        <p><span className="muted">Certificate fingerprint (SHA-256): </span><code className="fingerprint" aria-label="This NVR's certificate fingerprint">{data?.link.fingerprint ?? "Loading…"}</code></p>
         {data && !data.link.port ? <p className="notice" data-tone="warn"><span>The link's port is turned off on this NVR (<code>NVR_FAILOVER_LINK_PORT=0</code>), so the other NVR can reach it only over an unencrypted link or through a proxy.</span></p> : null}
         <div className="field-actions">
           <button type="button" className="button" disabled={renew.isPending} onClick={() => { if (window.confirm("Make a new certificate for this NVR's failover link? The other NVR refuses the link until its administrator enters the new fingerprint.")) renew.mutate(); }}>
