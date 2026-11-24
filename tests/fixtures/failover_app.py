@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 
 from app import failover
 from app.application import create_app
+from app.failover_listener import FailoverLink
 from app.footage_chain import FootageChainManager
 from app.recording import RecordingManager, recordings_path
 from app.storage import camera_recordings_dir
@@ -62,9 +63,15 @@ async def _lifespan(application):
         manager = failover.FailoverManager(tick_seconds=float(os.environ.get("NVR_TEST_FAILOVER_TICK", "0.5")))
         await manager.start()
         started.append(manager)
+        # The failover link's HTTPS listener, as the web worker runs it (#502), when the test gives this NVR a port for it
+        link = FailoverLink(check_seconds=0.5) if os.environ.get("NVR_FAILOVER_LINK_PORT") else None
+        if link is not None:
+            link.start()
         try:
             yield
         finally:
+            if link is not None:
+                await asyncio.to_thread(link.stop)
             for item in reversed(started):
                 await item.stop()
 

@@ -722,7 +722,9 @@ def _make_standby(database: Path) -> None:
     initialize()  # The backup may predate failover: bring the restored database up to date first
     db = sqlite3.connect(database)
     try:
-        db.execute("UPDATE failover_settings SET role='standby',peer_url=NULL,secret_ciphertext=NULL,instance_id=lower(hex(randomblob(16))) WHERE singleton_id=1")
+        # Nor the primary's pairing: the other NVR's fingerprint, its unencrypted allowance, and a link kept from before #502 are all set up anew
+        db.execute("UPDATE failover_settings SET role='standby',peer_url=NULL,secret_ciphertext=NULL,instance_id=lower(hex(randomblob(16))),"
+                   "peer_fingerprint=NULL,allow_unencrypted=0,legacy_link=0 WHERE singleton_id=1")
         db.execute("DELETE FROM failover_episodes")
         db.execute("DELETE FROM failover_imports")
         db.execute("UPDATE failover_state SET epoch=0,config_created_at=NULL,lease_until=NULL,yield_until=NULL,peer_state=NULL,last_renewed_at=NULL,handback_requested_at=NULL,watching_since=strftime('%Y-%m-%dT%H:%M:%fZ','now'),"

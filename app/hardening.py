@@ -464,6 +464,15 @@ def public_cameras(db: sqlite3.Connection) -> list[dict[str, Any]]:
     return found
 
 
+def failover_link_warning(db: sqlite3.Connection) -> dict[str, Any] | None:
+    from .failover import link_warning
+
+    try:
+        return link_warning(db)
+    except sqlite3.OperationalError:
+        return None  # A database from before failover
+
+
 def report(db: sqlite3.Connection, now: datetime | None = None) -> dict[str, Any]:
     """The findings still showing, those acknowledged, and what the checks cover and when they last ran."""
     now = now or _now()
@@ -495,6 +504,8 @@ def report(db: sqlite3.Connection, now: datetime | None = None) -> dict[str, Any
         "listening": listening(), "unprotected_talk": unprotected, "run": progress,
         # Standing (#474): cameras at public addresses, and whether the server lets cameras be on its own loopback addresses
         "public_cameras": public_cameras(db), "camera_loopback_allowed": camera_destination.loopback_allowed(),
+        # Standing (#502): the failover link where it is, or may be, unencrypted (allowed by an administrator, or kept from before the upgrade)
+        "failover_link": failover_link_warning(db),
         "as_of": now.isoformat(), "last_run_at": settings["last_run_at"], "last_run_kind": settings["last_run_kind"],
         "next_run_at": (_parse(anchor) + SCHEDULE).isoformat() if anchor else None,
         "camera_networks": [str(network) for network in configured], "network_check": bool(configured), "probes_enabled": bool(settings["probes_enabled"]),

@@ -1,4 +1,7 @@
-"""Failover recorder (#143): the administrator's settings and status, the status for everyone, and the signed endpoints the two NVRs call on each other."""
+"""Failover recorder (#143): the administrator's settings and status, the status for everyone, and the signed endpoints the two NVRs call on each other.
+
+The signed endpoints are on ``inbound_router``: the web interface serves them (for a pair that allows an unencrypted link, or one reached
+through a proxy over HTTPS), and so does the failover link's own HTTPS listener (``app.failover_listener``, #502 part 2)."""
 from __future__ import annotations
 
 import json
@@ -11,13 +14,14 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from app import failover
+from app import failover, failover_link, network
 from app.audit import record
 from app.credentials import encrypt
 from app.principal import Administrator, CurrentUser
 from app.store import connect
 
 router = APIRouter()
+inbound_router = APIRouter()  # The endpoints the two NVRs call on each other: also served alone by the failover link's listener
 
 
 class FailoverInput(BaseModel):
@@ -25,6 +29,9 @@ class FailoverInput(BaseModel):
     peer_url: str | None = Field(default=None, max_length=2048)
     secret: str | None = Field(default=None, max_length=256)  # Write-only: left out, the saved one is kept
     allow_private: bool = False
+    # The link (#502, part 2): the other NVR's certificate fingerprint for an https:// address, and "Allow an unencrypted link"
+    peer_fingerprint: str | None = Field(default=None, max_length=200)
+    allow_unencrypted: bool = False
     silence_seconds: int = Field(default=120, ge=10, le=3600)
     lease_seconds: int = Field(default=60, ge=5, le=1800)
     sync_seconds: int = Field(default=900, ge=60, le=86400)
@@ -43,8 +50,19 @@ class FailoverInput(BaseModel):
         return self
 
 
+def _link() -> dict[str, Any]:
+    """This NVR's side of the link: the fingerprint the other NVR is to pin, and where the link is served. The certificate is made the first
+    time this is asked for; its private key is never part of an answer."""
+    from app.failover_listener import link_port
+
+    _, fingerprint = failover_link.certificate()
+    return {"fingerprint": failover_link.display(fingerprint), "port": link_port()}
+
+
 def _view(db) -> dict[str, Any]:
-    return {"settings": failover.read_settings(db), "status": failover.status_view(db), "episodes": failover.episodes(db)}
+    settings = failover.read_settings(db)
+    settings = {**settings, "peer_fingerprint": failover_link.display(settings["peer_fingerprint"])}
+    return {"settings": settings, "status": failover.status_view(db), "episodes": failover.episodes(db), "link": _link()}
 
 
 @router.get("/api/admin/failover")
@@ -55,35 +73,57 @@ def get_failover(_: Administrator) -> dict[str, Any]:
 
 @router.put("/api/admin/failover")
 def put_failover(body: FailoverInput, user: Administrator) -> dict[str, Any]:
-    peer = None
+    peer, fingerprint = None, None
     if body.role != "off":
         if not body.peer_url:
             raise HTTPException(status_code=422, detail="Enter the address of the other NVR")
         try:
             peer = failover.check_peer_url(body.peer_url, body.allow_private)
+            fingerprint = failover_link.normalize_fingerprint(body.peer_fingerprint) if (body.peer_fingerprint or "").strip() else None
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from None
+        if fingerprint and not peer.lower().startswith("https://"):
+            raise HTTPException(status_code=422, detail="A certificate fingerprint is for the other NVR's https:// failover link address")
+        if fingerprint and fingerprint == failover_link.certificate()[1]:
+            raise HTTPException(status_code=422, detail="That is this NVR's own fingerprint: enter the one shown on the other NVR's failover page")
     with connect() as db:
         db.execute("BEGIN IMMEDIATE")
         try:
             current, state = failover.read_settings(db), failover.read_state(db)
+            # A pair set up before #502 keeps working as it was while its address stays the same; a new address follows the new rules.
+            legacy = current["legacy_link"] and body.role != "off" and peer == current["peer_url"]
+            if peer and peer.lower().startswith("http://") and not (body.allow_unencrypted or legacy):
+                raise HTTPException(status_code=422, detail=failover.UNENCRYPTED_OUT)
             if body.role != "off" and not body.secret and not current["has_secret"]:
                 raise HTTPException(status_code=422, detail=f"Enter a failover secret of at least {failover.MIN_SECRET_LENGTH} characters, the same on both NVRs")
             if current["role"] == "standby" and body.role != "standby" and (state["takeover_active"] or db.execute("SELECT 1 FROM failover_episodes WHERE role='standby' AND state='handback'").fetchone()):
                 raise HTTPException(status_code=409, detail="This standby is recording in the primary's place or handing back: let the handback finish first")
-            db.execute("UPDATE failover_settings SET role=?,peer_url=?,allow_private=?,silence_seconds=?,lease_seconds=?,sync_seconds=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE singleton_id=1",
-                       (body.role, peer, int(body.allow_private), body.silence_seconds, body.lease_seconds, body.sync_seconds))
+            db.execute("UPDATE failover_settings SET role=?,peer_url=?,allow_private=?,silence_seconds=?,lease_seconds=?,sync_seconds=?,peer_fingerprint=?,allow_unencrypted=?,legacy_link=?,"
+                       "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE singleton_id=1",
+                       (body.role, peer, int(body.allow_private), body.silence_seconds, body.lease_seconds, body.sync_seconds, fingerprint,
+                        int(body.allow_unencrypted and body.role != "off"), int(bool(legacy))))
             if body.secret:
                 db.execute("UPDATE failover_settings SET secret_ciphertext=? WHERE singleton_id=1", (encrypt(body.secret),))
             if body.role == "standby" and current["role"] != "standby":
                 failover._set_state(db, watching_since=failover._stamp(), last_renewed_at=None, takeover_active=0, takeover_started_at=None, yield_until=None, last_error=None, peer_state=None)
             elif body.role != "standby":
                 failover._set_state(db, takeover_active=0, yield_until=None)
-            record(db, int(user["id"]), "failover_settings_changed", "failover", "1", role=body.role, peer=peer, secret_changed=bool(body.secret))
+            record(db, int(user["id"]), "failover_settings_changed", "failover", "1", role=body.role, peer=peer, secret_changed=bool(body.secret),
+                   peer_fingerprint=failover_link.display(fingerprint), allow_unencrypted=bool(body.allow_unencrypted and body.role != "off"), kept_from_upgrade=bool(legacy))
         except BaseException:
             db.execute("ROLLBACK")
             raise
         db.execute("COMMIT")
+        return _view(db)
+
+
+@router.post("/api/admin/failover/link-certificate")
+def replace_link_certificate(user: Administrator) -> dict[str, Any]:
+    """Make a new certificate for this NVR's failover link (#502). The other NVR refuses the link until it is paired again with the new
+    fingerprint; the listener serves the new certificate within a few seconds."""
+    _, fingerprint = failover_link.certificate(replace=True)
+    with connect() as db:
+        record(db, int(user["id"]), "failover_link_certificate_replaced", "failover", "1", fingerprint=failover_link.display(fingerprint))
         return _view(db)
 
 
@@ -148,6 +188,8 @@ async def _signed(request: Request) -> bytes:
             raise failover.PeerError(429, "Too many refused requests") from None
         _failures.setdefault(host, deque()).append(time.monotonic())
         raise
+    if network.scheme(request) != "https":  # Arrived unencrypted: answered only while this NVR allows an unencrypted link (#502)
+        await run_in_threadpool(failover.refuse_unencrypted)
     return body
 
 
@@ -178,7 +220,7 @@ def _shared_secret() -> str | None:
         return failover.shared_secret(db)
 
 
-@router.post("/api/inbound/failover/lease")
+@inbound_router.post("/api/inbound/failover/lease")
 async def lease(request: Request) -> Response:
     """The primary renews its lease. The standby's answer says whether it is granted and whether footage waits to be brought back."""
     try:
@@ -195,7 +237,7 @@ async def _authenticated(request: Request) -> tuple[bytes, str | None]:
     return body, await run_in_threadpool(_shared_secret)
 
 
-@router.post("/api/inbound/failover/handback-complete")
+@inbound_router.post("/api/inbound/failover/handback-complete")
 async def handback_complete(request: Request) -> Response:
     secret = None
     try:
@@ -211,7 +253,7 @@ async def handback_complete(request: Request) -> Response:
         return _refusal(exc, request, secret)
 
 
-@router.get("/api/inbound/failover/footage")
+@inbound_router.get("/api/inbound/failover/footage")
 async def footage(request: Request) -> Response:
     secret = None
     try:
@@ -221,7 +263,7 @@ async def footage(request: Request) -> Response:
         return _refusal(exc, request, secret)
 
 
-@router.get("/api/inbound/failover/footage/{segment_id}")
+@inbound_router.get("/api/inbound/failover/footage/{segment_id}")
 async def footage_file(segment_id: int, request: Request):
     secret = None
     try:
@@ -237,7 +279,7 @@ async def footage_file(segment_id: int, request: Request):
     return FileResponse(path, media_type="video/mp4", headers={"X-Footage-Sha256": digest, "X-Footage-Size": str(size), "Cache-Control": "no-store", **signed})
 
 
-@router.get("/api/inbound/failover/backup")
+@inbound_router.get("/api/inbound/failover/backup")
 async def backup_file(request: Request):
     """The primary's newest encrypted backup, for the standby to copy the configuration from (it holds the credential key, so it is sealed with the backup passphrase)."""
     try:

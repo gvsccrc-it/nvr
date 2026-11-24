@@ -4,9 +4,13 @@ import { api } from "@/api/client";
 import type { FailoverStatus } from "@/api/queries";
 import { failureText } from "@/features/admin/tabDraft";
 
-interface Settings { role: "off" | "primary" | "standby"; peer_url: string | null; has_secret: boolean; allow_private: boolean; silence_seconds: number; lease_seconds: number; sync_seconds: number }
+interface Settings {
+  role: "off" | "primary" | "standby"; peer_url: string | null; has_secret: boolean; allow_private: boolean; silence_seconds: number; lease_seconds: number; sync_seconds: number;
+  peer_fingerprint: string | null; allow_unencrypted: boolean; legacy_link: boolean;
+}
 interface Episode { id: string; epoch: number; role: "primary" | "standby"; silent_since: string | null; started_at: string; ended_at: string | null; state: string; segments_imported: number }
-interface Response { settings: Settings; status: FailoverStatus; episodes: Episode[] }
+interface Link { fingerprint: string; port: number | null }
+interface Response { settings: Settings; status: FailoverStatus; episodes: Episode[]; link: Link }
 
 const KEY = ["admin", "failover"] as const;
 const when = (iso: string | null) => (iso ? new Date(iso).toLocaleString() : "never");
@@ -17,7 +21,8 @@ const STATE_TEXT: Record<string, string> = { active: "Standby recording", handba
 export function FailoverSettings() {
   const client = useQueryClient();
   const state = useQuery({ queryKey: KEY, queryFn: ({ signal }) => api<Response>("/api/admin/failover", { signal }), refetchInterval: 5_000 });
-  const [form, setForm] = useState({ role: "off" as Settings["role"], peer_url: "", secret: "", allow_private: false, silence_seconds: 120, lease_seconds: 60, sync_seconds: 900 });
+  const [form, setForm] = useState({ role: "off" as Settings["role"], peer_url: "", secret: "", allow_private: false, silence_seconds: 120, lease_seconds: 60, sync_seconds: 900,
+                                     peer_fingerprint: "", allow_unencrypted: false });
   const [loaded, setLoaded] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -25,7 +30,8 @@ export function FailoverSettings() {
   useEffect(() => {
     const saved = state.data?.settings;
     if (saved && !loaded) {
-      setForm({ role: saved.role, peer_url: saved.peer_url ?? "", secret: "", allow_private: saved.allow_private, silence_seconds: saved.silence_seconds, lease_seconds: saved.lease_seconds, sync_seconds: saved.sync_seconds });
+      setForm({ role: saved.role, peer_url: saved.peer_url ?? "", secret: "", allow_private: saved.allow_private, silence_seconds: saved.silence_seconds, lease_seconds: saved.lease_seconds, sync_seconds: saved.sync_seconds,
+                peer_fingerprint: saved.peer_fingerprint ?? "", allow_unencrypted: saved.allow_unencrypted });
       setLoaded(true);
     }
   }, [state.data, loaded]);
@@ -33,7 +39,8 @@ export function FailoverSettings() {
   const save = useMutation({
     mutationFn: () => api<Response>("/api/admin/failover", {
       method: "PUT", body: { role: form.role, peer_url: form.role === "off" ? null : form.peer_url, secret: form.secret || undefined, allow_private: form.allow_private,
-                             silence_seconds: form.silence_seconds, lease_seconds: form.lease_seconds, sync_seconds: form.sync_seconds },
+                             silence_seconds: form.silence_seconds, lease_seconds: form.lease_seconds, sync_seconds: form.sync_seconds,
+                             peer_fingerprint: form.peer_url.trim().toLowerCase().startsWith("http://") ? null : form.peer_fingerprint.trim() || null, allow_unencrypted: form.allow_unencrypted },
     }),
     onSuccess: async () => { setForm(current => ({ ...current, secret: "" })); setError(null); setMessage("Saved."); await client.invalidateQueries({ queryKey: KEY }); await client.invalidateQueries({ queryKey: ["failover"] }); },
     onError: problem => { setMessage(null); setError(failureText(problem, "Failover could not be saved.")); },
@@ -44,8 +51,16 @@ export function FailoverSettings() {
     onError: problem => { setMessage(null); setError(failureText(problem, "The configuration copy could not be requested.")); },
   });
 
+  const renew = useMutation({
+    mutationFn: () => api<Response>("/api/admin/failover/link-certificate", { method: "POST" }),
+    onSuccess: async () => { setError(null); setMessage("A new certificate was made. Enter its fingerprint on the other NVR now: until then the other NVR refuses the link."); await client.invalidateQueries({ queryKey: KEY }); },
+    onError: problem => { setMessage(null); setError(failureText(problem, "A new certificate could not be made.")); },
+  });
+
   const data = state.data;
   const standby = data?.settings.role === "standby";
+  const plain = form.peer_url.trim().toLowerCase().startsWith("http://");
+  const kept = Boolean(data?.settings.legacy_link) && form.peer_url.trim().replace(/\/+$/, "") === (data?.settings.peer_url ?? "");
   const number = (name: "silence_seconds" | "lease_seconds" | "sync_seconds") => (event: React.ChangeEvent<HTMLInputElement>) => setForm({ ...form, [name]: event.target.value === "" ? Number.NaN : Number(event.target.value) });
   return (
     <>
@@ -62,6 +77,21 @@ export function FailoverSettings() {
           </p>
         ) : null}
         {standby ? <div className="field-actions"><button type="button" className="button" onClick={() => sync.mutate()} disabled={sync.isPending || data?.status.takeover_active}>Copy the primary's configuration now</button></div> : null}
+      </section>
+
+      <section className="field-group settings-block" aria-label="Failover link">
+        <h2 className="field-heading">This NVR's failover link</h2>
+        <p className="muted field-hint">
+          The two NVRs talk over HTTPS on a port of their own{data?.link.port ? ` (${data.link.port} on this NVR)` : ""}, with a certificate each makes for itself. When you pair them, enter this fingerprint on the other NVR,
+          and the other NVR's fingerprint here: each then connects only to the other's certificate and refuses any other. Open the port between the two NVRs only.
+        </p>
+        <p><span className="muted">Certificate fingerprint (SHA-256): </span><code aria-label="This NVR's certificate fingerprint">{data?.link.fingerprint ?? "Loading…"}</code></p>
+        {data && !data.link.port ? <p className="notice" data-tone="warn"><span>The link's port is turned off on this NVR (<code>NVR_FAILOVER_LINK_PORT=0</code>), so the other NVR can reach it only over an unencrypted link or through a proxy.</span></p> : null}
+        <div className="field-actions">
+          <button type="button" className="button" disabled={renew.isPending} onClick={() => { if (window.confirm("Make a new certificate for this NVR's failover link? The other NVR refuses the link until its administrator enters the new fingerprint.")) renew.mutate(); }}>
+            Make a new certificate
+          </button>
+        </div>
       </section>
 
       <section className="field-group settings-block" aria-label="Failover settings">
@@ -81,7 +111,11 @@ export function FailoverSettings() {
             {form.role !== "off" ? (
               <>
                 <label className="field"><span>{form.role === "primary" ? "Address of the standby" : "Address of the primary"}</span>
-                  <input value={form.peer_url} placeholder="https://nvr-standby.example.com" onChange={event => setForm({ ...form, peer_url: event.target.value })} />
+                  <input value={form.peer_url} placeholder="https://192.0.2.20:8443" onChange={event => setForm({ ...form, peer_url: event.target.value })} />
+                </label>
+                <label className="field"><span>Certificate fingerprint of the other NVR</span>
+                  <input value={form.peer_fingerprint} spellCheck={false} autoComplete="off" placeholder="As shown on the other NVR's failover page" disabled={plain}
+                         onChange={event => setForm({ ...form, peer_fingerprint: event.target.value })} />
                 </label>
                 <label className="field"><span>Failover secret{data?.settings.has_secret ? " (one is saved)" : ""}</span>
                   <input type="password" autoComplete="off" value={form.secret} placeholder={data?.settings.has_secret ? "Leave empty to keep it" : "At least 16 characters, the same on both"} onChange={event => setForm({ ...form, secret: event.target.value })} />
@@ -92,6 +126,16 @@ export function FailoverSettings() {
           {form.role !== "off" ? (
             <>
               <label className="check"><input type="checkbox" checked={form.allow_private} onChange={event => setForm({ ...form, allow_private: event.target.checked })} /> The other NVR is on a private network address</label>
+              <label className="check"><input type="checkbox" checked={form.allow_unencrypted} onChange={event => setForm({ ...form, allow_unencrypted: event.target.checked })} /> Allow an unencrypted link</label>
+              <p className="muted field-hint">
+                Plain <code>http://</code> between the two works only while this is ticked on both NVRs; footage and the failover messages then cross the network unencrypted (the configuration copy stays sealed with the backup passphrase), and the hardening page says so.
+                Leave it off and use the other NVR's <code>https://</code> link address with its fingerprint. An <code>https://</code> address without a fingerprint is for a proxy with a public certificate.
+              </p>
+              {kept ? (
+                <p className="notice" data-tone="warn">
+                  <span>This pair was set up before the HTTPS link and is kept working as it was. To move it to HTTPS: on the primary first, then on the standby, enter the other NVR's <code>https://</code> address on its link port and its fingerprint, and save.</span>
+                </p>
+              ) : null}
               <div className="field-row">
                 <label className="field"><span>Lease (seconds)</span><input type="number" min={5} max={1800} value={Number.isNaN(form.lease_seconds) ? "" : form.lease_seconds} onChange={number("lease_seconds")} /></label>
                 <label className="field"><span>Silence before the standby takes over (seconds)</span><input type="number" min={10} max={3600} value={Number.isNaN(form.silence_seconds) ? "" : form.silence_seconds} onChange={number("silence_seconds")} /></label>

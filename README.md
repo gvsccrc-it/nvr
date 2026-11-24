@@ -33,6 +33,8 @@ The `nvr-data` volume stores the database and account/session state. `nvr-secret
 | `NVR_PORT` | `8280` | Host listening port for the web application |
 | `NVR_SESSION_HOURS` | `12` | Session lifetime, clamped to 1–168 hours |
 | `NVR_LISTEN_HOST` | every address | The one address of this machine the interface is served on: the management network's address, or `127.0.0.1` behind a tunnel or proxy on the same machine (the Tailscale and Cloudflare overlays set that). Not set, it is served on every network the host is on, the camera network included; the hardening page then shows a standing warning. Anything that is not an IP address stops start-up with a message |
+| `NVR_FAILOVER_LINK_PORT` | `8443` | The port of the failover link's own HTTPS listener, which serves only the endpoints two failover NVRs call on each other, with a certificate the NVR makes for itself (see [failover recorder](docs/failover-recorder.md)). It is open only while failover is on; open it to the other NVR only. `0` turns it off. Must not be the web interface's port |
+| `NVR_FAILOVER_LINK_HOST` | `NVR_LISTEN_HOST` | The address of this machine the failover link is served on, when it is not the interface's own (behind a tunnel on `127.0.0.1`, the address the other NVR reaches this one by) |
 | `NVR_COOKIE_SECURE` | `false` | Set `true` behind HTTPS so session cookies are HTTPS-only |
 | `NVR_PUBLIC_URL` | unset | Public HTTPS origin used to construct the fixed Entra callback URL, and the origin and relying party of passkeys |
 | `NVR_WEBAUTHN_RP_ID` | unset | Optional parent domain for passkeys, to share them between hosts |

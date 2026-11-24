@@ -25,6 +25,7 @@ ROUTERS: tuple[APIRouter, ...] = (
     plates.router,
     falls.router,
     failover.router,
+    failover.inbound_router,  # Also served alone, over HTTPS, by the failover link's listener (app.failover_listener)
     tiering.router,
     email_alerts.router,
     maintenance.router,

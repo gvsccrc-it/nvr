@@ -61,6 +61,7 @@ Configuration backups (database and credential key, never footage) are **off unt
   - session expiry;
   - recording timestamps, and so search and playback;
   - the 60-second window between a failover pair ([failover-recorder.md](failover-recorder.md)).
+- [ ] **A failover pair talks over its HTTPS link**: each NVR's address is the other's `https://<address>:8443` with its certificate fingerprint, port 8443 is open between the two NVRs only, and the hardening page shows no *Unencrypted failover link* ([failover-recorder.md](failover-recorder.md)).
 - [ ] **Keep the cameras' clocks right too**: point each camera at the same time server, in the camera's own settings. A camera's clock is what it stamps on its picture and its ONVIF events.
 
 ## 6. Disks

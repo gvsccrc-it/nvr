@@ -218,7 +218,8 @@ def seed_fixtures(count: int, *, bulk_trigger: bool = False, fail_name_save: boo
         db.execute("DELETE FROM viewing_audit")
         db.execute("DELETE FROM console_sites")  # With their grants; console mode is off until a journey turns it on
         db.execute("UPDATE console_settings SET enabled=0")
-        db.execute("UPDATE failover_settings SET role='off',peer_url=NULL,secret_ciphertext=NULL,allow_private=0,silence_seconds=120,lease_seconds=60,sync_seconds=900")
+        db.execute("UPDATE failover_settings SET role='off',peer_url=NULL,secret_ciphertext=NULL,allow_private=0,silence_seconds=120,lease_seconds=60,sync_seconds=900,"
+                   "peer_fingerprint=NULL,allow_unencrypted=0,legacy_link=0")
         db.execute("UPDATE failover_state SET lease_until=NULL,yield_until=NULL,last_contact_at=NULL,peer_state=NULL,last_renewed_at=NULL,handback_requested_at=NULL,watching_since=NULL,takeover_active=0,"
                    "takeover_started_at=NULL,epoch=0,last_sync_at=NULL,last_sync_error=NULL,sync_requested=0,config_created_at=NULL,last_error=NULL")
         db.execute("DELETE FROM failover_episodes")

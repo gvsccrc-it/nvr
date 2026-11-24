@@ -30,6 +30,8 @@ from tests.test_access_grants import GrantCase
 
 SECRET = "failover-shared-secret-0123456789"
 PASSPHRASE = "failover-backup-passphrase-123456"
+# The other NVR reaches the failover endpoints over HTTPS (#502): a request that arrived unencrypted is refused unless an unencrypted link is allowed
+LINK = "https://testserver"
 
 
 real_connect = sqlite3.connect
@@ -334,11 +336,11 @@ class SettingsTests(FailoverCase):
 class PeerEndpointTests(FailoverCase):
     def request(self, method: str, path: str, body: bytes = b"", *, secret: str = SECRET, stamp: int | None = None, client: TestClient | None = None):
         headers = failover.sign(secret, method, path, body, stamp)
-        return (client or TestClient(self.app)).request(method, path, content=body, headers=headers)
+        return (client or TestClient(self.app, base_url=LINK)).request(method, path, content=body, headers=headers)
 
     def test_nothing_unsigned_wrongly_signed_stale_or_altered_gets_anything(self):
         self.configure("standby")
-        client = TestClient(self.app)
+        client = TestClient(self.app, base_url=LINK)
         for method, path in (("POST", "/api/inbound/failover/lease"), ("GET", "/api/inbound/failover/footage?epoch=1"), ("GET", "/api/inbound/failover/backup"),
                              ("POST", "/api/inbound/failover/handback-complete"), ("GET", "/api/inbound/failover/footage/1?epoch=1")):
             self.assertEqual(client.request(method, path).status_code, 401, path)  # Unsigned
@@ -352,7 +354,7 @@ class PeerEndpointTests(FailoverCase):
         from app.api import failover as api
 
         self.configure("standby")
-        client = TestClient(self.app)
+        client = TestClient(self.app, base_url=LINK)
         self.assertEqual(client.post("/api/inbound/failover/lease", content=b"x" * 10_000).status_code, 413)  # Unsigned and large: not read to the end
         api._failures.clear()
         for _ in range(api.MAX_FAILURES_PER_MINUTE):
@@ -718,7 +720,9 @@ class ClusterTests(unittest.TestCase):
 
     def configure(self, node: NvrSite, role: str, peer: NvrSite) -> None:
         client = node.admin() if node is self.primary else self.standby_client
-        response = client.put("/api/admin/failover", json={"role": role, "peer_url": peer.url, "secret": SECRET, "silence_seconds": 12, "lease_seconds": 5, "sync_seconds": 600, "allow_private": True})
+        # Plain HTTP between the two, so "Allow an unencrypted link" is ticked on both (#502); tests/test_failover_https.py pairs two over HTTPS
+        response = client.put("/api/admin/failover", json={"role": role, "peer_url": peer.url, "secret": SECRET, "silence_seconds": 12, "lease_seconds": 5, "sync_seconds": 600, "allow_private": True,
+                                                           "allow_unencrypted": True})
         self.assertEqual(response.status_code, 200, response.text)
 
     def test_an_outage_takeover_return_and_handback(self):

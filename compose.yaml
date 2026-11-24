@@ -78,6 +78,8 @@ services:
       # here means "take it from there, and leave it unset in the container if it is not there". Compose reads .env only to fill in this
       # file, so a setting that is not named in this list never reaches the NVR. The README's table says what each one does.
       NVR_LISTEN_HOST:
+      NVR_FAILOVER_LINK_PORT:
+      NVR_FAILOVER_LINK_HOST:
       NVR_WEBAUTHN_RP_ID:
       NVR_TRUST_FORWARDED_FOR:
       NVR_VAPID_SUBJECT:
