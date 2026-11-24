@@ -13,6 +13,7 @@ from app.access import Access
 from app.api.lens import DewarpState, clean_dewarp, decode_dewarp
 from app.viewing import MAX_LIVE_TILES
 from app.principal import Administrator, CurrentUser
+from app.audit import record
 from app.store import connect
 from app.request_validation import normalize_live_grid_selection
 
@@ -74,7 +75,7 @@ def _load_live_views(user: sqlite3.Row) -> dict[str, object]:
             (int(user["id"]),),
         ).fetchall()
         shared_rows = db.execute(
-            "SELECT name,camera_ids_json,grid_size,tile_camera_ids_json,layout_mode,dewarp_json FROM shared_viewer_layouts ORDER BY name COLLATE NOCASE"
+            "SELECT name,camera_ids_json,grid_size,tile_camera_ids_json,layout_mode,dewarp_json,keep_streaming FROM shared_viewer_layouts ORDER BY name COLLATE NOCASE"
         ).fetchall()
     def decode_layout(row: sqlite3.Row, scope: str) -> dict[str, object] | None:
         try:
@@ -86,7 +87,9 @@ def _load_live_views(user: sqlite3.Row) -> dict[str, object]:
                 tile_camera_ids = [*camera_ids, *([None] * max(0, int(row["grid_size"]) - len(camera_ids)))]
             return {"name": row["name"], "camera_ids": camera_ids, "grid_size": int(row["grid_size"]),
                     "tile_camera_ids": tile_camera_ids, "layout_mode": row["layout_mode"], "scope": scope,
-                    "dewarp": decode_dewarp(row["dewarp_json"], camera_ids)}
+                    "dewarp": decode_dewarp(row["dewarp_json"], camera_ids),
+                    # A shared view an administrator marked to keep streaming while its page is hidden (#533); a personal view never does
+                    **({"keep_streaming": bool(row["keep_streaming"])} if scope == "shared" else {})}
         except (TypeError, ValueError, json.JSONDecodeError):
             return None
     layouts = []
@@ -159,6 +162,23 @@ def save_shared_viewer_layout(
         )
     return {"name": name, "camera_ids": payload.camera_ids, "grid_size": payload.grid_size,
             "tile_camera_ids": payload.tile_camera_ids, "layout_mode": payload.layout_mode, "scope": "shared", "dewarp": payload.dewarp}
+
+
+class KeepStreamingRequest(BaseModel):
+    keep_streaming: bool
+
+
+@router.put("/api/live/shared-layouts/{name}/keep-streaming")
+def set_keep_streaming(name: str, payload: KeepStreamingRequest, user: Administrator) -> dict[str, object]:
+    """Whether a shared view keeps streaming while its page is hidden (#533): for a control-room screen that must. Off by default; a
+    Live page otherwise gives its streams back after two minutes hidden."""
+    with connect() as db:
+        changed = db.execute("UPDATE shared_viewer_layouts SET keep_streaming=? WHERE name=? COLLATE NOCASE",
+                             (int(payload.keep_streaming), name.strip())).rowcount
+        if not changed:
+            raise HTTPException(status_code=404, detail="Shared view not found")
+        record(db, int(user["id"]), "shared_view_keep_streaming_changed", "shared_view", name.strip(), keep_streaming=payload.keep_streaming)
+    return {"name": name.strip(), "keep_streaming": payload.keep_streaming}
 
 
 @router.delete("/api/live/shared-layouts/{name}", status_code=status.HTTP_204_NO_CONTENT)

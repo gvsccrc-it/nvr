@@ -1,7 +1,8 @@
 import * as Menu from "@radix-ui/react-dropdown-menu";
 import { useState } from "react";
-import { ApiError } from "@/api/client";
-import { useDeleteView, useLiveViews, useSaveView } from "@/api/queries";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { api, ApiError } from "@/api/client";
+import { useDeleteView, useLiveViews, useSaveView, viewKeys } from "@/api/queries";
 import type { Role } from "@/api/types";
 import { toSaved, type ManualSize } from "./arrangement";
 import { QUALITY_INTERVALS, lowDataActive, useViewingPrefs, type LowDataSetting } from "./bandwidth";
@@ -48,6 +49,7 @@ export function ViewBar({ role }: { role: Role }) {
           Save
         </button>
       ) : null}
+      {view?.scope === "shared" && role === "administrator" ? <KeepStreaming name={view.name} /> : null}
       <button type="button" className="button" disabled={!cameraIds.length} onClick={() => setSaveAs(true)}>Save as…</button>
       <Menu.Root>
         <Menu.Trigger className="button" aria-label="Layout">Layout: {arrangement.mode === "auto" ? "Auto" : `${Math.sqrt(arrangement.slots.length)} × ${Math.sqrt(arrangement.slots.length)}`}</Menu.Trigger>
@@ -107,5 +109,22 @@ export function ViewBar({ role }: { role: Role }) {
       <SaveAsDialog open={saveAs} onOpenChange={setSaveAs} arrangement={arrangement} dewarp={dewarp} role={role} existing={views.data ?? []}
                     onSaved={saved => markSaved(saved)} />
     </div>
+  );
+}
+
+/** A shared view's "keep streaming when hidden" switch, for a control-room screen (#533): administrators only, off by default. */
+function KeepStreaming({ name }: { name: string }) {
+  const views = useLiveViews();
+  const client = useQueryClient();
+  const current = Boolean(views.data?.find(item => item.scope === "shared" && item.name === name)?.keep_streaming);
+  const change = useMutation({
+    mutationFn: (keep: boolean) => api(`/api/live/shared-layouts/${encodeURIComponent(name)}/keep-streaming`, { method: "PUT", body: { keep_streaming: keep } }),
+    onSuccess: () => client.invalidateQueries({ queryKey: viewKeys.views }),
+  });
+  return (
+    <label className="check" title="Otherwise a Live page hidden for 2 minutes gives its streams back until it is shown again">
+      <input type="checkbox" checked={current} disabled={change.isPending || !views.data} onChange={event => change.mutate(event.target.checked)} />
+      Keep streaming when hidden
+    </label>
   );
 }

@@ -19,10 +19,14 @@ interface TileProps {
   enlarged: boolean;
   /** Hidden behind an enlarged tile: release the stream but keep membership. */
   suspended: boolean;
+  /** The page has been hidden for the grace period (#533): give the stream back, unless someone is listening to this tile. */
+  hiddenTooLong: boolean;
   /** Low-data mode plays only the first few tiles; this one waits until it is tapped. */
   lowDataCapped: boolean;
   onReplaceRequest: () => void;
 }
+
+const HIDDEN_PAUSE_NOTE = "Paused while this tab was hidden";
 
 const PHASE_LABEL: Record<PlayerSnapshot["phase"], string> = {
   connecting: "Connecting",
@@ -45,7 +49,7 @@ function resolveQuality(override: Quality | undefined, enlarged: boolean, substr
   return mainOnly || enlarged || !substream ? "high" : "low";
 }
 
-export const VideoTile = memo(function VideoTile({ camera, active, enlarged, suspended, lowDataCapped, onReplaceRequest }: TileProps) {
+export const VideoTile = memo(function VideoTile({ camera, active, enlarged, suspended, hiddenTooLong, lowDataCapped, onReplaceRequest }: TileProps) {
   const navigate = useNavigate();
   const video = useRef<HTMLVideoElement>(null);
   const root = useRef<HTMLDivElement>(null);
@@ -110,7 +114,9 @@ export const VideoTile = memo(function VideoTile({ camera, active, enlarged, sus
   }, [lowData]);
   const overCap = lowData && lowDataCapped && !tapped;
   const lowDataPaused = !suspended && lowData && (overCap || !onScreen || !pageVisible);
-  const halted = suspended || lowDataPaused;
+  // Hidden for 2 minutes: the stream is given back, the last picture stays, and it says so; a tile someone is listening to keeps playing (#533)
+  const hiddenPaused = !suspended && !lowDataPaused && hiddenTooLong && listeningId !== camera.id;
+  const halted = suspended || lowDataPaused || hiddenPaused;
 
   let qualityNote: string | null = null;
   if (!manual && lowData) {
@@ -146,7 +152,7 @@ export const VideoTile = memo(function VideoTile({ camera, active, enlarged, sus
   // A fisheye camera shown dewarped: the video keeps playing out of sight and the stage draws it. Without WebGL the raw picture stays, with a notice.
   const dewarped = Boolean(lens) && dewarpState.mode !== "raw" && !noWebgl;
   if (dewarpState.mode !== "raw" && noWebgl) qualityNote = "Dewarping needs WebGL, which this browser does not have (or has lost): showing the raw picture";
-  const phase = lowDataPaused ? "paused" : state?.phase ?? "connecting";
+  const phase = lowDataPaused || hiddenPaused ? "paused" : state?.phase ?? "connecting";
   const live = phase === "live";
   const audioAvailable = Boolean(state?.audioAvailable && camera.audio_enabled);
 
@@ -206,7 +212,7 @@ export const VideoTile = memo(function VideoTile({ camera, active, enlarged, sus
       }}
     >
       <video ref={video} className="tile-video" data-dewarped={dewarped || undefined} muted playsInline hidden={Boolean(fallbackUrl)} />
-      {fallbackUrl && !halted ? <img ref={image} className="tile-video" data-dewarped={dewarped || undefined} alt="" /> : null}
+      {fallbackUrl && (!halted || hiddenPaused) ? <img ref={image} className="tile-video" data-dewarped={dewarped || undefined} alt="" /> : null}
       {dewarped && lens && !halted ? (
         <DewarpStage getSource={() => (fallbackUrl ? image.current : video.current)} lens={lens} state={dewarpState} label={camera.name} playing={live}
                      onChange={next => setDewarp(camera.id, next)} onUnsupported={onNoWebgl} />
@@ -223,7 +229,7 @@ export const VideoTile = memo(function VideoTile({ camera, active, enlarged, sus
       {!live ? (
         <div className="tile-overlay" role="status">
           {phase === "connecting" ? <span className="spinner" aria-hidden="true" /> : null}
-          <span data-testid={lowDataPaused ? "tile-quality-note" : undefined}>{lowDataPaused ? qualityNote : phase === "connecting" ? "Connecting to camera…" : state?.detail ?? PHASE_LABEL[phase]}</span>
+          <span data-testid={lowDataPaused ? "tile-quality-note" : undefined}>{hiddenPaused ? HIDDEN_PAUSE_NOTE : lowDataPaused ? qualityNote : phase === "connecting" ? "Connecting to camera…" : state?.detail ?? PHASE_LABEL[phase]}</span>
           {overCap ? <button type="button" className="button" onClick={() => setTapped(true)}>Play this tile</button> : null}
           {state?.lastFrameAt && phase !== "connecting" ? <span className="tile-last">Last frame {clock(state.lastFrameAt)}</span> : null}
           {phase === "offline" || phase === "error" ? (
