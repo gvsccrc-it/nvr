@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import socket
 import uuid
+from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
@@ -22,10 +23,18 @@ def answer(count: int, start: int = 0) -> bytes:
 
 
 class FloodingNetwork:
-    """Stands in for the socket: every read returns the next datagram, then nothing."""
+    """Stands in for the socket: every read returns the next datagram, then nothing.
+
+    It also keeps the scan's clock: time passes only while the network is quiet (each empty read is the scan's 0.25 s wait), never while
+    answers are being parsed. With the real clock, a slow machine parsing a flood of answers ran out the scan's 0.3 s before reading them all,
+    and the test failed for the machine's speed, not the scan's limits."""
 
     def __init__(self, datagrams: list[bytes]) -> None:
         self.datagrams = list(datagrams)
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
 
     def __call__(self, *args, **kwargs):
         return self
@@ -45,13 +54,17 @@ class FloodingNetwork:
     def recvfrom(self, size: int):
         if self.datagrams:
             return self.datagrams.pop(0), ("192.0.2.9", 3702)
+        self.now += 0.25  # The scan waited for an answer that did not come
         raise socket.timeout
 
 
 class ScanBoundsTests(GrantCase):
     def scan(self, datagrams: list[bytes]) -> DiscoveryResult:
-        with patch.object(discovery.socket, "socket", FloodingNetwork(datagrams)):
-            return discovery._discover_sync(0.3, None)
+        network = FloodingNetwork(datagrams)
+        with patch.object(discovery.socket, "socket", network), patch.object(discovery, "time", SimpleNamespace(monotonic=network.monotonic)):
+            result = discovery._discover_sync(0.3, None)
+        self.assertEqual(network.datagrams, [], "the scan stopped before reading every answer")
+        return result
 
     def test_an_answer_naming_hundreds_of_devices_contributes_only_a_few(self):
         result = self.scan([answer(300)])

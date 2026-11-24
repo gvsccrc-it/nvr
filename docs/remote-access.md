@@ -113,7 +113,7 @@ It does not run or monitor the tunnel, does not open ports (UPnP), and sends not
 
 The NVR compresses what it sends itself, so the WireGuard and Tailscale set-ups, which have no proxy, get it too (#537):
 
-- **The interface's files** (its scripts and styles) are compressed once, when the image is built. A browser that accepts Brotli or gzip is sent that copy: the main script is about 175 kB instead of about 650 kB. It costs nothing while running.
+- **The interface's files** (its scripts and styles) are compressed once, when the image is built. A browser that accepts Brotli or gzip is sent that copy: the main script is about 169 kB with Brotli, or 197 kB with gzip, instead of about 620 kB. Pages that are not on the first screen (the camera inventory, the video wall, account security, and every other workspace but Live) are separate files, loaded when first opened. It costs nothing while running.
 - **JSON answers to GET requests** of 1 KB or more (the camera list, status, the timeline) are compressed with gzip as they are sent. The 200-camera list goes from about 42 kB to 2 kB, for well under a millisecond of processor time.
 - **Never compressed:** video, picture streams, line-by-line streams, downloads, anything sent in pieces, anything over a WebSocket, and any answer that shows a secret once (a new API token, a signing secret, second-factor enrolment, recovery codes). Those answers are all to POST or PUT requests, which are never compressed: compressing a secret next to text a caller can influence is a known way of leaking it.
 

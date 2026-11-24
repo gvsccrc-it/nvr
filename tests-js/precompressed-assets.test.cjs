@@ -21,5 +21,8 @@ test("every script and style sheet of 1 kB or more has a Brotli and a gzip copy 
   const sizes = Object.fromEntries(["", ".br", ".gz"].map(suffix => [suffix || "as built", fs.statSync(path.join(assets, main + suffix)).size]));
   console.log(`main script ${main}: ${JSON.stringify(sizes)}`);
   assert.ok(sizes[".br"] < 200_000, `${sizes[".br"]} bytes with Brotli`);
+  // The target on #537: under 200 kB with gzip too, for a browser or proxy that does not take Brotli. Pages opened on demand load later
+  // (app/lazyPage.ts); a new page added to the first screen's imports is what would push this back over.
+  assert.ok(sizes[".gz"] < 200_000, `${sizes[".gz"]} bytes with gzip: move a page that is not on the first screen to lazyPage`);
   assert.ok(sizes[".gz"] < sizes["as built"] / 3, `${sizes[".gz"]} bytes with gzip`);
 });
