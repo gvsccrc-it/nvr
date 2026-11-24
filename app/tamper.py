@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable
 
-from . import env_numbers
+from . import camera_destination, env_numbers
 from .incidents import sync_incident
 from .store import connect
 
@@ -367,12 +367,15 @@ async def grab_camera_frame(camera_id: str) -> bytes | None:
     from .recording import safe_stream_url
     def lookup() -> str | None:
         with connect() as db:
-            row = db.execute("SELECT stream_url_ciphertext,live_substream_url_ciphertext FROM cameras WHERE id=? AND enabled=1 AND archived_at IS NULL", (camera_id,)).fetchone()
+            row = db.execute("SELECT stream_url_ciphertext,live_substream_url_ciphertext,public_address FROM cameras WHERE id=? AND enabled=1 AND archived_at IS NULL",
+                             (camera_id,)).fetchone()
         if row is None:
             return None
         try:
-            return safe_stream_url(decrypt(row["live_substream_url_ciphertext"] or row["stream_url_ciphertext"]))
-        except (RuntimeError, ValueError):
+            source = safe_stream_url(decrypt(row["live_substream_url_ciphertext"] or row["stream_url_ciphertext"]))
+            # FFmpeg is given the address the camera address rule checked (#474); a refused or unknown one gives no frame
+            return camera_destination.pin_url(source, allow_public=camera_destination.camera_allows_public(row))
+        except (RuntimeError, ValueError, OSError):
             return None
     source = await asyncio.to_thread(lookup)  # Off the loop: a busy database must not stall the recorder.
     return await grab_frame(source, STREAM_PROTOCOLS) if source else None

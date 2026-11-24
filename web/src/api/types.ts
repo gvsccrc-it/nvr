@@ -63,6 +63,8 @@ export interface Camera {
   device_service_url: string | null;
   /** Whether the camera has an ONVIF device service, for everyone; its address is for administrators only (#377). */
   has_onvif_device: boolean;
+  /** Whether the camera may be at a public address (#474): ticked by an administrator, kept from before the rule, or not. Administrators only. */
+  public_address?: "allowed" | "grandfathered" | null;
   onvif_profile_token: string | null;
   live_substream_profile_token: string | null;
   /** Masked: credentials are never returned. This and the other address fields are null for anyone but an administrator (#377). */

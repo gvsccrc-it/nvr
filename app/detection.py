@@ -20,7 +20,7 @@ from typing import Any, Callable, Iterable, NamedTuple
 
 import numpy as np
 
-from . import acceleration, ai_capacity, privacy
+from . import acceleration, ai_capacity, camera_destination, privacy
 from .credentials import decrypt
 from .processes import end_process
 from .track_privacy import box_touches, box_usable
@@ -460,14 +460,17 @@ def _end_delayed_incident(db: sqlite3.Connection, camera_id: str, state: str) ->
 
 
 def _camera_source(camera_id: str, use_substream: bool) -> str:
+    """The stream address FFmpeg is given: the host replaced by the address the camera address rule checked (#474). Blocking (a name is
+    looked up): run it in a thread."""
     with connect() as db:
-        camera = db.execute("SELECT stream_url_ciphertext,live_substream_url_ciphertext FROM cameras WHERE id=? AND enabled=1", (camera_id,)).fetchone()
+        camera = db.execute("SELECT stream_url_ciphertext,live_substream_url_ciphertext,public_address FROM cameras WHERE id=? AND enabled=1", (camera_id,)).fetchone()
     if camera is None:
         raise ValueError("Camera is disabled or unavailable")
     ciphertext = camera["live_substream_url_ciphertext"] if use_substream else None
     if use_substream and not ciphertext:
         raise ValueError("Choose the main stream or configure a validated low-resolution stream first")
-    return safe_stream_url(decrypt(ciphertext or camera["stream_url_ciphertext"]))
+    source = safe_stream_url(decrypt(ciphertext or camera["stream_url_ciphertext"]))
+    return camera_destination.pin_url(source, allow_public=camera_destination.camera_allows_public(camera))
 
 
 async def _raw_frames(source: str, fps: float):
@@ -859,7 +862,7 @@ class DetectionManager:
         from . import attributes
         from .tracks import Tracker
 
-        source = _camera_source(camera_id, bool(config["use_substream"]))
+        source = await asyncio.to_thread(_camera_source, camera_id, bool(config["use_substream"]))
         zones = json.loads(config["zones_json"])
         tracker = Tracker(take_up=True)  # The objects in view when the stream last closed keep their tracks, and what has fired for them (#514)
         provider = str(config["provider"])

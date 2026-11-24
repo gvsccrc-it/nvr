@@ -12,6 +12,8 @@ export interface SourceDraft {
   onvif_profile_token: string | null;
   live_substream_profile_token: string | null;
   clear_credentials: boolean;
+  /** "This camera is at a public address" (#474): needed for a source at a public address, from an administrator in a browser. */
+  public_address: boolean;
 }
 
 const at = (id: string) => `/api/cameras/${encodeURIComponent(id)}`;

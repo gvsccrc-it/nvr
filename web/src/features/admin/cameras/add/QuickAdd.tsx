@@ -6,6 +6,7 @@ import type { Camera, CameraBrand, InspectReport, InspectStep } from "@/api/type
 import { BRAND_LABEL } from "../inventory";
 import { useCamerasStore } from "../store";
 import { InspectionReport, InspectionSteps } from "./InspectionReport";
+import { PublicAddressField } from "./ConnectionFields";
 import { attentionText, EMPTY_QUICK, failureText, inspectCamera, saveChecked, suggestedName, type QuickConnection } from "./inspect";
 
 /** Add one camera from only its address, username and password: the NVR works out the rest and shows what it found. */
@@ -93,6 +94,7 @@ export function QuickAdd() {
             {(Object.keys(BRAND_LABEL) as CameraBrand[]).map(brand => <option key={brand} value={brand}>{brand === "auto" ? "Detect automatically" : BRAND_LABEL[brand]}</option>)}
           </select>
         </label>
+        <PublicAddressField checked={Boolean(connection.public_address)} onChange={checked => set({ public_address: checked })} />
       </details>
       <label className="inline-field"><input type="checkbox" checked={recording} onChange={event => setRecording(event.target.checked)} /> Turn on motion recording when the camera checks out</label>
       <div className="field-actions">

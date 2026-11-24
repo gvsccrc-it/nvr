@@ -10,6 +10,7 @@ import xml.etree.ElementTree as ET
 
 import httpx
 
+from . import camera_destination
 from .onvif_destination import UnsafeDestination, confine
 from .onvif_soap import call as _soap_call, escape as _escape, local as _local
 from .onvif_stream import DEVICE, MAX_RESPONSE_BYTES, SCHEMA, SOAP
@@ -48,7 +49,9 @@ async def _call(client: httpx.AsyncClient, url: str, action: str, body: str) -> 
 
 def _client(username: str, password: str) -> httpx.AsyncClient:
     auth = httpx.DigestAuth(username, password) if username else None
-    return httpx.AsyncClient(auth=auth, timeout=httpx.Timeout(10, connect=5), trust_env=False, follow_redirects=False)
+    # Every connection follows the camera address rule (#474); whether the camera may be public is what the caller's
+    # ``camera_destination.public_permitted`` says
+    return camera_destination.camera_client(auth=auth, timeout=httpx.Timeout(10, connect=5))
 
 
 async def _media2(client: httpx.AsyncClient, device_service_url: str) -> str:

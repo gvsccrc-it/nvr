@@ -24,6 +24,7 @@ Addresses below are examples from the documentation ranges (`192.0.2.0/24`, `198
   - `NVR_COOKIE_SECURE=true` (it is on by itself when `NVR_PUBLIC_URL` is `https://`).
 
   With a proxy or tunnel on the same host, also set `NVR_LISTEN_HOST=127.0.0.1` so nothing else reaches the NVR directly. Settings › Remote access warns about what is still missing. See [remote-access.md](remote-access.md).
+- [ ] **Check which camera addresses are allowed.** The NVR connects only to private camera addresses unless told otherwise ([camera onboarding](camera-onboarding.md#which-camera-addresses-the-nvr-connects-to)). After the upgrade that brought this in, open Settings › Camera hardening: cameras listed under "Cameras at public addresses" keep working, and need "This camera is at a public address" ticked the next time their source is changed. Set `NVR_CAMERA_ALLOW_LOOPBACK=true` only if cameras reach the NVR through a restreamer on the same machine (addresses `127.0.0.1` or `::1`).
 
 ## 2. First run
 

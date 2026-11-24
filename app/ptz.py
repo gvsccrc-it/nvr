@@ -49,14 +49,15 @@ def forget_capabilities() -> None:
 
 
 def client_for(db: sqlite3.Connection, camera_id: str) -> PtzClient:
-    camera = db.execute("SELECT device_service_url,motion_credentials_ciphertext,onvif_profile_token FROM cameras WHERE id=? AND archived_at IS NULL",
+    camera = db.execute("SELECT device_service_url,motion_credentials_ciphertext,onvif_profile_token,public_address FROM cameras WHERE id=? AND archived_at IS NULL",
                         (camera_id,)).fetchone()
     if camera is None:
         raise LookupError("Camera not found")
     if not camera["device_service_url"]:
         raise NotControllable("This camera has no ONVIF device service.")
     credentials = json.loads(decrypt(camera["motion_credentials_ciphertext"])) if camera["motion_credentials_ciphertext"] else {}
-    return PtzClient(camera["device_service_url"], credentials.get("username", ""), credentials.get("password", ""), camera["onvif_profile_token"])
+    return PtzClient(camera["device_service_url"], credentials.get("username", ""), credentials.get("password", ""), camera["onvif_profile_token"],
+                     allow_public=camera["public_address"] is not None)
 
 
 async def capabilities(camera_id: str) -> tuple[Capabilities | None, str | None]:

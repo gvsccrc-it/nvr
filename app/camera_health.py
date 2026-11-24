@@ -25,7 +25,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlsplit
 
-from . import metrics
+from . import camera_destination, metrics
 from .credentials import decrypt
 from .store import connect
 from app.clock import now as _now, parse as _parse
@@ -116,7 +116,8 @@ async def read_onvif(row: sqlite3.Row) -> dict[str, Any]:
 
     credentials = json.loads(decrypt(row["motion_credentials_ciphertext"])) if row["motion_credentials_ciphertext"] else {}
     host = urlsplit(row["device_service_url"]).hostname or row["camera_ip"] or ""  # The port is in the device service address that is located next
-    async with OnvifClient(host, credentials.get("username", ""), credentials.get("password", "")) as client:
+    async with OnvifClient(host, credentials.get("username", ""), credentials.get("password", ""),
+                           allow_public=camera_destination.camera_allows_public(row)) as client:  # The camera address rule (#474)
         device = await client.locate_device(row["device_service_url"])
         info = await client.device_information(device)
         found: dict[str, Any] = {"manufacturer": info.manufacturer or None, "model": info.model or None, "firmware": info.firmware or None}

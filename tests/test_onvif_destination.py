@@ -89,7 +89,8 @@ class MaskDestinationTests(unittest.TestCase):
             return soap("<tr2:GetVideoSourceConfigurationsResponse xmlns:tr2='x'/>")
 
         real = httpx.AsyncClient
-        with patch.object(onvif_masks.httpx, "AsyncClient", lambda **kw: real(transport=httpx.MockTransport(handler), **kw)):
+        # The stand-in camera takes the place of the network: of the guarded camera transport too (#474)
+        with patch.object(onvif_masks.httpx, "AsyncClient", lambda **kw: real(**{**kw, "transport": httpx.MockTransport(handler)})):
             with self.assertRaises(onvif_masks.MasksUnsupported):
                 run(onvif_masks.write_masks(CAMERA, "onvif", "pass", [{"x": 0, "y": 0, "width": .1, "height": .1}], []))
         self.assertEqual(set(seen), {"192.168.1.50"})

@@ -6,6 +6,7 @@ import xml.etree.ElementTree as ET
 
 import httpx
 
+from . import camera_destination
 from .onvif_soap import call as _soap_call, escape as _escape, local as _local
 from .onvif_stream import DEVICE, MAX_RESPONSE_BYTES, SCHEMA, SOAP
 
@@ -39,7 +40,7 @@ async def pulse(device_service_url: str, username: str, password: str, relay_tok
     """Returns the relay token pulsed. Once switching on has been attempted, switching off is
     always attempted too, a few times, even if switching on seemed to fail or holding is interrupted."""
     auth = httpx.DigestAuth(username, password) if username else None
-    async with httpx.AsyncClient(auth=auth, timeout=httpx.Timeout(10, connect=5), trust_env=False, follow_redirects=False) as client:
+    async with camera_destination.camera_client(auth=auth, timeout=httpx.Timeout(10, connect=5)) as client:  # The camera address rule (#474)
         token = relay_token
         if not token:
             relays = await _call(client, device_service_url, GET_RELAYS, "<tds:GetRelayOutputs/>")
@@ -69,7 +70,7 @@ async def release(device_service_url: str, username: str, password: str, relay_t
     """Switch the relay off, and nothing else: for a pulse cut off by a restart, which may have left it on. Sending the whole pulse again
     would switch it on a second time (#527)."""
     auth = httpx.DigestAuth(username, password) if username else None
-    async with httpx.AsyncClient(auth=auth, timeout=httpx.Timeout(10, connect=5), trust_env=False, follow_redirects=False) as client:
+    async with camera_destination.camera_client(auth=auth, timeout=httpx.Timeout(10, connect=5)) as client:  # The camera address rule (#474)
         token = relay_token
         if not token:
             relays = await _call(client, device_service_url, GET_RELAYS, "<tds:GetRelayOutputs/>")

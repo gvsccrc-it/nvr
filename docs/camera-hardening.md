@@ -43,6 +43,13 @@ The probe asks only whether a TLS handshake completes on the camera's usual RTSP
 
 Running the checks, saving the networks, acknowledging and restoring are written to the audit log (`hardening_run`, `hardening_networks_set`, `hardening_probes_set`, `hardening_finding_acknowledged`, `hardening_finding_restored`).
 
+## Standing warnings about camera addresses
+
+Besides the findings, the page shows two warnings for as long as they hold (#474, see [camera onboarding](camera-onboarding.md#which-camera-addresses-the-nvr-connects-to)), in the report as `camera_loopback_allowed` and `public_cameras`:
+
+- **Cameras on this machine**: the server's configuration sets `NVR_CAMERA_ALLOW_LOOPBACK`, so camera addresses may be on the NVR's own machine.
+- **Cameras at public addresses**: each camera the NVR reaches at a public internet address, and whether an administrator allowed it or it was kept working from before the rule (the next change to its source needs "This camera is at a public address" ticked). A camera's host name is looked up for this list at most every ten minutes.
+
 ## API
 
 All for administrators.

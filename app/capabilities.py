@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlsplit
 
+from . import camera_destination
 from .credentials import decrypt
 from .store import connect
 
@@ -174,10 +175,12 @@ async def recheck(camera_id: str, capability: str) -> dict[str, Any] | None:
     if row is None:
         return None
     try:
-        if capability == "video":
-            state, message = await asyncio.wait_for(check_video(row), CHECK_SECONDS)
-        else:
-            state, message = await asyncio.wait_for(check_motion(row), CHECK_SECONDS)
+        # Every connection follows the camera address rule, with this camera's own permission for a public address (#474)
+        with camera_destination.public_permitted(camera_destination.camera_allows_public(row)):
+            if capability == "video":
+                state, message = await asyncio.wait_for(check_video(row), CHECK_SECONDS)
+            else:
+                state, message = await asyncio.wait_for(check_motion(row), CHECK_SECONDS)
     except Exception:  # noqa: BLE001 - a test that could not run is a failed check, not a crash
         logger.warning("A camera capability could not be checked")
         state, message = "failed", "The check could not be completed"

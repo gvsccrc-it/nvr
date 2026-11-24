@@ -22,7 +22,7 @@ import sqlite3
 import time
 from typing import Any
 
-from . import live_variant, privacy
+from . import camera_destination, live_variant, privacy
 from .credentials import decrypt
 from .live_hub import LiveHub, LiveStream, SinkViewer
 from .recording import safe_stream_url
@@ -53,7 +53,7 @@ def wanted(db: sqlite3.Connection) -> list[tuple[tuple[str, ...], dict[str, Any]
 
     Each is the stream a viewer opening a grid gets (``quality=low``, a browser that does not play H.265), made the way the live endpoint makes it."""
     result = []
-    for camera in db.execute("SELECT id,stream_url_ciphertext,live_substream_url_ciphertext,video_codec,audio_enabled FROM cameras "
+    for camera in db.execute("SELECT id,stream_url_ciphertext,live_substream_url_ciphertext,video_codec,audio_enabled,public_address FROM cameras "
                              "WHERE archived_at IS NULL AND enabled=1 ORDER BY name,id"):
         try:
             variant = live_variant.choose(camera, privacy.server_zones(db, camera["id"]), "low", False)
@@ -71,7 +71,7 @@ def wanted(db: sqlite3.Connection) -> list[tuple[tuple[str, ...], dict[str, Any]
         _warned.discard(camera["id"])
         result.append((live_variant.key_of(camera["id"], variant, source),
                        {"source": source, "include_audio": variant.include_audio, "video_filter": variant.video_filter,
-                        "transcode": variant.transcode, "hevc_copy": variant.hevc_copy}))
+                        "transcode": variant.transcode, "hevc_copy": variant.hevc_copy, "allow_public": camera["public_address"] is not None}))
         if len(result) >= MAX_READY_STREAMS:
             break
     return result
@@ -138,8 +138,9 @@ class LiveReadyKeeper:
             from .api.live_media import mark_camera_fresh
             viewer = SinkViewer()
             # The same freshness mark a viewer's own join would have set up: the stream keeps the first one it was given, which is this one.
-            stream = self.hub.join(key, how["source"], how["include_audio"], viewer, lambda camera_id=key[0]: mark_camera_fresh(camera_id),
-                                   how["video_filter"], how["transcode"], how["hevc_copy"])
+            with camera_destination.public_permitted(how.get("allow_public", False)):  # The camera address rule (#474)
+                stream = self.hub.join(key, how["source"], how["include_audio"], viewer, lambda camera_id=key[0]: mark_camera_fresh(camera_id),
+                                       how["video_filter"], how["transcode"], how["hevc_copy"])
             self.held[key] = (stream, viewer)
 
     def _load(self) -> tuple[str, list[tuple[tuple[str, ...], dict[str, Any]]]]:

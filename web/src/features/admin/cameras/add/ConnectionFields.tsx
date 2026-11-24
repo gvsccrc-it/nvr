@@ -16,10 +16,12 @@ export interface Connection {
   brand: CameraBrand;
   profile: string;
   substream: string;
+  /** "This camera is at a public address": the NVR refuses public addresses unless an administrator in a browser ticks this (#474). */
+  public_address: boolean;
 }
 
 export const EMPTY_CONNECTION: Connection = {
-  mode: "onvif", address: "", port: "80", endpoint: "", stream_url: "", username: "", password: "", brand: "auto", profile: "", substream: "",
+  mode: "onvif", address: "", port: "80", endpoint: "", stream_url: "", username: "", password: "", brand: "auto", profile: "", substream: "", public_address: false,
 };
 
 export function deviceServiceUrl(connection: Connection): string | null {
@@ -37,16 +39,16 @@ export function sourceBody(connection: Connection) {
         camera_ip: value(connection.address), stream_url: null,
         camera_username: value(connection.username), camera_password: connection.password || null, camera_brand: connection.brand,
         device_service_url: deviceServiceUrl(connection), onvif_profile_token: value(connection.profile),
-        live_substream_profile_token: value(connection.substream),
+        live_substream_profile_token: value(connection.substream), public_address: connection.public_address,
       }
     : {
         camera_ip: null, stream_url: value(connection.stream_url),
         camera_username: value(connection.username), camera_password: connection.password || null, camera_brand: connection.brand,
-        device_service_url: null, onvif_profile_token: null, live_substream_profile_token: null,
+        device_service_url: null, onvif_profile_token: null, live_substream_profile_token: null, public_address: connection.public_address,
       };
 }
 
-export function ConnectionFields({ value, onChange, allowUrl = true }: { value: Connection; onChange: (next: Connection) => void; allowUrl?: boolean }) {
+export function ConnectionFields({ value, onChange, allowUrl = true, allowPublic = true }: { value: Connection; onChange: (next: Connection) => void; allowUrl?: boolean; allowPublic?: boolean }) {
   const [profiles, setProfiles] = useState<{ busy: boolean; list?: OnvifProfile[]; error?: string }>({ busy: false });
   const set = (change: Partial<Connection>) => onChange({ ...value, ...change });
 
@@ -56,7 +58,8 @@ export function ConnectionFields({ value, onChange, allowUrl = true }: { value: 
       const body = sourceBody(value);
       const result = await api<{ device_service_url: string | null; profiles: OnvifProfile[] }>("/api/cameras/onvif-profiles", {
         method: "POST",
-        body: { camera_ip: body.camera_ip, camera_username: body.camera_username, camera_password: body.camera_password, camera_brand: body.camera_brand, device_service_url: body.device_service_url },
+        body: { camera_ip: body.camera_ip, camera_username: body.camera_username, camera_password: body.camera_password, camera_brand: body.camera_brand, device_service_url: body.device_service_url,
+                public_address: body.public_address },
       });
       setProfiles({ busy: false, list: result.profiles });
       onChange({ ...value, endpoint: result.device_service_url ?? value.endpoint, profile: value.profile || result.profiles[0]?.token || "" });
@@ -96,6 +99,7 @@ export function ConnectionFields({ value, onChange, allowUrl = true }: { value: 
           {(Object.keys(BRAND_LABEL) as CameraBrand[]).map(brand => <option key={brand} value={brand}>{brand === "auto" ? "Detect automatically" : BRAND_LABEL[brand]}</option>)}
         </select>
       </label>
+      {allowPublic ? <PublicAddressField checked={value.public_address} onChange={checked => set({ public_address: checked })} /> : null}
       {value.mode === "onvif" ? (
         <>
           <div className="field-actions">
@@ -119,5 +123,15 @@ export function ConnectionFields({ value, onChange, allowUrl = true }: { value: 
         </>
       ) : null}
     </>
+  );
+}
+
+/** The explicit choice the NVR needs before it connects to a camera at a public internet address (#474). */
+export function PublicAddressField({ checked, onChange }: { checked: boolean; onChange: (checked: boolean) => void }) {
+  return (
+    <label className="inline-field">
+      <input type="checkbox" checked={checked} onChange={event => onChange(event.target.checked)} /> This camera is at a public address
+      <span className="muted field-hint"> Only tick this for a camera reached over the internet. It is recorded in the security log.</span>
+    </label>
   );
 }

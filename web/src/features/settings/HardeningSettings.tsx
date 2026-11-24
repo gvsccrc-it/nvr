@@ -15,6 +15,8 @@ interface Report {
   probe_gap_seconds: number; findings: Finding[]; acknowledged: Finding[]; counts: { high: number; medium: number; acknowledged: number };
   listening?: { host: string; every_address: boolean; networks: string[] };
   unprotected_talk?: { camera_id: string; camera_name: string }[];
+  public_cameras?: { camera_id: string; camera_name: string; permission: "allowed" | "grandfathered" }[];
+  camera_loopback_allowed?: boolean;
   run?: { running: boolean; started_at: string | null; probes_total: number; probes_done: number; not_answered: { camera_id: string; camera_name: string }[] };
 }
 
@@ -85,6 +87,30 @@ export function HardeningSettings() {
             {data.unprotected_talk.map(camera => camera.camera_name).join(", ")} {data.unprotected_talk.length === 1 ? "is" : "are"} allowed to ask for the camera's password unprotected
             during two-way audio (Basic sign-in over plain RTSP): anything answering at {data.unprotected_talk.length === 1 ? "that camera's address" : "those cameras' addresses"} could read it.
             Turn it off under Cameras, Talk once a camera can sign in another way.
+            </span>
+          </p>
+        </section>
+      ) : null}
+      {data?.camera_loopback_allowed ? (
+        <section className="field-group settings-block" aria-label="Cameras on this machine">
+          <h2 className="field-heading">Cameras on this machine</h2>
+          <p className="notice" data-tone="warn">
+            <span>
+            The server's configuration sets <code>NVR_CAMERA_ALLOW_LOOPBACK</code>, so a camera address may be on this machine itself (127.0.0.1 or ::1). That is for cameras fed through a
+            restreamer on the same machine. While it is on, an administrator, or an <code>admin</code> API token, can point the NVR at services that listen only on this machine.
+            Remove the setting from the server's configuration when no camera needs it.
+            </span>
+          </p>
+        </section>
+      ) : null}
+      {data?.public_cameras?.length ? (
+        <section className="field-group settings-block" aria-label="Cameras at public addresses">
+          <h2 className="field-heading">Cameras at public addresses</h2>
+          <p className="notice" data-tone="warn">
+            <span>
+            The NVR reaches these cameras at a public internet address: {data.public_cameras.map(camera => `${camera.camera_name} (${camera.permission === "allowed" ? "allowed by an administrator" : "kept from before the address rule"})`).join(", ")}.
+            Video and logins sent to a camera on the internet cross networks nobody here controls. A camera kept from before the rule needs
+            "This camera is at a public address" ticked the next time its source is changed.
             </span>
           </p>
         </section>

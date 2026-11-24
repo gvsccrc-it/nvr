@@ -65,9 +65,9 @@ class Recorder:
 
 
 def camera(module, handler):
-    """Every HTTP client the module opens talks to ``handler`` instead of the network."""
+    """Every HTTP client the module opens talks to ``handler`` instead of the network (in place of the guarded camera transport too, #474)."""
     real = httpx.AsyncClient
-    return patch.object(module.httpx, "AsyncClient", lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
+    return patch.object(module.httpx, "AsyncClient", lambda **kw: real(**{**kw, "transport": httpx.MockTransport(handler)}))
 
 
 class ReaderTests(unittest.TestCase):

@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from . import coverage
+from . import camera_destination, coverage
 from .credentials import decrypt
 from .onvif_client import OnvifClient, OnvifError, Recording, Services
 from .recording import recordings_path
@@ -101,7 +101,7 @@ async def _connect(row: sqlite3.Row) -> tuple[OnvifClient, Services]:
     if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
         raise OnvifError("unsupported", "The camera has no ONVIF address")
     username, password = _credentials(row)
-    client = OnvifClient(parsed.hostname, username, password)
+    client = OnvifClient(parsed.hostname, username, password, allow_public=camera_destination.camera_allows_public(row))
     try:
         device = await client.locate_device(url)
         return client, await client.services(device)
@@ -465,7 +465,9 @@ class BackfillManager:
             if seconds <= 0.5:
                 cursor = chunk_end
                 continue
-            uri = client.replay_url_with_login(await client.replay_uri(services, recording.token))
+            # FFmpeg is given the address the camera address rule checked (#474)
+            uri = await camera_destination.apin_url(client.replay_url_with_login(await client.replay_uri(services, recording.token)),
+                                                    allow_public=camera_destination.camera_allows_public(row))
             target = camera_recordings_dir(camera_id) / f"backfill-{cursor:%Y%m%dT%H%M%SZ}.mp4"
             target.parent.mkdir(parents=True, exist_ok=True)
             started = asyncio.get_running_loop().time()

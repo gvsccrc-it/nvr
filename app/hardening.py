@@ -30,11 +30,13 @@ import os
 import socket
 import sqlite3
 import ssl
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from typing import Any, Callable
 from urllib.parse import unquote, urlsplit
 
+from . import camera_destination
 from .credentials import decrypt
 from .store import connect
 from app.clock import now as _now, parse as _parse
@@ -431,6 +433,37 @@ def listening() -> dict[str, Any]:
     return {"host": host, "every_address": exposed, "networks": network.interface_networks() if exposed else []}
 
 
+HOST_KIND_SECONDS = 600.0
+_host_kinds: dict[str, tuple[float, str | None]] = {}
+
+
+def _host_kind(host: str) -> str | None:
+    """``camera_destination.host_kind``, a name's answer kept for ten minutes: the page is not held up by looking every camera's name up."""
+    if camera_destination.literal(host) is not None:
+        return camera_destination.host_kind(host)
+    kept = _host_kinds.get(host)
+    if kept is not None and time.monotonic() - kept[0] < HOST_KIND_SECONDS:
+        return kept[1]
+    kind = camera_destination.host_kind(host)
+    _host_kinds[host] = (time.monotonic(), kind)
+    return kind
+
+
+def public_cameras(db: sqlite3.Connection) -> list[dict[str, Any]]:
+    """The cameras the NVR reaches at a public address (#474): each allowed by an administrator's tick (``allowed``), or kept working from
+    before the camera address rule (``grandfathered``), which needs the tick at the next change of its source. A standing list on the page."""
+    found = []
+    for row in db.execute("SELECT id,name,public_address,camera_ip,device_service_url,motion_service_url,stream_url_ciphertext,live_substream_url_ciphertext "
+                          "FROM cameras WHERE public_address IS NOT NULL AND archived_at IS NULL ORDER BY name COLLATE NOCASE,id"):
+        hosts = {row["camera_ip"]}
+        for url in (row["device_service_url"], row["motion_service_url"], _plain(row["stream_url_ciphertext"]), _plain(row["live_substream_url_ciphertext"])):
+            parts = _split(url)
+            hosts.add(parts.hostname if parts else None)
+        if any(_host_kind(host) == "public" for host in hosts if host):
+            found.append({"camera_id": row["id"], "camera_name": row["name"], "permission": row["public_address"]})
+    return found
+
+
 def report(db: sqlite3.Connection, now: datetime | None = None) -> dict[str, Any]:
     """The findings still showing, those acknowledged, and what the checks cover and when they last ran."""
     now = now or _now()
@@ -460,6 +493,8 @@ def report(db: sqlite3.Connection, now: datetime | None = None) -> dict[str, Any
         "SELECT c.id,c.name FROM camera_talk t JOIN cameras c ON c.id=t.camera_id WHERE t.allow_basic=1 AND c.archived_at IS NULL ORDER BY c.name COLLATE NOCASE")]
     return {
         "listening": listening(), "unprotected_talk": unprotected, "run": progress,
+        # Standing (#474): cameras at public addresses, and whether the server lets cameras be on its own loopback addresses
+        "public_cameras": public_cameras(db), "camera_loopback_allowed": camera_destination.loopback_allowed(),
         "as_of": now.isoformat(), "last_run_at": settings["last_run_at"], "last_run_kind": settings["last_run_kind"],
         "next_run_at": (_parse(anchor) + SCHEDULE).isoformat() if anchor else None,
         "camera_networks": [str(network) for network in configured], "network_check": bool(configured), "probes_enabled": bool(settings["probes_enabled"]),

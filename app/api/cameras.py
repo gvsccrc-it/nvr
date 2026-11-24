@@ -7,6 +7,7 @@ import uuid
 import json
 import time
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any, Literal
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
@@ -14,14 +15,14 @@ from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app import console
-from app.principal import Administrator, CurrentUser
+from app.principal import Administrator, CurrentUser, is_browser_session
 from app.store import connect, read_one
 from app.credentials import encrypt, decrypt
 from app.recording import masked_stream_url, probe_stream, safe_stream_url
 from app.health import recording_health
 from app.onvif_client import normalise_host
 from app.onvif_stream import list_camera_stream_profiles, placeholder_stream_url, resolve_camera_stream
-from app import capabilities as camera_capabilities, diagnostics, privacy
+from app import camera_destination, capabilities as camera_capabilities, diagnostics, privacy
 from app.retention import effective_retention
 from app.api.policies import effective_schedule_view
 from app.audit import record as audit_record
@@ -42,6 +43,7 @@ class CameraSourceRequest(BaseModel):
     onvif_profile_token: str | None = Field(default=None, max_length=256)
     live_substream_profile_token: str | None = Field(default=None, max_length=256)
     device_service_url: str | None = Field(default=None, max_length=2048)
+    public_address: bool = False  # "This camera is at a public address" (#474): honoured only from an administrator signed in with a browser
 
     @model_validator(mode="after")
     def validate_source(self) -> "CameraSourceRequest":
@@ -99,6 +101,7 @@ class CameraProfileRequest(BaseModel):
     camera_password: str | None = Field(default=None, max_length=1024)
     camera_brand: CameraBrand = "auto"
     device_service_url: str | None = Field(default=None, max_length=2048)
+    public_address: bool = False
 
     @model_validator(mode="after")
     def validate_credentials(self) -> "CameraProfileRequest":
@@ -116,6 +119,50 @@ def _validate_onvif_service_url(value: str | None) -> str | None:
     if parsed.port is not None and not 1 <= parsed.port <= 65535:
         raise ValueError("Invalid ONVIF service port")
     return value.strip()
+
+
+PUBLIC_TICK_FROM_TOKEN = "Only an administrator signed in with a browser can allow a camera at a public address, not an API token"
+
+
+def public_permission(payload: Any, user: Any) -> bool:
+    """Whether this request may reach a camera at a public address: its tick, "This camera is at a public address", from an administrator
+    signed in with a browser (#474). The tick from an API token is refused, so a leaked token cannot point the NVR at the internet. Bulk Add
+    and CSV import never tick it."""
+    if not getattr(payload, "public_address", False):
+        return False
+    if not is_browser_session(user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=PUBLIC_TICK_FROM_TOKEN)
+    return True
+
+
+def _destination_hosts(payload: Any) -> list[str]:
+    """Every host a camera request names: its address, its direct stream address and its ONVIF device and event addresses."""
+    hosts: list[str] = []
+    for name in ("camera_ip", "stream_url", "device_service_url", "motion_service_url"):
+        value = (getattr(payload, name, None) or "").strip()
+        host = (urlsplit(value).hostname if "://" in value else value) if value else None
+        if host:
+            hosts.append(host)
+    return list(dict.fromkeys(hosts))
+
+
+async def check_destinations(payload: Any, *, allow_public: bool) -> bool:
+    """Refuse (422) a camera address the destination rule refuses, before anything connects (#474). True when one of the addresses is public
+    (and so allowed). A name that cannot be looked up now is left to the connection, which looks it up and is checked again there."""
+    def judge() -> bool:
+        public = False
+        for host in _destination_hosts(payload):
+            try:
+                addresses = camera_destination.addresses_of(host)
+            except (OSError, UnicodeError):
+                continue
+            for address in addresses:
+                public = camera_destination.check(address, allow_public=allow_public) == "public" or public
+        return public
+    try:
+        return await asyncio.to_thread(judge)
+    except camera_destination.RefusedDestination as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
 
 
 class MotionZoneRequest(BaseModel):
@@ -208,13 +255,16 @@ class CameraUpdateRequest(BaseModel):
 @router.post("/api/cameras/onvif-profiles")
 async def camera_onvif_profiles(
     payload: CameraProfileRequest,
-    _: Administrator,
+    user: Administrator,
 ) -> dict[str, object]:
+    allowed = public_permission(payload, user)
+    await check_destinations(payload, allow_public=allowed)
     try:
-        service_url, profiles = await list_camera_stream_profiles(
-            payload.camera_ip, payload.camera_username or "", payload.camera_password or "",
-            payload.device_service_url, payload.camera_brand,
-        )
+        with camera_destination.public_permitted(allowed):
+            service_url, profiles = await list_camera_stream_profiles(
+                payload.camera_ip, payload.camera_username or "", payload.camera_password or "",
+                payload.device_service_url, payload.camera_brand,
+            )
     except (OSError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"device_service_url": service_url, "profiles": [profile.__dict__ for profile in profiles]}
@@ -222,7 +272,7 @@ async def camera_onvif_profiles(
 
 # Where a camera is on the network: its address, ONVIF device address, profile tokens, and the scheme, host and port of its stream. Only
 # administrators are given these (#377): everyone else (operators, read-scope API tokens, video walls) gets them empty.
-ADDRESS_FIELDS = ("camera_ip", "device_service_url", "onvif_profile_token", "live_substream_profile_token", "stream_url")
+ADDRESS_FIELDS = ("camera_ip", "device_service_url", "onvif_profile_token", "live_substream_profile_token", "stream_url", "public_address")
 
 
 def sees_camera_addresses(user: Any) -> bool:
@@ -248,6 +298,8 @@ def camera_view(row: sqlite3.Row) -> dict[str, object]:
         "live_substream_profile_token": row["live_substream_profile_token"] if "live_substream_profile_token" in row.keys() else None,
         # Whether the camera has an ONVIF device service (so may have PTZ and the like), without saying where it is: everyone gets this (#377).
         "has_onvif_device": bool(row["device_service_url"]) if "device_service_url" in row.keys() else False,
+        # Whether the camera may be at a public address (#474): "allowed" (ticked), "grandfathered" (from before the rule) or None. Administrators only.
+        "public_address": row["public_address"] if "public_address" in row.keys() else None,
         "archived_at": row["archived_at"] if "archived_at" in row.keys() else None,
         "stream_url": visible_url,
         "enabled": bool(row["enabled"]),
@@ -305,8 +357,10 @@ def insert_camera(
     motion_zones: list[MotionZoneRequest] | None = None,
     motion_sensitivity: int = 50,
     live_substream_url: str | None = None,
+    public_address: str | None = None,
 ) -> str:
-    """Persist a camera only after its stream has passed the shared probe."""
+    """Persist a camera only after its stream has passed the shared probe. ``public_address``: ``allowed`` when an administrator in a browser
+    ticked that it is at a public address (#474), otherwise None."""
     video = capability["video"]
     if not isinstance(video, dict):
         raise ValueError("A successful stream probe must include video metadata")
@@ -323,15 +377,15 @@ def insert_camera(
         "INSERT INTO cameras(id,name,onvif_uuid,group_id,camera_ip,camera_brand,device_service_url,onvif_profile_token,live_substream_profile_token,stream_url_ciphertext,live_substream_url_ciphertext,audio_supported,audio_enabled,recording_mode,recording_enabled,recording_status,"
         "motion_service_url,motion_credentials_ciphertext,motion_pre_roll_seconds,motion_post_roll_seconds,motion_source_status," 
         "motion_fallback_enabled,motion_zones_json,motion_sensitivity,server_motion_status,last_error," 
-        "video_codec,video_width,video_height,last_probe_at) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+        "video_codec,video_width,video_height,public_address,last_probe_at) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
         (camera_id, name, onvif_uuid, group_id, camera_ip, camera_brand, device_service_url, onvif_profile_token, live_substream_profile_token,
          encrypt(stream_url.strip()), encrypt(live_substream_url.strip()) if live_substream_url else None, int(bool(capability.get("audio"))), 0, recording_mode, int(recording_enabled), status,
          motion_service_url, credentials, motion_pre_roll_seconds, motion_post_roll_seconds,
          "untested" if motion_service_url else "unsupported", int(motion_fallback_enabled),
          json.dumps([zone.model_dump() for zone in (motion_zones or [])], separators=(",", ":")), motion_sensitivity,
          "waiting" if motion_fallback_enabled else "disabled", error,
-         video.get("codec"), video.get("width"), video.get("height")),
+         video.get("codec"), video.get("width"), video.get("height"), public_address),
     )
     return camera_id
 
@@ -361,15 +415,18 @@ def record_discovery_failure(db: sqlite3.Connection, device_uuid: str) -> None:
 @router.post("/api/cameras/test")
 async def test_camera_stream(
     payload: CameraProbeRequest,
-    _: Administrator,
+    user: Administrator,
 ) -> dict[str, object]:
-    try:
-        stream_url, _ = await _resolve_camera_source(payload)
-        safe_stream_url(stream_url)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    started = time.monotonic()
-    result = await probe_stream(stream_url)
+    allowed = public_permission(payload, user)
+    await check_destinations(payload, allow_public=allowed)
+    with camera_destination.public_permitted(allowed):
+        try:
+            stream_url, _ = await _resolve_camera_source(payload)
+            safe_stream_url(stream_url)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        started = time.monotonic()
+        result = await probe_stream(stream_url)
     await asyncio.to_thread(diagnostics.record_event, 
         "stream_probe", outcome="success" if result.get("reachable") else "unavailable",
         elapsed_ms=min(60000, int((time.monotonic() - started) * 1000)),
@@ -529,7 +586,8 @@ async def _resolve_live_substream(payload: CameraCreateRequest, resolved_service
 
 
 def _store_new_camera(discovery_claim: dict[str, Any] | None, payload: CameraCreateRequest, *, name: str, stream_url: str, resolved_service_url: str | None, capability: dict[str, Any],
-                      video_problem: str | None, live_substream_url: str | None, motion_username: str | None, motion_password: str | None, health: Any) -> str:
+                      video_problem: str | None, live_substream_url: str | None, motion_username: str | None, motion_password: str | None, health: Any,
+                      public_address: str | None = None, actor_id: int | None = None) -> str:
     """Insert the camera with its capabilities, and (for a discovered device) claim its candidate in the same transaction. Returns the new camera's id."""
     with connect() as db:
         try:
@@ -552,7 +610,10 @@ def _store_new_camera(discovery_claim: dict[str, Any] | None, payload: CameraCre
                 motion_zones=payload.motion_zones,
                 motion_sensitivity=payload.motion_sensitivity,
                 live_substream_url=live_substream_url,
+                public_address=public_address,
             )
+            if public_address == "allowed":
+                audit_record(db, actor_id, "camera_public_address_allowed", "camera", camera_id, change="added")
             if video_problem is None:
                 record_discovery_probe(
                     db,
@@ -585,12 +646,21 @@ def _store_new_camera(discovery_claim: dict[str, Any] | None, payload: CameraCre
     return camera_id
 
 
-async def add_camera(payload: CameraCreateRequest, recorders: Any, *, discovery_claim: dict[str, Any] | None = None) -> dict[str, object]:
+async def add_camera(payload: CameraCreateRequest, recorders: Any, *, discovery_claim: dict[str, Any] | None = None, allow_public: bool = False,
+                     actor_id: int | None = None) -> dict[str, object]:
     """Check a new camera's stream and save it, then start recording it if asked. This is everything ``POST /api/cameras`` does, without a web request, so the
-    bulk-add job (``app.bulk_add``) adds a camera exactly as the form does. Raises ``HTTPException`` (422 for what is wrong with the camera, 409 for a name in use)."""
+    bulk-add job (``app.bulk_add``) adds a camera exactly as the form does. Raises ``HTTPException`` (422 for what is wrong with the camera, 409 for a name in use).
+    ``allow_public``: an administrator in a browser ticked that the camera is at a public address (``public_permission``); Bulk Add never does (#474)."""
     name = payload.name.strip()
     if not name:
         raise HTTPException(status_code=422, detail="Camera name is required")
+    with camera_destination.public_permitted(allow_public):
+        public = await check_destinations(payload, allow_public=allow_public)
+        return await _add_camera(payload, recorders, name, discovery_claim, "allowed" if public else None, actor_id)
+
+
+async def _add_camera(payload: CameraCreateRequest, recorders: Any, name: str, discovery_claim: dict[str, Any] | None, public_address: str | None,
+                      actor_id: int | None) -> dict[str, object]:
     onvif_resolved = not payload.stream_url and bool(payload.camera_ip)
     stream_url, resolved_service_url, unresolved = await _resolve_new_camera_source(payload, onvif_resolved)
     motion_username = payload.motion_username if payload.motion_username is not None else payload.camera_username
@@ -601,7 +671,8 @@ async def add_camera(payload: CameraCreateRequest, recorders: Any, *, discovery_
     live_substream_url = await _resolve_live_substream(payload, resolved_service_url, capability, video_problem)
     health = await _initial_health(payload, resolved_service_url) if onvif_resolved else None
     camera_id = await asyncio.to_thread(_store_new_camera, discovery_claim, payload, name=name, stream_url=stream_url, resolved_service_url=resolved_service_url, capability=capability, video_problem=video_problem,
-                                  live_substream_url=live_substream_url, motion_username=motion_username, motion_password=motion_password, health=health)
+                                  live_substream_url=live_substream_url, motion_username=motion_username, motion_password=motion_password, health=health,
+                                  public_address=public_address, actor_id=actor_id)
     await recorders.sync_camera(camera_id, force_restart=True)
     return await asyncio.to_thread(_saved_view, camera_id)
 
@@ -610,9 +681,10 @@ async def add_camera(payload: CameraCreateRequest, recorders: Any, *, discovery_
 async def create_camera(
     payload: CameraCreateRequest,
     request: Request,
-    _: Administrator,
+    user: Administrator,
 ) -> dict[str, object]:
-    return await add_camera(payload, request.app.state.recorders, discovery_claim=getattr(request.state, "discovery_add_claim", None))
+    return await add_camera(payload, request.app.state.recorders, discovery_claim=getattr(request.state, "discovery_add_claim", None),
+                            allow_public=public_permission(payload, user), actor_id=user.id)
 
 
 def _url_host(url: str | None) -> str | None:
@@ -669,21 +741,24 @@ def _saved_view(camera_id: str) -> dict[str, object]:
 async def test_camera_source_update(
     camera_id: str,
     payload: CameraSourceUpdateRequest,
-    _: Administrator,
+    user: Administrator,
 ) -> dict[str, object]:
     current = await asyncio.to_thread(read_one, "SELECT camera_ip,stream_url_ciphertext FROM cameras WHERE id=?", (camera_id,))
     if current is None:
         raise HTTPException(status_code=404, detail="Camera not found")
     payload = _reuse_source_credentials(current, payload)
+    allowed = public_permission(payload, user)
+    await check_destinations(payload, allow_public=allowed)
     started = time.monotonic()
-    try:
-        stream_url, _ = await _resolve_camera_source(payload)
-        safe_stream_url(stream_url)
-    except (ValueError, HTTPException) as exc:
-        if isinstance(exc, HTTPException):
-            raise
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    result = await probe_stream(stream_url)
+    with camera_destination.public_permitted(allowed):
+        try:
+            stream_url, _ = await _resolve_camera_source(payload)
+            safe_stream_url(stream_url)
+        except (ValueError, HTTPException) as exc:
+            if isinstance(exc, HTTPException):
+                raise
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        result = await probe_stream(stream_url)
     await asyncio.to_thread(diagnostics.record_event, "stream_probe", outcome="success" if result.get("reachable") else "unavailable", elapsed_ms=min(60000, int((time.monotonic() - started) * 1000)))
     return result
 
@@ -692,7 +767,7 @@ async def test_camera_source_update(
 async def list_camera_source_update_profiles(
     camera_id: str,
     payload: CameraSourceUpdateRequest,
-    _: Administrator,
+    user: Administrator,
 ) -> dict[str, object]:
     if not payload.camera_ip:
         raise HTTPException(status_code=422, detail="Enter the camera IP address before loading ONVIF profiles")
@@ -700,11 +775,14 @@ async def list_camera_source_update_profiles(
     if current is None:
         raise HTTPException(status_code=404, detail="Camera not found")
     payload = _reuse_source_credentials(current, payload)
+    allowed = public_permission(payload, user)
+    await check_destinations(payload, allow_public=allowed)
     try:
-        service_url, profiles = await list_camera_stream_profiles(
-            payload.camera_ip, payload.camera_username or "", payload.camera_password or "",
-            payload.device_service_url, payload.camera_brand,
-        )
+        with camera_destination.public_permitted(allowed):
+            service_url, profiles = await list_camera_stream_profiles(
+                payload.camera_ip, payload.camera_username or "", payload.camera_password or "",
+                payload.device_service_url, payload.camera_brand,
+            )
     except (OSError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"device_service_url": service_url, "profiles": [profile.__dict__ for profile in profiles]}
@@ -717,25 +795,30 @@ async def update_camera_source(
     request: Request,
     user: Administrator,
 ) -> dict[str, object]:
-    current = await asyncio.to_thread(read_one, "SELECT camera_ip,stream_url_ciphertext,device_service_url,motion_service_url,motion_credentials_ciphertext FROM cameras WHERE id=?", (camera_id,))
+    current = await asyncio.to_thread(read_one, "SELECT camera_ip,stream_url_ciphertext,device_service_url,motion_service_url,motion_credentials_ciphertext,public_address "
+                                                "FROM cameras WHERE id=?", (camera_id,))
     if current is None:
         raise HTTPException(status_code=404, detail="Camera not found")
 
     entered = (payload.camera_username, payload.camera_password) if payload.camera_ip and payload.camera_username and payload.camera_password else None
     payload = _reuse_source_credentials(current, payload)
+    # A new source at a public address needs the tick, whatever the camera had before, one kept from before the rule (grandfathered) too (#474)
+    allowed = public_permission(payload, user)
+    public = await check_destinations(payload, allow_public=allowed)
 
-    try:
-        stream_url, resolved_service_url = await _resolve_camera_source(payload)
-        safe_stream_url(stream_url)
-    except (ValueError, HTTPException) as exc:
-        if isinstance(exc, HTTPException):
-            raise
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    capability = await probe_stream(stream_url)
-    if not capability.get("reachable"):
-        raise HTTPException(status_code=422, detail=str(capability.get("reason", "Camera stream could not be opened")))
+    with camera_destination.public_permitted(allowed):
+        try:
+            stream_url, resolved_service_url = await _resolve_camera_source(payload)
+            safe_stream_url(stream_url)
+        except (ValueError, HTTPException) as exc:
+            if isinstance(exc, HTTPException):
+                raise
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        capability = await probe_stream(stream_url)
+        if not capability.get("reachable"):
+            raise HTTPException(status_code=422, detail=str(capability.get("reason", "Camera stream could not be opened")))
 
-    live_substream_url = await _check_live_substream(payload, resolved_service_url, capability) if payload.live_substream_profile_token else None
+        live_substream_url = await _check_live_substream(payload, resolved_service_url, capability) if payload.live_substream_profile_token else None
 
     selected_service_url = resolved_service_url or payload.device_service_url
     # The saved ONVIF login goes only where it has gone before (#472). An ONVIF address on another host takes the login entered with this
@@ -749,6 +832,9 @@ async def update_camera_source(
                 db.execute("UPDATE cameras SET motion_credentials_ciphertext=? WHERE id=?",
                            (encrypt(json.dumps({"username": entered[0], "password": entered[1]}, separators=(",", ":"))) if entered else None, camera_id))
             audit_record(db, user.id, "camera_source_changed", "camera", camera_id, device_host=new_host, onvif_login=onvif_login)
+            if public:
+                audit_record(db, user.id, "camera_public_address_allowed", "camera", camera_id, change="source", before=current["public_address"])
+            db.execute("UPDATE cameras SET public_address=? WHERE id=?", ("allowed" if public else None, camera_id))
             request_mask_check(db, camera_id)  # A new source or login: ask the camera for its privacy masks at the next pass (#468)
             db.execute(
                 "UPDATE cameras SET camera_ip=?,camera_brand=?,device_service_url=?,onvif_profile_token=?,live_substream_profile_token=?,"
@@ -842,17 +928,21 @@ async def rotate_camera_credentials(
     camera_id: str,
     payload: CameraCredentialRotateRequest,
     request: Request,
-    _: Administrator,
+    user: Administrator,
 ) -> dict[str, object]:
-    try:
-        stream_url, _ = await _resolve_camera_source(payload)
-        safe_stream_url(stream_url)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    camera = await asyncio.to_thread(read_one, "SELECT id,recording_mode FROM cameras WHERE id=?", (camera_id,))
-    if camera is None:
-        raise HTTPException(status_code=404, detail="Camera not found")
-    capability = await probe_stream(stream_url)
+    # The request carries a whole source, so it is held to the rule as a source change is: a public address needs the tick (#474)
+    allowed = public_permission(payload, user)
+    public = await check_destinations(payload, allow_public=allowed)
+    with camera_destination.public_permitted(allowed):
+        try:
+            stream_url, _ = await _resolve_camera_source(payload)
+            safe_stream_url(stream_url)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        camera = await asyncio.to_thread(read_one, "SELECT id,recording_mode FROM cameras WHERE id=?", (camera_id,))
+        if camera is None:
+            raise HTTPException(status_code=404, detail="Camera not found")
+        capability = await probe_stream(stream_url)
     if not capability.get("reachable"):
         raise HTTPException(status_code=422, detail=str(capability.get("reason", "Updated camera stream could not be opened")))
     video = capability["video"]
@@ -862,6 +952,9 @@ async def rotate_camera_credentials(
                 "UPDATE cameras SET stream_url_ciphertext=?,live_substream_url_ciphertext=NULL,audio_supported=?,audio_enabled=CASE WHEN ?=0 THEN 0 ELSE audio_enabled END,video_codec=?,video_width=?,video_height=?,last_probe_at=?,last_error=NULL,updated_at=? WHERE id=?",
                 (encrypt(stream_url), int(bool(capability.get("audio"))), int(bool(capability.get("audio"))), video["codec"], video["width"], video["height"], datetime.now(timezone.utc).isoformat(), datetime.now(timezone.utc).isoformat(), camera_id),
             )
+            db.execute("UPDATE cameras SET public_address=? WHERE id=?", ("allowed" if public else None, camera_id))
+            if public:
+                audit_record(db, user.id, "camera_public_address_allowed", "camera", camera_id, change="credentials")
             request_mask_check(db, camera_id)  # New login: ask the camera for its privacy masks at the next pass (#468)
 
     await asyncio.to_thread(save)
@@ -875,11 +968,12 @@ async def probe_camera_audio(
     request: Request,
     user: Administrator,
 ) -> dict[str, object]:
-    camera = await asyncio.to_thread(read_one, "SELECT stream_url_ciphertext,audio_enabled FROM cameras WHERE id=?", (camera_id,))
+    camera = await asyncio.to_thread(read_one, "SELECT stream_url_ciphertext,audio_enabled,public_address FROM cameras WHERE id=?", (camera_id,))
     if camera is None:
         raise HTTPException(status_code=404, detail="Camera not found")
     try:
-        capability = await probe_stream(decrypt(camera["stream_url_ciphertext"]))
+        with camera_destination.public_permitted(camera_destination.camera_allows_public(camera)):  # The camera address rule (#474)
+            capability = await probe_stream(decrypt(camera["stream_url_ciphertext"]))
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=503, detail="Camera stream configuration is unavailable") from exc
     if not capability.get("reachable"):
@@ -909,6 +1003,12 @@ async def configure_motion_source(
     credentials_supplied = payload.username is not None or payload.password is not None
     if credentials_supplied and bool(payload.username) != bool(payload.password):
         raise HTTPException(status_code=422, detail="Provide both ONVIF motion username and password")
+    if payload.service_url:
+        # The event address is held to the camera address rule (#474), with the camera's own permission for a public address
+        camera = await asyncio.to_thread(read_one, "SELECT public_address FROM cameras WHERE id=?", (camera_id,))
+        if camera is None:
+            raise HTTPException(status_code=404, detail="Camera not found")
+        await check_destinations(SimpleNamespace(motion_service_url=payload.service_url), allow_public=camera_destination.camera_allows_public(camera))
     def save():
         with connect() as db:
             row = db.execute("SELECT recording_mode,recording_enabled,motion_service_url,motion_fallback_enabled,motion_zones_json,motion_sensitivity,motion_pre_roll_seconds,motion_post_roll_seconds,"

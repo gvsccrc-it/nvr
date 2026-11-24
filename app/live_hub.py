@@ -21,7 +21,7 @@ import struct
 from dataclasses import dataclass, field
 from typing import Callable, Iterator
 
-from . import acceleration
+from . import acceleration, camera_destination
 from .processes import end_process
 from .recording import _PROTOCOLS, _manifest_bytes
 
@@ -222,8 +222,11 @@ class SinkViewer(Viewer):
 class LiveStream:
     def __init__(self, key: tuple[str, ...], source: str, include_audio: bool,
                  on_fragment: Callable[[], None] | None = None, video_filter: str | None = None,
-                 transcode: bool = False, hevc_copy: bool = False) -> None:
+                 transcode: bool = False, hevc_copy: bool = False, allow_public: bool | None = None) -> None:
         self.key = key
+        # The camera may be at a public address (#474); unset, as the caller's ``camera_destination.public_permitted`` says
+        self.allow_public = camera_destination.permitted() if allow_public is None else allow_public
+        self._target = source  # The address FFmpeg is given: the source with its host replaced by the checked address (``_run``)
         # A privacy mask: the video is transcoded with it drawn in, instead of passed through.
         self.video_filter = video_filter
         # Converted to H.264 for a browser that cannot play the camera's H.265; or passed through as H.265 (tagged so Safari plays it).
@@ -372,6 +375,11 @@ class LiveStream:
         try:
             if not executable:
                 raise RuntimeError("Live video is unavailable because FFmpeg is missing")
+            try:
+                # Checked by the camera address rule, and FFmpeg given the checked address rather than a name it could look up again (#474)
+                self._target = await camera_destination.apin_url(self.source, allow_public=self.allow_public)
+            except OSError:
+                raise RuntimeError("The camera's host name could not be looked up") from None
             hardware = self.converts and acceleration.selected() is not None
             try:
                 await self._session(executable, hardware)
@@ -410,7 +418,7 @@ class LiveStream:
             self.connections += 1
             self._stage("spawned_ms")
             assert self.process.stdin and self.process.stdout
-            self.process.stdin.write(_manifest_bytes(self.source))
+            self.process.stdin.write(_manifest_bytes(self._target))
             await self.process.stdin.drain()
             self.process.stdin.close()
             fragmenter = Fragmenter()

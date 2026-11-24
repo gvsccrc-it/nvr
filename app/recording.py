@@ -27,7 +27,7 @@ from .motion import MotionClipAssembler
 from .onvif_events import CameraMotionEvent, subscribe_and_pull
 from .server_motion import FRAME_HEIGHT, FRAME_WIDTH, FrameMotionDetector
 from .scheduling import effective_policy
-from . import camera_health, coverage, metrics, security_log, tamper, viewing_audit
+from . import camera_destination, camera_health, coverage, metrics, security_log, tamper, viewing_audit
 from .health import recording_health
 from .incidents import sync_incident, sync_storage_incidents
 
@@ -192,8 +192,16 @@ def masked_stream_url(raw: str) -> str:
     return urlunsplit((parsed.scheme, host, "", "", ""))
 
 
-async def probe_stream(raw: str, timeout_seconds: float = 8.0) -> dict[str, object]:
+async def probe_stream(raw: str, timeout_seconds: float = 8.0, *, allow_public: bool | None = None) -> dict[str, object]:
+    """Open a stream and say what it carries. The address is checked and FFmpeg given the checked one (#474); ``allow_public``: the camera may
+    be at a public address (unset: as ``camera_destination.public_permitted`` says)."""
     source = safe_stream_url(raw)
+    try:
+        source = await camera_destination.apin_url(source, allow_public=allow_public)
+    except camera_destination.RefusedDestination as exc:
+        return {"reachable": False, "reason": str(exc)}
+    except OSError:
+        return {"reachable": False, "reason": "The camera's host name could not be looked up"}
     executable = shutil.which("ffprobe")
     if not executable:
         return {"reachable": False, "reason": "Media probe is unavailable"}
@@ -924,6 +932,12 @@ class RecordingManager:
             with connect() as db:
                 db.execute("UPDATE cameras SET recording_status='failed',motion_source_status='configuration_error',last_error='Camera credentials are unavailable' WHERE id=?", (camera_id,))
             return None
+        try:
+            source = camera_destination.pin_url(source, allow_public=camera_destination.camera_allows_public(row))  # The checked address (#474)
+        except camera_destination.RefusedDestination as exc:
+            with connect() as db:
+                db.execute("UPDATE cameras SET recording_status='failed',motion_source_status='configuration_error',last_error=?,stream_fault='stream_error' WHERE id=?", (str(exc), camera_id))
+            return None
         return executable, source, credentials
 
     async def _run_motion(self, camera_id: str) -> bool:
@@ -932,7 +946,12 @@ class RecordingManager:
             await self._status(camera_id, "stopped")
             return False
         fallback_enabled = bool(row["motion_fallback_enabled"])
-        inputs = await asyncio.to_thread(self._motion_inputs, camera_id, row)  # It writes the camera's status when it cannot start
+        try:
+            inputs = await asyncio.to_thread(self._motion_inputs, camera_id, row)  # It writes the camera's status when it cannot start
+        except OSError:  # The camera's host name could not be looked up: like a camera that does not answer, tried again
+            await _write_camera("UPDATE cameras SET recording_status='reconnecting',last_error=?,stream_fault='camera_offline' WHERE id=?",
+                                ("The camera's host name could not be looked up; retrying", camera_id))
+            return True
         if inputs is None:
             return False
         executable, source, credentials = inputs
@@ -979,7 +998,8 @@ class RecordingManager:
 
             if row["motion_service_url"]:
                 event_task = asyncio.create_task(
-                    subscribe_and_pull(row["motion_service_url"], credentials.get("username", ""), credentials.get("password", ""), on_event, source_status, on_detail=source_detail),
+                    subscribe_and_pull(row["motion_service_url"], credentials.get("username", ""), credentials.get("password", ""), on_event, source_status, on_detail=source_detail,
+                                       allow_public=camera_destination.camera_allows_public(row)),
                     name=f"onvif-events-{camera_id}",
                 )
             else:
@@ -1113,7 +1133,13 @@ class RecordingManager:
         except Exception:
             self._set_status(camera_id, "failed", "Camera credentials are unavailable", fault="stream_error")
             return None
-        return source
+        try:
+            # FFmpeg is given the checked address, never a name it could look up again to somewhere else (#474). A name that cannot be
+            # looked up raises OSError: the camera is tried again, as one that does not answer is.
+            return camera_destination.pin_url(source, allow_public=camera_destination.camera_allows_public(row))
+        except camera_destination.RefusedDestination as exc:
+            self._set_status(camera_id, "failed", str(exc), fault="stream_error")
+            return None
 
     async def _end_ffmpeg(self, process: asyncio.subprocess.Process | None) -> None:
         """Ask FFmpeg to stop, and kill it if it has not within five seconds."""
@@ -1237,7 +1263,13 @@ class RecordingManager:
             if row is None or not row["enabled"] or not row["recording_enabled"] or self._desired_mode(camera_id) != expected_mode:
                 await self._status(camera_id, "stopped")
                 return
-            source = await asyncio.to_thread(self._continuous_source, camera_id, row)  # It writes the camera's status when the source cannot be used
+            try:
+                source = await asyncio.to_thread(self._continuous_source, camera_id, row)  # It writes the camera's status when the source cannot be used
+            except OSError:
+                failures += 1
+                await self._status(camera_id, "reconnecting", "The camera's host name could not be looked up; retrying", fault="camera_offline")
+                await asyncio.sleep(reconnect_delay(failures))
+                continue
             if source is None:
                 return
             try:

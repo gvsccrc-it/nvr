@@ -3,9 +3,9 @@ import { api, apiLines, ApiError } from "@/api/client";
 import { failureText } from "../../tabDraft";
 
 /** The login and address entered for a camera. It lives only in the form that holds it, never in storage. */
-export interface QuickConnection { host: string; username: string; password: string; endpoint: string; brand: CameraBrand }
+export interface QuickConnection { host: string; username: string; password: string; endpoint: string; brand: CameraBrand; public_address?: boolean }
 
-export const EMPTY_QUICK: QuickConnection = { host: "", username: "", password: "", endpoint: "", brand: "auto" };
+export const EMPTY_QUICK: QuickConnection = { host: "", username: "", password: "", endpoint: "", brand: "auto", public_address: false };
 
 export const CAPABILITY_LABEL: Record<string, string> = {
   discovery: "Camera found", authentication: "Login", video: "Video", audio: "Audio", motion: "Motion events", ptz: "PTZ",
@@ -38,6 +38,7 @@ export async function inspectCamera(connection: QuickConnection, onSteps: (steps
   await apiLines("/api/cameras/inspect/stream", {
     host: address.host, username: value(connection.username), password: connection.password || null,
     device_service_url: value(connection.endpoint) ?? address.endpoint, camera_brand: connection.brand, verify_video: verifyVideo,
+    public_address: Boolean(connection.public_address),
   }, line => {
     const update = line as { type: string; steps?: InspectStep[]; step?: InspectStep; report?: InspectReport; detail?: string };
     if (update.type === "steps" && update.steps) steps = update.steps;
@@ -78,6 +79,7 @@ export async function saveChecked(connection: QuickConnection, report: InspectRe
       onvif_profile_token: selection?.record_token ?? null,
       live_substream_profile_token: selection?.live_token && selection.live_verified !== false ? selection.live_token : null,
       recording_mode: "motion", recording_enabled: recording && report.ok, save_anyway: !report.ok,
+      public_address: Boolean(connection.public_address),
     },
   });
 }
