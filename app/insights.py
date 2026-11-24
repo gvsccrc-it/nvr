@@ -130,31 +130,78 @@ def counts(db: sqlite3.Connection, cameras: dict[str, str], start: datetime, end
 
     zones = track_privacy.zones_by_camera(db, ids)  # What a privacy mask hides is not counted, followed or mapped (#296)
     permitted, permitted_values = track_privacy.detection_visible_sql(zones, "d")
+    # Quarter hours wholly inside one bucket whose totals are current are added up from the totals (#515); the rest of the range (its ends,
+    # the last hour or so, hours not worked out yet) is read from the tracks and detections. Either way gives the same counts.
+    from . import insight_totals
+
+    prints = {camera_id: insight_totals.fingerprint([rule for rule, _ in defined[camera_id]], zones.get(camera_id, [])) for camera_id in ids}
+    current = insight_totals.worked_out(db, prints, insight_totals.floor_units(start, insight_totals.HOUR_SECONDS),
+                                        insight_totals.floor_units(end, insight_totals.HOUR_SECONDS))
     for camera_id in ids:
-        # A track that began before the range can still enter a zone or cross a line inside it, so those are found from every track that overlaps the range.
-        visible, visible_values = track_privacy.track_visible_sql(zones, alias="t", window=(_iso(start), _iso(end)))
         own = series[f"camera:{camera_id}"]
-        watched = set().union(*(rule.classes for rule, _ in defined[camera_id])) if defined[camera_id] else set()
-        # The range can be a quarter of a year on a busy camera. Tracks are taken a batch at a time and each path is fed to the zones and
-        # lines point by point as it is read, so what is held is one batch of track ids, never the paths (#351).
-        cursor = db.execute(f"SELECT t.id,t.label,t.first_seen_at FROM ai_tracks t WHERE t.camera_id=? AND t.last_seen_at>=? AND t.first_seen_at<? AND {visible} ORDER BY t.first_seen_at",
-                            (camera_id, _iso(start), _iso(end), *visible_values))
-        while batch := cursor.fetchmany(CHUNK):
-            tracks = [row for row in batch if row["label"] in labels]
-            for row in tracks:
-                position = index(_parse(row["first_seen_at"]))  # a camera's count is the tracks that began in the hour
-                if position is not None:
-                    own[position][LABELS.index(row["label"])] += 1
-            label_of = {row["id"]: row["label"] for row in tracks if row["label"] in watched}  # only the paths a rule could use are read
-            if not label_of:
-                continue
-            _count_moments(db, list(label_of), label_of, defined[camera_id], index, permitted, permitted_values)
+        bucket_of = _whole_slots(spans, start, end, current[camera_id])
+        insight_totals.add_counts(db, camera_id, bucket_of, own, defined[camera_id], labels, end)
+        rest = insight_totals.gaps(start, end, bucket_of, insight_totals.SLOT_SECONDS)
+        _count_rows(db, camera_id, rest, start, end, labels, index, own, defined[camera_id], zones, permitted, permitted_values)
 
     analysed = _analysed_intervals(db, ids, start, end)
     coverage = {camera_id: [_analysed_percent(analysed[camera_id], begin, finish, now) for begin, finish in spans] for camera_id in ids}
     return {"unit": unit, "time_zone": zone.key, "labels": list(LABELS), "shown_labels": labels,
             "buckets": [{"start": _iso(begin), "end": _iso(finish)} for begin, finish in spans],
             "subjects": subjects, "counts": series, "analysed": coverage, "coverage": search.coverage(db, cameras, start, min(end, now))}
+
+
+def _whole_slots(spans: list[tuple[datetime, datetime]], start: datetime, end: datetime, hours: set[int]) -> dict[int, int]:
+    """The quarter hours of current hours that lie wholly inside [start, end) and inside one bucket, each with its bucket's position."""
+    from . import insight_totals
+
+    found: dict[int, int] = {}
+    if not hours:
+        return found
+    for position, (begin, finish) in enumerate(spans):
+        first = insight_totals.ceil_units(max(begin, start), insight_totals.SLOT_SECONDS)
+        last = insight_totals.floor_units(min(finish, end), insight_totals.SLOT_SECONDS)
+        for slot in range(first, last):
+            if slot // 4 in hours:
+                found[slot] = position
+    return found
+
+
+def _count_rows(db: sqlite3.Connection, camera_id: str, parts: list[tuple[datetime, datetime]], start: datetime, end: datetime, labels: list[str], index,
+                own: list[list[int]], defined: list[tuple[rules.Rule, list[list[int]]]], zones: track_privacy.Zones, permitted: str, permitted_values) -> None:
+    """Count from the stored tracks and detections what happened in these parts of [start, end): each track in the bucket it began in, and
+    each moment a track meets a zone or line in the bucket it happened in."""
+    if not parts:
+        return
+    starts = [part[0] for part in parts]
+
+    def part_index(moment: datetime) -> int | None:
+        position = bisect.bisect_right(starts, moment) - 1
+        return index(moment) if position >= 0 and moment < parts[position][1] else None
+
+    # A track that began before the range can still enter a zone or cross a line inside it, so those are found from every track that overlaps
+    # the part; a track counts only when a mask leaves some of it visible inside the whole range.
+    visible, visible_values = track_privacy.track_visible_sql(zones, alias="t", window=(_iso(start), _iso(end)))
+    watched = set().union(*(rule.classes for rule, _ in defined)) if defined else set()
+    read: set[str] = set()
+    for begin, finish in parts:
+        # The range can be a quarter of a year on a busy camera. Tracks are taken a batch at a time and each path is fed to the zones and
+        # lines point by point as it is read, so what is held is one batch of track ids, never the paths (#351). Only the tracks that can
+        # reach the part are read, through the (camera, first seen) index (#515).
+        cursor = db.execute(f"SELECT t.id,t.label,t.first_seen_at FROM ai_tracks t WHERE t.camera_id=? AND t.first_seen_at>=? AND t.first_seen_at<? "
+                            f"AND t.last_seen_at>=? AND {visible} ORDER BY t.first_seen_at",
+                            (camera_id, search.began_since(db, [camera_id], begin), _iso(finish), _iso(begin), *visible_values))
+        while batch := cursor.fetchmany(CHUNK):
+            tracks = [row for row in batch if row["label"] in labels and row["id"] not in read]  # a track reaching two parts is read once
+            read.update(row["id"] for row in tracks)
+            for row in tracks:
+                position = part_index(_parse(row["first_seen_at"]))  # a camera's count is the tracks that began in the hour
+                if position is not None:
+                    own[position][LABELS.index(row["label"])] += 1
+            label_of = {row["id"]: row["label"] for row in tracks if row["label"] in watched}  # only the paths a rule could use are read
+            if not label_of:
+                continue
+            _count_moments(db, list(label_of), label_of, defined, part_index, permitted, permitted_values)
 
 
 def _count_moments(db: sqlite3.Connection, track_ids: list[str], label_of: dict[str, str], defined: list[tuple[rules.Rule, list[list[int]]]],
@@ -216,21 +263,34 @@ def to_csv(report: dict[str, object]) -> str:
 def heatmap(db: sqlite3.Connection, camera_id: str, camera_name: str, start: datetime, end: datetime, *, label: str | None = None,
             now: datetime | None = None) -> dict[str, object]:
     """Where objects were over the period: how many times an object's centre was sampled in each cell of a 32 x 18 grid of the frame."""
+    from . import insight_totals
+
     now = now or datetime.now(timezone.utc)
-    clauses, values = ["d.camera_id=?", "d.detected_at>=?", "d.detected_at<?"], [camera_id, _iso(start), _iso(end)]
-    if label:
-        clauses.append("t.label=?")
-        values.append(label)
-    permitted, permitted_values = track_privacy.detection_visible_sql(track_privacy.zones_by_camera(db, [camera_id]), "d")  # A masked cell stays empty (#296)
-    clauses.append(permitted)
-    values.extend(permitted_values)
+    zones = track_privacy.zones_by_camera(db, [camera_id])  # A masked cell stays empty (#296)
+    permitted, permitted_values = track_privacy.detection_visible_sql(zones, "d")
+    # Whole hours whose totals are current are added up from the totals (#515); the rest of the range is read from the detections.
+    rules_on = [entry["rule"] for entry in definitions(db, [camera_id])]
+    current = insight_totals.worked_out(db, {camera_id: insight_totals.fingerprint(rules_on, zones.get(camera_id, []))},
+                                        insight_totals.floor_units(start, insight_totals.HOUR_SECONDS), insight_totals.floor_units(end, insight_totals.HOUR_SECONDS))[camera_id]
+    hours = {hour for hour in range(insight_totals.ceil_units(start, insight_totals.HOUR_SECONDS), insight_totals.floor_units(end, insight_totals.HOUR_SECONDS))
+             if hour in current}
     cells = [[0] * HEAT_COLUMNS for _ in range(HEAT_ROWS)]
-    for row in db.execute(
-        f"SELECT min(CAST((d.box_x+d.box_width/2)*{HEAT_COLUMNS} AS INTEGER),{HEAT_COLUMNS - 1}) AS column,"
-        f"min(CAST((d.box_y+d.box_height/2)*{HEAT_ROWS} AS INTEGER),{HEAT_ROWS - 1}) AS row,SUM(d.stands_for) AS samples "  # A thinned row counts the frames it stands for (#512)
-        f"FROM ai_detections d JOIN ai_tracks t ON t.id=d.track_id WHERE {' AND '.join(clauses)} GROUP BY column,row", values):
-        cells[row["row"]][row["column"]] = row["samples"]
-    tracks = db.execute(f"SELECT COUNT(DISTINCT d.track_id) FROM ai_detections d JOIN ai_tracks t ON t.id=d.track_id WHERE {' AND '.join(clauses)}", values).fetchone()[0]
+    seen = insight_totals.add_heat(db, camera_id, hours, label, cells)
+    for begin, finish in insight_totals.gaps(start, end, hours, insight_totals.HOUR_SECONDS):
+        clauses, values = ["d.camera_id=?", "d.detected_at>=?", "d.detected_at<?"], [camera_id, _iso(begin), _iso(finish)]
+        if label:
+            clauses.append("t.label=?")
+            values.append(label)
+        clauses.append(permitted)
+        values.extend(permitted_values)
+        for row in db.execute(
+            f"SELECT min(CAST((d.box_x+d.box_width/2)*{HEAT_COLUMNS} AS INTEGER),{HEAT_COLUMNS - 1}) AS column,"
+            f"min(CAST((d.box_y+d.box_height/2)*{HEAT_ROWS} AS INTEGER),{HEAT_ROWS - 1}) AS row,SUM(d.stands_for) AS samples "  # A thinned row counts the frames it stands for (#512)
+            f"FROM ai_detections d JOIN ai_tracks t ON t.id=d.track_id WHERE {' AND '.join(clauses)} GROUP BY column,row", values):
+            cells[row["row"]][row["column"]] += row["samples"]
+        seen.append((f"SELECT d.track_id FROM ai_detections d JOIN ai_tracks t ON t.id=d.track_id WHERE {' AND '.join(clauses)}", values))
+    # A track seen in several parts counts once
+    tracks = db.execute(f"SELECT COUNT(DISTINCT track_id) FROM ({' UNION ALL '.join(sql for sql, _ in seen)})", [value for _, values in seen for value in values]).fetchone()[0] if seen else 0
     return {"camera_id": camera_id, "camera_name": camera_name, "columns": HEAT_COLUMNS, "rows": HEAT_ROWS, "cells": cells,
             "peak": max((max(row) for row in cells), default=0), "tracks": tracks, "label": label,
             "coverage": search.coverage(db, {camera_id: camera_name}, start, min(end, now))}

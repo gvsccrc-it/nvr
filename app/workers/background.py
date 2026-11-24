@@ -1,4 +1,4 @@
-"""The background worker: signed webhook delivery, push notifications, rule actions, PTZ tours and auto-tracking, footage signing, the nightly self-test and weekly coverage report, the weekly camera hardening checks, the recheck of failed camera capabilities, the external heartbeat, configuration backups, event digests, camera health, building-system events and Home Assistant, and the multi-site console's site health, and the failover recorder's lease, configuration copy and takeover, and the move of older footage to cold storage tiers."""
+"""The background worker: signed webhook delivery, push notifications, rule actions, PTZ tours and auto-tracking, footage signing, the nightly self-test and weekly coverage report, the weekly camera hardening checks, the recheck of failed camera capabilities, the external heartbeat, configuration backups, event digests, camera health, building-system events and Home Assistant, and the multi-site console's site health, and the failover recorder's lease, configuration copy and takeover, and the move of older footage to cold storage tiers, and the Insights and heatmap totals."""
 from __future__ import annotations
 
 from app.backup import BackupManager
@@ -11,6 +11,7 @@ from app.failover import FailoverManager
 from app.hardening import HardeningManager
 from app.heartbeat import HeartbeatManager
 from app.home_assistant import HomeAssistantManager
+from app.insight_totals import TotalsManager
 from app.push import PushManager
 from app.footage_chain import FootageChainManager
 from app.ptz import PtzTourManager
@@ -42,6 +43,7 @@ class BackgroundService:
         self.console = ConsoleManager()
         self.failover = FailoverManager()
         self.tiering = TieringManager()
+        self.insight_totals = TotalsManager()
 
     async def start(self) -> None:
         await self.webhooks.start()
@@ -62,8 +64,10 @@ class BackgroundService:
         await self.console.start()
         await self.failover.start()
         await self.tiering.start()
+        await self.insight_totals.start()
 
     async def stop(self) -> None:
+        await self.insight_totals.stop()
         await self.tiering.stop()
         await self.failover.stop()
         await self.console.stop()
