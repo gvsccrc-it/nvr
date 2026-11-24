@@ -50,3 +50,9 @@ For an older camera that can do nothing else, an administrator can tick **Allow 
 
 **The recording stream is not covered by this yet.** The NVR's recording and live video are read by FFmpeg, and FFmpeg answers a request for Basic sign-in on plain RTSP (checked with FFmpeg 6.1; see #476).
 
+## What a camera may send back
+
+A camera's answers on the talk connection are small (a session description is a few kilobytes). An answer that declares a body
+larger than 64 KiB, or a length that is not a plain number, is refused before any of it is read: the connection is closed and the
+talk ends as **camera failed**, in the talk history and the audit log like any other camera failure (#469). This keeps a faulty
+or hostile camera, or anything answering at its address, from filling the web server's memory.

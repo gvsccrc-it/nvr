@@ -34,6 +34,10 @@ SAMPLE_RATE = 8000
 FRAME_SAMPLES = 160  # 20 ms
 MAX_INPUT_BYTES = 16000  # One message from the browser: a second of audio is far more than it sends
 MAX_TALK_SECONDS = 300
+# The most a camera's RTSP answer may carry (#469). A session description is a few kilobytes; a camera, or anything answering at its address,
+# that declares more is refused before its body is read, and the talk ends as a camera failure. Without it, ``readexactly`` held whatever length was
+# declared (gigabytes, streamed for the whole talk) in the web process's memory.
+MAX_ANSWER_BYTES = 64 * 1024
 MAX_KEPT_BYTES = MAX_TALK_SECONDS * SAMPLE_RATE * 2  # The longest talk, as 16-bit samples: all that is ever kept of one
 IDLE_SECONDS = 10
 RECORDING_KEEP_DAYS = 30
@@ -48,6 +52,17 @@ class BackchannelError(Exception):
 
 class BackchannelUnsupported(BackchannelError):
     """The camera has no speaker we can send to (no backchannel, or a codec other than G.711)."""
+
+
+def answer_length(value: str | None) -> int:
+    """The body length an RTSP answer declares, refused (``ValueError``) when it is not a plain number of at most ``MAX_ANSWER_BYTES`` (#469)."""
+    text = (value or "").strip() or "0"
+    if not (text.isascii() and text.isdigit()):
+        raise ValueError(f"The camera declared an answer length that is not a number: {text[:20]!r}")
+    length = int(text)
+    if length > MAX_ANSWER_BYTES:
+        raise ValueError(f"The camera declared an answer of {length} bytes; at most {MAX_ANSWER_BYTES} are accepted")
+    return length
 
 
 class TalkBusy(Exception):
@@ -178,6 +193,7 @@ class RtspBackchannel:
         self._responses: dict[int, asyncio.Future] = {}
         self.closed = asyncio.Event()
         self.packets = 0
+        self.failure = "The camera closed the connection"  # Why the connection ended, for whoever was waiting for an answer
 
     # -- the wire
     async def _read_frames(self) -> None:
@@ -199,17 +215,21 @@ class RtspBackchannel:
                     name = key.strip().lower()
                     # A camera may offer several ways to sign in, one header each: keep them all, so Digest is chosen when it is offered
                     headers[name] = f"{headers[name]}\n{value.strip()}" if name == "www-authenticate" and name in headers else value.strip()
-                body = await reader.readexactly(int(headers.get("content-length", "0") or 0))
+                body = await reader.readexactly(answer_length(headers.get("content-length")))
                 future = self._responses.pop(int(headers.get("cseq", "0") or 0), None)
                 if future is not None and not future.done():
                     future.set_result((status, headers, body))
-        except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, ConnectionError, OSError, ValueError, IndexError):
+        except ValueError as exc:
+            self.failure = str(exc) if str(exc).startswith("The camera declared") else self.failure
+        except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, ConnectionError, OSError, IndexError):
             pass
         finally:
             self.closed.set()
+            if self._writer is not None:
+                self._writer.close()  # Nothing more is read, so nothing more is let in: the camera cannot keep filling a buffer here
             for future in self._responses.values():
                 if not future.done():
-                    future.set_exception(BackchannelError("The camera closed the connection"))
+                    future.set_exception(BackchannelError(self.failure))
 
     async def _request(self, method: str, url: str, headers: dict[str, str] | None = None, *, wait: bool = True, authorise: bool = True) -> tuple[int, dict[str, str], bytes]:
         writer = self._writer

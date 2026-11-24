@@ -19,6 +19,9 @@ import numpy as np
 REQUIRE = "www.onvif.org/ver20/backchannel"
 
 
+FLOOD_CAP = 256 * 1024 * 1024  # Where a hostile camera stops, so a test that fails does not run for ever
+
+
 def decode_ulaw(data: bytes) -> np.ndarray:
     values = (~np.frombuffer(data, dtype=np.uint8)).astype(np.int32) & 0xFF
     sign, exponent, mantissa = values & 0x80, (values >> 4) & 0x07, values & 0x0F
@@ -34,10 +37,16 @@ def decode_alaw(data: bytes) -> np.ndarray:
 
 
 class BackchannelCamera:
-    def __init__(self, *, codec: str = "PCMU", backchannel: bool = True, username: str = "", password: str = "", sign_in: str = "digest") -> None:
+    def __init__(self, *, codec: str = "PCMU", backchannel: bool = True, username: str = "", password: str = "", sign_in: str = "digest",
+                 oversized: str | None = None, declared: str = "2000000000") -> None:
         self.codec, self.backchannel = codec, backchannel
         self.sign_in = sign_in  # "digest", "basic", or "both" (Basic offered first, then Digest)
         self.username, self.password = username, password
+        # A hostile camera (#469): "describe" answers DESCRIBE, "after_play" sends an answer nobody asked for once the speaker plays, either one
+        # declaring ``declared`` as its length and then sending filler until the connection is closed (at most FLOOD_CAP bytes)
+        self.oversized, self.declared = oversized, declared
+        self.flooded = 0
+        self.flood_ended = threading.Event()
         self.requests: list[tuple[str, dict[str, str]]] = []
         self.packets: list[tuple[int, int, int, bytes, float]] = []  # payload type, sequence, timestamp, payload, arrival time
         self.sessions = 0
@@ -127,6 +136,18 @@ class BackchannelCamera:
             writer.write(("\r\n".join(lines) + "\r\n\r\n" + body).encode())
             writer.flush()
 
+        def flood(cseq: str) -> None:
+            handler.connection.settimeout(5)
+            writer.write(f"RTSP/1.0 200 OK\r\nCSeq: {cseq}\r\nContent-Type: application/sdp\r\nContent-Length: {self.declared}\r\n\r\n".encode())
+            filler = b"v" * 65536
+            try:
+                while self.flooded < FLOOD_CAP:
+                    writer.write(filler)
+                    writer.flush()
+                    self.flooded += len(filler)
+            finally:
+                self.flood_ended.set()
+
         playing = False
         try:
             while True:
@@ -156,6 +177,9 @@ class BackchannelCamera:
                     continue
                 if method == "OPTIONS":
                     respond(cseq, "200 OK", {"Public": "OPTIONS, DESCRIBE, SETUP, PLAY, TEARDOWN"})
+                elif method == "DESCRIBE" and self.oversized == "describe":
+                    flood(cseq)
+                    return
                 elif method == "DESCRIBE":
                     if REQUIRE in headers.get("require", "") and not self.backchannel:
                         respond(cseq, "551 Option not supported", {"Unsupported": REQUIRE})
@@ -168,6 +192,10 @@ class BackchannelCamera:
                 elif method == "PLAY":
                     playing = True
                     respond(cseq, "200 OK", {"Session": "8F3A1C"})
+                    if self.oversized == "after_play":
+                        time.sleep(0.3)
+                        flood("999")
+                        return
                 elif method == "TEARDOWN":
                     with self.lock:
                         self.torn_down += 1
