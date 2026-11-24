@@ -93,7 +93,7 @@ What `compose.yaml` sets, and what it does not yet. A test keeps this table in s
 | `healthcheck` | nvr (compose.yaml) | in place | Docker marks the container unhealthy when `/healthz` fails. |
 | `read_only` | nvr (compose.yaml) | add this | A read-only root filesystem. Today the application's folder (`/app`) is owned by the service user, so a compromised worker could change the code the others run. |
 | `tmpfs` | nvr (compose.yaml) | add this | With `read_only`, a temporary folder for `/tmp` (`tmpfs: ["/tmp:size=256m"]`). Move the motion buffer off `/tmp` first (`NVR_MOTION_BUFFER_PATH`), or it is held in memory. |
-| `pids_limit` | nvr (compose.yaml) | add this | A bound on processes, so a runaway cannot exhaust the host (`pids_limit: 1024`). |
+| `pids_limit` | nvr (compose.yaml) | in place | Processes and threads: 16,384 (#546), so a runaway cannot exhaust the host. Threads count: 200 cameras with server-side motion detection pass 4,096. Raise it for a larger site; never lower it. |
 | `mem_limit` | nvr (compose.yaml) | add this | See Memory above. |
 | `cap_drop` | cloudflared (compose.cloudflared.yaml) | add this | The tunnel container keeps Docker's default capabilities. |
 | `security_opt` | cloudflared (compose.cloudflared.yaml) | add this | `no-new-privileges:true`. |
@@ -111,7 +111,6 @@ Example for the NVR service, once tried:
     read_only: true
     tmpfs:
       - /tmp:size=256m
-    pids_limit: 1024
     mem_limit: 6g   # from your own measurement (Memory above)
 ```
 

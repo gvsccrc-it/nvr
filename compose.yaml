@@ -22,6 +22,11 @@ services:
       nofile:
         soft: 65536
         hard: 65536
+    # How many processes and threads the container may run at once (#546, the owner's decision: 16,384), so a runaway cannot exhaust the
+    # host. Threads count: one server-side motion detector's FFmpeg runs about 21, a recording FFmpeg 3, a converting one about 22, so
+    # 200 cameras with server-side motion detection pass 4,096. A process that cannot start a thread stops recording: raise this, never
+    # lower it, for a larger site.
+    pids_limit: 16384
     # Hardening (#384). The NVR runs as an unprivileged user and needs no Linux capabilities: all are dropped, and nothing in the
     # container can gain privileges. An init process reaps anything orphaned when a worker is killed, so no zombies are left.
     # (Disk health is the one exception: the commented cap_add below adds back only what smartctl needs.)
