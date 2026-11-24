@@ -194,6 +194,17 @@ class WhenAskedTests(ConfirmationCase):
         self.assertEqual(guard.reason, "masks")
 
 
+    def test_a_change_before_a_new_streams_first_check_still_restarts_it(self):
+        self.check()
+        started = privacy.trust_version(self.camera_id)  # Read where the stream's masking is decided, as the live routes do
+        guard = privacy.StreamGuard(principal(1, "viewer", "administrator"), self.camera_id, False, trust_version=started)
+        self.device.masks.clear()
+        self.check()  # Lost before the stream's first check
+        guard._access_checked = 0
+        self.assertFalse(guard.still_valid())
+        self.assertEqual(guard.reason, "masks")
+
+
 class AlwaysServerTests(ConfirmationCase):
     def test_off_by_default_and_when_on_the_nvr_masks_even_a_confirmed_camera(self):
         self.check()

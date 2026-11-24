@@ -88,6 +88,12 @@ def validate_zones(zones: list[dict[str, Any]]) -> list[dict[str, float]]:
     return clean
 
 
+def trust_version(camera_id: str) -> int:
+    """For a stream about to start, read with its masking (blocking: off the event loop): see ``StreamGuard``."""
+    with connect() as db:
+        return _trust_version(db, camera_id)
+
+
 def _trust_version(db: sqlite3.Connection, camera_id: str) -> int:
     row = db.execute("SELECT trust_version FROM privacy_masks WHERE camera_id=?", (camera_id,)).fetchone()
     return int(row[0]) if row else 0
@@ -225,7 +231,7 @@ class StreamGuard:
     """For an open live stream: stops it when the camera's masks or grants change, its grant lapses, or the
     viewer's access to the camera ends (re-checked every second, so an expired access grant cuts a stream at once)."""
 
-    def __init__(self, principal: Any, camera_id: str, unmasked: bool, *, carries_audio: bool = False) -> None:
+    def __init__(self, principal: Any, camera_id: str, unmasked: bool, *, carries_audio: bool = False, trust_version: int | None = None) -> None:
         self.camera_id = camera_id
         # Whether this stream carries the camera's audio: such a stream also stops when the camera's audio is turned off. Set it once the
         # stream's form is known; the generation it is compared with is taken now, so a change made in between is not missed.
@@ -237,8 +243,9 @@ class StreamGuard:
         self._access_checked = time.monotonic()
         self.generation = generation(camera_id)
         self.until: datetime | None = None
-        with connect() as db:
-            self.trust_version = _trust_version(db, camera_id)
+        # Whether the camera's own masks were trusted when this stream's masking was decided (#468). Read by the caller where it decided
+        # the masking, off the event loop; never here, where a guard may be made on the loop (#355). Without it, the first check takes it.
+        self.trust_version = trust_version
         if unmasked:
             with connect() as db:
                 grant = active_grant(db, int(principal.id), camera_id)
@@ -284,6 +291,8 @@ class StreamGuard:
                 allowed = access.can_see(self.camera_id) and db.execute("SELECT 1 FROM cameras WHERE id=?", (self.camera_id,)).fetchone() is not None
             if not allowed:
                 self.reason = self.reason or "access"
+            elif self.trust_version is None:
+                self.trust_version = _trust_version(db, self.camera_id)
             elif _trust_version(db, self.camera_id) != self.trust_version:
                 # Whether the camera's own masks are trusted changed, in the background worker (#468): start again with the right masks
                 self.reason = self.reason or "masks"
