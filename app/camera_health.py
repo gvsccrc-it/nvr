@@ -283,6 +283,13 @@ class HealthManager:
                 raise
             except Exception:
                 logger.exception("Camera health sampling failed")
+            try:
+                from .privacy_check import check_due
+                await check_due()  # Cameras that apply their own privacy masks are asked whether they still hold them (#468)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Privacy mask confirmation failed")
             await asyncio.sleep(self.poll_seconds)
 
 

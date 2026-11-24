@@ -376,7 +376,7 @@ def live_camera(
         zones = privacy.zones_for(user, camera_id, unmasked=unmasked)
     except privacy.UnmaskedRefused as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
-    guard = privacy.StreamGuard(user, camera_id, unmasked)
+    guard = privacy.StreamGuard(user, camera_id, unmasked, trust_version=privacy.trust_version(camera_id))
     if not shutil.which("ffmpeg"):
         raise HTTPException(status_code=503, detail="Live video transcoding is unavailable")
     identity = identity_of(user)
@@ -487,7 +487,7 @@ def _admit(websocket: WebSocket, camera_id: str, unmasked: bool) -> "_Refusal | 
         zones = privacy.zones_for(principal, camera_id, unmasked=unmasked)
     except privacy.UnmaskedRefused as exc:
         return _Refusal(CLOSE_FORBIDDEN, {"type": "forbidden", "detail": str(exc)})
-    return principal, camera, zones, privacy.StreamGuard(principal, camera_id, unmasked)
+    return principal, camera, zones, privacy.StreamGuard(principal, camera_id, unmasked, trust_version=privacy.trust_version(camera_id))
 
 
 def _source_for(camera: Any, variant: Any, fallback: str) -> "str | _Refusal":

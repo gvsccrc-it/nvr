@@ -24,6 +24,26 @@ Exports made before a camera's masks were set or changed can no longer be downlo
 
 Masks are filled black, rounded outwards to whole pixels so no edge of a masked area shows.
 
+## A camera that applies its own masks
+
+Where the camera accepts ONVIF privacy masks, the NVR trusts it to apply them only while it can confirm them (#468). It asks the camera
+for its masks (ONVIF `GetMasks`) on every camera health pass (every 10 minutes), when the camera's stream reconnects, and when the camera's
+source or ONVIF login is saved.
+
+- **The masks are missing or different** (a factory reset, a firmware update, someone editing the camera, a different camera at the same
+  address): the NVR draws them itself from that moment, live and on everything it sends, and raises a **Privacy masks** incident.
+- **The camera could not be asked for 15 minutes**: the same. While it cannot be asked it is asked again every few minutes, so the
+  15 minutes hold; a camera that is just restarting is not treated as having lost its masks.
+- **Confirmed again**: the NVR trusts the camera again and the incident recovers.
+- **Footage recorded while the masks were unconfirmed** is masked by the NVR on the way out (playback, exports, pictures), by the time it
+  was recorded. That span starts at the last confirmation, because nobody knows when between two checks the masks went.
+- Open live streams of the camera restart when this changes, so nobody is left watching an unmasked stream.
+
+The camera's **Privacy** tab says when the masks were last confirmed on the camera, or since when they have not been.
+**Always mask on the NVR as well** (administrators, per camera, off by default) makes the NVR draw the masks itself even while the camera's
+own are confirmed, for a camera where both are wanted. It re-encodes the camera's live video for every masked view, which is why it is off
+by default.
+
 ## Seeing unmasked footage
 
 Only an administrator, signed in themselves (never through an API token), can see unmasked footage:
@@ -50,8 +70,9 @@ Not yet covered, and listed on the ticket: the daily digests' counts, the box ke
 
 | Method | Path | Who | What |
 |---|---|---|---|
-| `GET` | `/api/cameras/{id}/privacy` | signed in | `{zones, camera_side, camera_masked_since, recordings, server_enforced, unmasked_until}` |
+| `GET` | `/api/cameras/{id}/privacy` | signed in | `{zones, camera_side, camera_masked_since, recordings, server_enforced, unmasked_until, confirmed_at, checked_at, unreachable_since, unconfirmed_since, unconfirmed_reason, always_server}` |
 | `PUT` | `/api/cameras/{id}/privacy` | administrator | `{zones: [{x, y, width, height}]}` from 0 to 1, top left first, up to 8 |
+| `PUT` | `/api/cameras/{id}/privacy/always-server` | administrator | `{enabled}`: **Always mask on the NVR as well**. Audited |
 | `POST` | `/api/cameras/{id}/privacy/unmasked` | administrator (session) | `{reason}`. Returns `{expires_at}` |
 | `DELETE` | `/api/cameras/{id}/privacy/unmasked` | signed in | End your own unmasked viewing of the camera now |
 

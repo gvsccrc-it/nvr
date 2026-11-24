@@ -19,6 +19,13 @@ interface Privacy {
   recordings: string;
   server_enforced: boolean;
   unmasked_until: string | null;
+  /** When the camera last answered with these masks (#468); null when it never has. */
+  confirmed_at: string | null;
+  /** Since when the camera's masks have not been confirmed, so the NVR masks the picture itself; null while they are. */
+  unconfirmed_since: string | null;
+  unconfirmed_reason: "missing" | "unreachable" | null;
+  /** "Always mask on the NVR as well": off by default. */
+  always_server: boolean;
 }
 
 const CAMERA_SIDE: Record<Privacy["camera_side"], string> = {
@@ -65,6 +72,25 @@ export function PrivacyTab({ camera, admin }: { camera: Camera; admin: boolean }
       <form aria-label="Privacy masks" noValidate onSubmit={event => { event.preventDefault(); void tab.save(); }}>
         <p className="notice" role="note" data-tone={data.zones.length && data.camera_side !== "applied" ? "warn" : undefined}>{data.recordings}</p>
         {data.zones.length ? <p className="muted field-hint">{CAMERA_SIDE[data.camera_side]}</p> : null}
+        {data.zones.length && data.camera_side === "applied" ? (
+          <p className="notice" role="status" data-tone={data.unconfirmed_since ? "bad" : undefined} data-testid="mask-confirmation">
+            {data.unconfirmed_since
+              ? `${data.unconfirmed_reason === "unreachable" ? "The camera could not be asked for its masks" : "The camera no longer holds these masks"}. The NVR is masking the picture itself, and footage recorded since ${when(data.unconfirmed_since)}.`
+              : data.confirmed_at ? `Last confirmed on the camera ${when(data.confirmed_at)}.` : "Not yet confirmed on the camera."}
+          </p>
+        ) : null}
+        {admin ? (
+          <label className="check">
+            <input type="checkbox" checked={data.always_server} onChange={event => {
+              const enabled = event.target.checked;
+              void api<Privacy>(at(camera.id, "/always-server"), { method: "PUT", body: { enabled } })
+                .then(saved => client.setQueryData(queryKey, { ...saved, unmasked_until: data.unmasked_until }))
+                .catch(error => setGrantError(failureText(error)));
+            }} />
+            Always mask on the NVR as well
+            <span className="muted field-hint"> Even while the camera's own masks are confirmed. Costs processing for each view of this camera.</span>
+          </label>
+        ) : null}
         <fieldset className="field-group" disabled={!admin}>
           <legend>Masked areas</legend>
           <ZoneEditor cameraId={camera.id} zones={tab.draft.zones} onChange={zones => tab.change({ zones })} label="Masked area" readOnly={!admin}
